@@ -1,8 +1,12 @@
 use crate::error::{AppError, AppResult};
 use serde::Serialize;
 use serde_json::{Value, json};
+#[cfg(target_os = "macos")]
+use std::path::Path;
 use std::{
     collections::HashMap,
+    ffi::OsString,
+    path::PathBuf,
     process::Stdio,
     sync::{
         Arc,
@@ -15,6 +19,122 @@ use tokio::{
     sync::{Mutex, RwLock, broadcast, oneshot},
     time::{Duration, timeout},
 };
+
+#[derive(Clone, Debug)]
+struct CodexCommand {
+    program: PathBuf,
+    path: Option<OsString>,
+}
+
+impl CodexCommand {
+    #[cfg(not(target_os = "macos"))]
+    fn inherited() -> Self {
+        Self {
+            program: PathBuf::from("codex"),
+            path: None,
+        }
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        if let Some(path) = &self.path {
+            command.env("PATH", path);
+        }
+        command
+    }
+}
+
+async fn resolve_codex_command() -> Option<CodexCommand> {
+    #[cfg(target_os = "macos")]
+    {
+        let path = macos_command_path().await;
+        executable_in_path(&path, "codex").map(|program| CodexCommand {
+            program,
+            path: Some(path),
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(CodexCommand::inherited())
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn macos_command_path() -> OsString {
+    let mut directories = Vec::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        append_path_directories(&mut directories, &path);
+    }
+    if let Some(path) = login_shell_path().await {
+        append_path_directories(&mut directories, &path);
+    }
+    if let Some(home) = dirs_next::home_dir() {
+        append_unique(&mut directories, home.join(".local/bin"));
+        append_unique(&mut directories, home.join(".cargo/bin"));
+    }
+    for directory in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        append_unique(&mut directories, PathBuf::from(directory));
+    }
+    std::env::join_paths(directories).unwrap_or_else(|_| {
+        OsString::from("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn append_path_directories(directories: &mut Vec<PathBuf>, path: &OsString) {
+    for directory in std::env::split_paths(path) {
+        append_unique(directories, directory);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn append_unique(directories: &mut Vec<PathBuf>, directory: PathBuf) {
+    if !directories.contains(&directory) {
+        directories.push(directory);
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn login_shell_path() -> Option<OsString> {
+    const START: &str = "__BOOSTED_PATH_START__";
+    const END: &str = "__BOOSTED_PATH_END__";
+
+    let shell = std::env::var_os("SHELL")
+        .filter(|value| Path::new(value).is_absolute())
+        .unwrap_or_else(|| OsString::from("/bin/zsh"));
+    let mut command = Command::new(shell);
+    command
+        .args([
+            "-ilc",
+            "printf '__BOOSTED_PATH_START__%s__BOOSTED_PATH_END__' \"$PATH\"",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let output = timeout(Duration::from_secs(5), command.output())
+        .await
+        .ok()?
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let start = stdout.rfind(START)? + START.len();
+    let end = stdout[start..].find(END)? + start;
+    Some(OsString::from(&stdout[start..end]))
+}
+
+#[cfg(target_os = "macos")]
+fn executable_in_path(path: &OsString, name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::env::split_paths(path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| {
+            candidate
+                .metadata()
+                .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
+}
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,17 +157,17 @@ pub struct CodexClient {
 }
 
 impl CodexClient {
-    async fn spawn() -> AppResult<Self> {
-        let mut child = Command::new("codex")
+    async fn spawn(codex: &CodexCommand) -> AppResult<Self> {
+        let mut command = codex.command();
+        command
             .args(["app-server", "--stdio"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|error| {
-                AppError::Internal(format!("unable to start Codex app-server: {error}"))
-            })?;
+            .kill_on_drop(true);
+        let mut child = command.spawn().map_err(|error| {
+            AppError::Internal(format!("unable to start Codex app-server: {error}"))
+        })?;
         let stdin = child
             .stdin
             .take()
@@ -174,23 +294,33 @@ pub struct CodexManager {
 
 impl CodexManager {
     pub async fn new() -> Self {
-        let version = Command::new("codex")
-            .arg("--version")
-            .output()
-            .await
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+        let codex = resolve_codex_command().await;
+        let version = if let Some(codex) = &codex {
+            codex
+                .command()
+                .arg("--version")
+                .output()
+                .await
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            None
+        };
         let available = version.is_some();
-        let authenticated = available
-            && Command::new("codex")
+        let authenticated = if available {
+            let mut command = codex.as_ref().expect("available Codex command").command();
+            command
                 .args(["login", "status"])
                 .output()
                 .await
                 .map(|output| output.status.success())
-                .unwrap_or(false);
-        let (client, error) = if available {
-            match CodexClient::spawn().await {
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        let (client, error) = if let (true, Some(codex)) = (available, &codex) {
+            match CodexClient::spawn(codex).await {
                 Ok(client) => (Some(client), None),
                 Err(error) => (None, Some(error.to_string())),
             }
@@ -242,5 +372,37 @@ impl CodexManager {
             .await?
             .request("account/login/start", json!({"type":"chatgptDeviceCode"}))
             .await
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn finds_an_executable_in_the_supplied_path() {
+        let root = tempfile::tempdir().expect("temporary path");
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).expect("bin directory");
+        let executable = bin.join("codex");
+        fs::write(&executable, b"#!/bin/sh\n").expect("Codex fixture");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("executable permissions");
+
+        let path = std::env::join_paths([root.path().join("missing"), bin]).expect("test PATH");
+        assert_eq!(executable_in_path(&path, "codex"), Some(executable));
+    }
+
+    #[test]
+    fn ignores_non_executable_files() {
+        let root = tempfile::tempdir().expect("temporary path");
+        let executable = root.path().join("codex");
+        fs::write(&executable, b"not executable").expect("Codex fixture");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o644))
+            .expect("non-executable permissions");
+
+        let path = std::env::join_paths([root.path()]).expect("test PATH");
+        assert_eq!(executable_in_path(&path, "codex"), None);
     }
 }

@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import Editor from "@monaco-editor/react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { IDockviewPanelProps } from "dockview-react";
 import { ChevronRight, FileCode2, LoaderCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
+
+const Editor = lazy(() => import("@/lib/monaco"));
 
 function pathParts(path: string) {
   return path.split(/[\\/]+/).filter(Boolean);
@@ -86,29 +87,31 @@ export function EditorPanel({ api: panelApi }: IDockviewPanelProps) {
           {file.isLoading && <div className="empty-state"><LoaderCircle className="size-6 animate-spin" /><p>Opening file…</p></div>}
           {file.data?.binary && <div className="empty-state"><FileCode2 className="size-8" /><p>Binary files cannot be displayed here.</p></div>}
           {file.data && !file.data.binary && (
-            <Editor
-              height="100%"
-              path={`${sourceId ?? "source"}/${path}`}
-              language={file.data.language}
-              value={content}
-              onChange={(value) => { if (editable) { setContent(value ?? ""); setDirty(true); } }}
-              onMount={(editor, monaco) => editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current())}
-              theme="vs-dark"
-              options={{
-                readOnly: !editable,
-                minimap: { enabled: false },
-                fontFamily: "JetBrains Mono, SFMono-Regular, Consolas, monospace",
-                fontSize: 12,
-                lineHeight: 19,
-                padding: { top: 8 },
-                renderLineHighlight: "gutter",
-                smoothScrolling: true,
-                automaticLayout: true,
-                scrollBeyondLastLine: false,
-                wordWrap: "off",
-                tabSize: 2,
-              }}
-            />
+            <Suspense fallback={<div className="empty-state"><LoaderCircle className="size-6 animate-spin" /><p>Loading editor…</p></div>}>
+              <Editor
+                height="100%"
+                path={`${sourceId ?? "source"}/${path}`}
+                language={file.data.language}
+                value={content}
+                onChange={(value) => { if (editable) { setContent(value ?? ""); setDirty(true); } }}
+                onMount={(editor, monaco) => editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current())}
+                theme="vs-dark"
+                options={{
+                  readOnly: !editable,
+                  minimap: { enabled: false },
+                  fontFamily: "JetBrains Mono, SFMono-Regular, Consolas, monospace",
+                  fontSize: 12,
+                  lineHeight: 19,
+                  padding: { top: 8 },
+                  renderLineHighlight: "gutter",
+                  smoothScrolling: true,
+                  automaticLayout: true,
+                  scrollBeyondLastLine: false,
+                  wordWrap: "off",
+                  tabSize: 2,
+                }}
+              />
+            </Suspense>
           )}
         </div>
       </div>
