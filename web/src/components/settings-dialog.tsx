@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, Bot, ChevronRight, CircleGauge, CloudDownload, Code2, Copy, ExternalLink, GitBranch, Globe2, LoaderCircle, Pencil, Plug, Plus, RefreshCw, Save, Server, Settings2, Shield, Trash2, UserPlus, Users, Workflow } from "lucide-react";
+import { Activity, Bell, BellRing, Bot, ChevronRight, CircleGauge, CloudDownload, Code2, Copy, ExternalLink, GitBranch, Globe2, LoaderCircle, Pencil, Plug, Plus, RefreshCw, Save, Server, Settings2, Shield, Trash2, UserPlus, Users, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { defaultNotificationSettings, notificationEventDefinitions, notificationPermission, readNotificationSettings, requestNotificationPermission, showTestNotification, writeNotificationSettings, type PwaNotificationSettings } from "@/lib/notifications";
 import { useAppStore } from "@/lib/store";
 import type { Integration } from "@/lib/types";
 import { checkAndInstallAppUpdate, formatUpdateProgress, isDesktopApp, useAppUpdateState } from "@/lib/updater";
@@ -14,11 +16,12 @@ import { ConnectionsManager } from "@/components/machine-manager";
 
 const Gitlab = GitBranch;
 
-type Section = "connections" | "web" | "application" | "team" | "workspace" | "integrations" | "codex";
+type Section = "connections" | "notifications" | "web" | "application" | "team" | "workspace" | "integrations" | "codex";
 
 const sectionGroups: { label: string; sections: { id: Section; label: string; icon: typeof Settings2 }[] }[] = [
   { label: "Global", sections: [
     { id: "connections", label: "Connections", icon: Server },
+    { id: "notifications", label: "Notifications", icon: Bell },
     { id: "web", label: "Web interface", icon: Globe2 },
     { id: "application", label: "Application", icon: RefreshCw },
     { id: "team", label: "Team", icon: Users },
@@ -90,6 +93,96 @@ function WorkspaceSettings() {
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const project = projects.data?.find((entry) => entry.id === projectId);
   return <div className="settings-content"><SettingsSection title="Workspace details" description="Settings on this page apply only to the selected workspace.">{project ? <div className="settings-card grid gap-4"><label className="grid gap-1.5"><span className="settings-label">Name</span><Input value={project.name} readOnly /></label><label className="grid gap-1.5"><span className="settings-label">Repository</span><Input className="font-mono text-xs" value={project.repoPath} readOnly /></label><label className="grid gap-1.5"><span className="settings-label">Default branch</span><Input className="font-mono text-xs" value={project.defaultBranch} readOnly /></label></div> : <p className="text-xs text-muted-foreground">Open a workspace to configure it.</p>}</SettingsSection><SettingsSection title="Task defaults" description="Imported and manually created tasks start on this workspace’s default branch."><div className="settings-card flex items-center gap-3"><Workflow className="size-5 text-muted-foreground" /><div><p className="text-xs font-medium">One isolated worktree per task</p><p className="mt-0.5 text-[11px] text-muted-foreground">Every task receives its own boosted/* branch and execution directory.</p></div></div></SettingsSection></div>;
+}
+
+function NotificationSettings() {
+  const machineId = useAppStore((state) => state.activeMachineId);
+  const [settings, setSettings] = useState<PwaNotificationSettings>({ ...defaultNotificationSettings, events: [...defaultNotificationSettings.events] });
+  const [permission, setPermission] = useState(notificationPermission);
+  const [requesting, setRequesting] = useState(false);
+  const [message, setMessage] = useState<{ kind: "success" | "error"; text: string }>();
+
+  useEffect(() => {
+    if (machineId) setSettings(readNotificationSettings(machineId));
+  }, [machineId]);
+
+  useEffect(() => {
+    const refreshPermission = () => setPermission(notificationPermission());
+    window.addEventListener("focus", refreshPermission);
+    document.addEventListener("visibilitychange", refreshPermission);
+    return () => {
+      window.removeEventListener("focus", refreshPermission);
+      document.removeEventListener("visibilitychange", refreshPermission);
+    };
+  }, []);
+
+  function update(next: PwaNotificationSettings) {
+    if (!machineId) return;
+    setSettings(next);
+    writeNotificationSettings(machineId, next);
+    setMessage(undefined);
+  }
+
+  async function toggleEnabled(enabled: boolean) {
+    if (!enabled) {
+      update({ ...settings, enabled: false });
+      return;
+    }
+    setRequesting(true);
+    setMessage(undefined);
+    const nextPermission = await requestNotificationPermission();
+    setPermission(nextPermission);
+    setRequesting(false);
+    if (nextPermission === "granted") update({ ...settings, enabled: true });
+    else if (nextPermission === "denied") setMessage({ kind: "error", text: "Notifications are blocked in this browser’s site settings." });
+    else setMessage({ kind: "error", text: "Notification permission was not granted." });
+  }
+
+  function toggleEvent(id: PwaNotificationSettings["events"][number], enabled: boolean) {
+    const events = enabled ? [...new Set([...settings.events, id])] : settings.events.filter((entry) => entry !== id);
+    update({ ...settings, events });
+  }
+
+  async function testNotification() {
+    setMessage(undefined);
+    const shown = await showTestNotification();
+    setMessage(shown
+      ? { kind: "success", text: "Test notification sent." }
+      : { kind: "error", text: "The PWA service worker is not ready. Reload the production app and try again." });
+  }
+
+  const effectiveEnabled = settings.enabled && permission === "granted";
+  const groups = ["Tasks", "Codex", "Integrations"] as const;
+  const status = permission === "unsupported"
+    ? "Notifications require the web app over HTTPS or localhost. They are not used by the desktop shell."
+    : permission === "denied"
+      ? "Permission is blocked. Allow notifications in your browser’s site settings, then return here."
+      : permission === "default"
+        ? "Your browser will ask for permission when you enable notifications."
+        : effectiveEnabled
+          ? "Notifications are enabled for this browser and Boosted machine."
+          : "Permission is granted. Turn notifications on when you’re ready.";
+
+  return <div className="settings-content">
+    <SettingsSection title="PWA notifications" description="Receive system notifications for activity on this Boosted machine. Permission and preferences are stored per browser because each device controls its own notification access.">
+      <div className="settings-card flex items-start gap-3">
+        <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><BellRing className="size-4" /></div>
+        <div className="min-w-0 flex-1"><p className="text-xs font-medium">Enable notifications</p><p className="mt-1 text-[11px] leading-4 text-muted-foreground">{status}</p></div>
+        <div className="inline-flex items-center gap-2 text-xs"><Switch aria-label="Enable notifications" checked={effectiveEnabled} disabled={!machineId || requesting || permission === "unsupported" || permission === "denied"} onCheckedChange={(checked) => void toggleEnabled(checked)} /><span className="min-w-8">{requesting ? "Requesting…" : effectiveEnabled ? "On" : "Off"}</span></div>
+      </div>
+      {message && <p className={cn("mt-2 text-xs", message.kind === "success" ? "text-success" : "text-destructive")}>{message.text}</p>}
+    </SettingsSection>
+    <SettingsSection title="Delivery" description="Choose whether Boosted should stay quiet while you are actively using this window.">
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className={cn("settings-card flex cursor-pointer items-start gap-3", settings.delivery === "background" && "border-primary/40 bg-accent")}><input className="mt-0.5 size-4 accent-primary" type="radio" name="notification-delivery" checked={settings.delivery === "background"} onChange={() => update({ ...settings, delivery: "background" })} /><span><span className="block text-xs font-medium">Only in the background</span><span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">Notify when this Boosted window is hidden or unfocused.</span></span></label>
+        <label className={cn("settings-card flex cursor-pointer items-start gap-3", settings.delivery === "always" && "border-primary/40 bg-accent")}><input className="mt-0.5 size-4 accent-primary" type="radio" name="notification-delivery" checked={settings.delivery === "always"} onChange={() => update({ ...settings, delivery: "always" })} /><span><span className="block text-xs font-medium">Always</span><span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">Notify even while you are actively using Boosted.</span></span></label>
+      </div>
+    </SettingsSection>
+    <SettingsSection title="Events" description="Select the activity that should produce a notification.">
+      <div className="grid gap-4">{groups.map((group) => <section key={group}><p className="settings-label mb-2">{group}</p><div className="grid gap-2 sm:grid-cols-2">{notificationEventDefinitions.filter((event) => event.group === group).map((event) => <label key={event.id} className="settings-card flex cursor-pointer items-start gap-3 py-3"><input className="mt-0.5 size-4 accent-primary" type="checkbox" checked={settings.events.includes(event.id)} onChange={(input) => toggleEvent(event.id, input.target.checked)} /><span><span className="block text-xs font-medium">{event.label}</span><span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">{event.description}</span></span></label>)}</div></section>)}</div>
+      <div className="mt-4 flex items-center justify-between gap-3"><span className="text-[10px] text-muted-foreground">Changes are saved immediately for this browser.</span><Button variant="secondary" size="sm" disabled={!effectiveEnabled} onClick={() => void testNotification()}><Bell />Send test notification</Button></div>
+    </SettingsSection>
+  </div>;
 }
 
 function ApplicationSettings() {
@@ -336,5 +429,5 @@ function TeamSettings() {
 
 export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const [section, setSection] = useState<Section>("connections");
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="settings-dialog max-w-5xl gap-0 overflow-hidden p-0"><div className="settings-layout"><aside className="settings-sidebar"><DialogHeader className="px-3 pb-4 pt-2"><DialogTitle>Settings</DialogTitle></DialogHeader><nav className="settings-nav">{sectionGroups.map((group) => <div key={group.label} className="settings-nav-group"><p className="settings-nav-heading">{group.label}</p>{group.sections.map(({ id, label, icon: Icon }) => <button key={id} className={cn("settings-nav-item", section === id && "settings-nav-item-active")} onClick={() => setSection(id)}><Icon />{label}</button>)}</div>)}</nav></aside><main className="min-h-0 overflow-y-auto">{section === "connections" && <ConnectionsSettings />}{section === "web" && <GlobalWebSettings />}{section === "application" && <ApplicationSettings />}{section === "team" && <TeamSettings />}{section === "workspace" && <WorkspaceSettings />}{section === "integrations" && <IntegrationsSettings />}{section === "codex" && <CodexSettings />}</main></div></DialogContent></Dialog>;
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="settings-dialog max-w-5xl gap-0 overflow-hidden p-0"><div className="settings-layout"><aside className="settings-sidebar"><DialogHeader className="px-3 pb-4 pt-2"><DialogTitle>Settings</DialogTitle></DialogHeader><nav className="settings-nav">{sectionGroups.map((group) => <div key={group.label} className="settings-nav-group"><p className="settings-nav-heading">{group.label}</p>{group.sections.map(({ id, label, icon: Icon }) => <button key={id} className={cn("settings-nav-item", section === id && "settings-nav-item-active")} onClick={() => setSection(id)}><Icon />{label}</button>)}</div>)}</nav></aside><main className="min-h-0 overflow-y-auto">{section === "connections" && <ConnectionsSettings />}{section === "notifications" && <NotificationSettings />}{section === "web" && <GlobalWebSettings />}{section === "application" && <ApplicationSettings />}{section === "team" && <TeamSettings />}{section === "workspace" && <WorkspaceSettings />}{section === "integrations" && <IntegrationsSettings />}{section === "codex" && <CodexSettings />}</main></div></DialogContent></Dialog>;
 }

@@ -9,11 +9,11 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import { AuthScreen } from "@/components/auth-screen";
 import { ConnectionsDialog, EmptyMachineScreen, MachineSwitcher } from "@/components/machine-manager";
-import { MobileShell } from "@/components/mobile-shell";
+import { PwaLifecycle } from "@/components/pwa-lifecycle";
 import { getActiveApiClient } from "@/lib/api";
 import { ApiClientProvider, useBoostedApiClient } from "@/lib/api-context";
 import { isMixedContentConnection, useMachineStore, type MachineProfile } from "@/lib/machines";
-import { isNativeMobileRuntime } from "@/lib/runtime";
+import { isTauriRuntime } from "@/lib/runtime";
 import { useAppStore } from "@/lib/store";
 import type { SetupState, User } from "@/lib/types";
 import { startAutomaticAppUpdates } from "@/lib/updater";
@@ -75,7 +75,7 @@ function SessionRoot({ profile }: { profile: MachineProfile }) {
 
   if (setup.data.needsSetup || !token || me.isError || !me.data) return <AuthScreen setup={setup.data} onAuthenticated={authenticated} />;
 
-  return isNativeMobileRuntime() ? <MobileShell /> : <Suspense fallback={<div className="grid h-full place-items-center text-sm text-muted-foreground">Loading workspace…</div>}><AppShell /></Suspense>;
+  return <Suspense fallback={<div className="grid h-full place-items-center text-sm text-muted-foreground">Loading workspace…</div>}><AppShell /></Suspense>;
 }
 
 function MachineBoundary({ profile }: { profile: MachineProfile }) {
@@ -103,4 +103,4 @@ function Bootstrap() {
   return <MachineBoundary key={`${profile.id}:${profile.baseUrl}`} profile={profile} />;
 }
 
-createRoot(document.getElementById("root")!).render(<StrictMode><Bootstrap /></StrictMode>);
+createRoot(document.getElementById("root")!).render(<StrictMode><Bootstrap />{!isTauriRuntime() && <PwaLifecycle />}</StrictMode>);

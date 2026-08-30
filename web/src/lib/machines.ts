@@ -1,8 +1,5 @@
-import { Capacitor } from "@capacitor/core";
-import { Preferences } from "@capacitor/preferences";
-import { KeychainAccess, SecureStorage } from "@aparajita/capacitor-secure-storage";
 import { create } from "zustand";
-import { defaultMachineBaseUrl, isNativeMobileRuntime, isTauriRuntime } from "@/lib/runtime";
+import { defaultMachineBaseUrl, isTauriRuntime } from "@/lib/runtime";
 
 export interface MachineProfile {
   id: string;
@@ -32,10 +29,8 @@ type MachineStore = {
 };
 
 const registryKey = "boosted.machines.v1";
-const securePrefix = "boosted_";
 const legacyTokenKey = "boosted.session";
 let initialization: Promise<void> | undefined;
-let secureStorageReady: Promise<void> | undefined;
 
 function tokenKey(id: string) {
   return `machine.${id}.session`;
@@ -45,45 +40,21 @@ function storedTokenKey(id: string) {
   return `boosted.${tokenKey(id)}`;
 }
 
-async function prepareSecureStorage() {
-  if (!secureStorageReady) {
-    secureStorageReady = (async () => {
-      await SecureStorage.setKeyPrefix(securePrefix);
-      await SecureStorage.setSynchronize(false);
-      await SecureStorage.setDefaultKeychainAccess(KeychainAccess.afterFirstUnlockThisDeviceOnly);
-    })();
-  }
-  await secureStorageReady;
-}
-
 async function readPreference(key: string) {
-  if (!isNativeMobileRuntime()) return localStorage.getItem(key);
-  return (await Preferences.get({ key })).value;
+  return localStorage.getItem(key);
 }
 
 async function writePreference(key: string, value: string) {
-  if (!isNativeMobileRuntime()) {
-    localStorage.setItem(key, value);
-    return;
-  }
-  await Preferences.set({ key, value });
+  localStorage.setItem(key, value);
 }
 
 async function readToken(id: string) {
-  if (!isNativeMobileRuntime()) return localStorage.getItem(storedTokenKey(id)) ?? undefined;
-  await prepareSecureStorage();
-  return (await SecureStorage.getItem(tokenKey(id))) ?? undefined;
+  return localStorage.getItem(storedTokenKey(id)) ?? undefined;
 }
 
 async function writeToken(id: string, token?: string) {
-  if (!isNativeMobileRuntime()) {
-    if (token) localStorage.setItem(storedTokenKey(id), token);
-    else localStorage.removeItem(storedTokenKey(id));
-    return;
-  }
-  await prepareSecureStorage();
-  if (token) await SecureStorage.setItem(tokenKey(id), token);
-  else await SecureStorage.remove(tokenKey(id));
+  if (token) localStorage.setItem(storedTokenKey(id), token);
+  else localStorage.removeItem(storedTokenKey(id));
 }
 
 function machineLabel(baseUrl: string) {
@@ -114,7 +85,7 @@ export function normalizeMachineBaseUrl(input: string) {
 }
 
 export function isMixedContentConnection(baseUrl: string) {
-  if (isNativeMobileRuntime() || window.location.protocol !== "https:") return false;
+  if (window.location.protocol !== "https:") return false;
   try {
     return new URL(baseUrl).protocol === "http:";
   } catch {
@@ -187,7 +158,7 @@ export const useMachineStore = create<MachineStore>((set, get) => ({
       if (!snapshot) {
         const profile = defaultProfile();
         snapshot = { version: 1, profiles: profile ? [profile] : [], activeId: profile?.id };
-        if (profile && !isNativeMobileRuntime()) {
+        if (profile) {
           migrateLegacyState(profile.id);
           const legacyToken = localStorage.getItem(legacyTokenKey);
           if (legacyToken) {
@@ -254,8 +225,4 @@ export function activeMachine() {
 export function activeMachineToken() {
   const state = useMachineStore.getState();
   return state.activeId ? state.tokens[state.activeId] : undefined;
-}
-
-export function isCapacitorPlatform() {
-  return Capacitor.isNativePlatform();
 }

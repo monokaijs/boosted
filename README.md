@@ -1,6 +1,6 @@
 # Boosted
 
-Boosted is a local-first, multi-user coding workspace with a task board, task-specific Codex planning conversations, and separate general Codex chats. It ships one Vite + React frontend for both the browser and a Tauri desktop shell.
+Boosted is a local-first, multi-user coding workspace with a task board, task-specific Codex planning conversations, and separate general Codex chats. It ships one Vite + React frontend as an installable Progressive Web App (PWA) and a Tauri desktop shell.
 
 ## Development
 
@@ -20,42 +20,26 @@ The first browser visit creates the administrator. The admin then creates member
 
 ## Machine connections
 
-Every web, desktop, and mobile frontend can save multiple Boosted servers and switch between them from the machine selector or **Settings → Connections**. A connection has its own session and workspace state; switching replaces the whole active workspace, and Boosted never polls or combines data from saved machines.
+The web/PWA and desktop frontends can save multiple Boosted servers and switch between them from the machine selector or **Settings → Connections**. A connection has its own session and workspace state; switching replaces the whole active workspace, and Boosted never polls or combines data from saved machines.
 
 When adding a machine, enter its local alias, URL, and account credentials. A scheme-less host such as `office-pc.local` becomes `http://office-pc.local:4782`; explicit HTTP/HTTPS schemes and ports are preserved. The server must already have its first administrator. Only the automatically generated local browser or desktop connection can perform first-run setup.
 
-Boosted connects directly to the URL you provide. It does not provide TLS, server discovery, QR pairing, a relay, VPN/tunnel setup, port forwarding, DNS, or other remote-access configuration. Configure trusted routing and exposure yourself. Plain HTTP is supported by the native apps, while browsers can block an HTTP server when the frontend itself was loaded over HTTPS; use an HTTPS reverse proxy or load Boosted over HTTP in that case.
+Boosted connects directly to the URL you provide. It does not provide TLS, server discovery, QR pairing, a relay, VPN/tunnel setup, port forwarding, DNS, or other remote-access configuration. Configure trusted routing and exposure yourself. Browsers block a plain-HTTP server when the frontend itself was loaded over HTTPS; use an HTTPS reverse proxy or load Boosted over HTTP in that case.
 
 Existing installations migrate automatically. Browser clients retain the current origin, desktop clients retain `http://127.0.0.1:4782`, and development builds continue to honor `VITE_BOOSTED_API_URL`. The existing session and selected workspace move into that generated connection.
 
-## Mobile development
+## Progressive Web App
 
-The `mobile` workspace contains tracked Capacitor iOS and Android projects using app ID `app.boosted.mobile`. It copies the existing Vite build and renders a control-focused native shell for tasks, plans, Codex chats, account actions, and connection management. Project registration, files, terminals, integrations, team/Codex administration, and global server configuration remain desktop/web workflows.
-
-Install the normal repository prerequisites plus Xcode for iOS and Android Studio with an Android SDK for Android, then synchronize the web bundle and native plugins:
+Production builds include a web app manifest, install icons, and a service worker. Open Boosted over HTTPS (or on localhost), then use the browser’s install action. Chromium browsers also show an in-app installation prompt when installation is available.
 
 ```bash
-pnpm install
-pnpm mobile:sync
+pnpm build
+pnpm preview
 ```
 
-Open or run a native project:
+The PWA precaches the application shell and prompts before activating a newly downloaded version, so an open workspace is never silently replaced. The shell can launch without a network connection, but project data, authentication, terminals, and Codex features still require access to a running Boosted server and are deliberately not cached.
 
-```bash
-pnpm mobile:ios
-pnpm mobile:android
-pnpm --dir mobile run run:ios
-pnpm --dir mobile run run:android
-```
-
-Build local debug artifacts without publishing:
-
-```bash
-pnpm --dir mobile run build:android
-pnpm --dir mobile run build:ios
-```
-
-iOS simulator builds can also be checked without signing with `xcodebuild -project mobile/ios/App/App.xcodeproj -scheme App -sdk iphonesimulator -configuration Debug CODE_SIGNING_ALLOWED=NO build`. Android debug APKs can be built from `mobile/android` with `./gradlew assembleDebug`. App Store/Play Store signing, accounts, CI native builds, push notifications, and publishing are intentionally not configured.
+System notifications can be enabled under **Settings → Notifications**. Preferences are stored separately for each saved Boosted machine and browser. Users can choose background-only or always-on delivery and independently configure task, Codex chat, and integration sync events. Notification clicks focus Boosted and open the related task or Codex chat when available. Because notifications are driven by the authenticated live connection, the PWA must still be open or running in the background; a fully closed browser does not receive push notifications.
 
 ## Headless server
 

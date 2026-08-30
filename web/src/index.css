@@ -95,6 +95,67 @@ body {
   text-rendering: geometricPrecision;
 }
 
+.pwa-notices {
+  position: fixed;
+  right: max(16px, env(safe-area-inset-right));
+  bottom: max(16px, env(safe-area-inset-bottom));
+  z-index: 100;
+  display: grid;
+  width: min(420px, calc(100vw - 32px));
+  gap: 8px;
+  pointer-events: none;
+}
+
+.pwa-notice {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--popover) 96%, transparent);
+  padding: 11px;
+  box-shadow: 0 18px 50px rgb(0 0 0 / 0.45);
+  backdrop-filter: blur(18px);
+  pointer-events: auto;
+}
+
+.pwa-notice > svg {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  color: var(--primary);
+}
+
+.pwa-notice p {
+  min-width: 0;
+  flex: 1;
+  margin: 0;
+}
+
+.pwa-notice strong,
+.pwa-notice span {
+  display: block;
+}
+
+.pwa-notice strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pwa-notice span {
+  margin-top: 2px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.pwa-notice-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+}
+
 button,
 input,
 textarea {
@@ -1240,271 +1301,6 @@ textarea {
   .file-tree button {
     min-height: 36px;
   }
-}
-
-.mobile-shell {
-  display: grid;
-  grid-template-rows: calc(50px + env(safe-area-inset-top)) minmax(0, 1fr) calc(58px + env(safe-area-inset-bottom));
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  background: var(--canvas);
-}
-
-.mobile-topbar {
-  display: flex;
-  min-width: 0;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 6px;
-  border-bottom: 1px solid var(--border);
-  background: rgb(14 14 14 / 0.96);
-  padding: env(safe-area-inset-top) max(8px, env(safe-area-inset-right)) 7px max(8px, env(safe-area-inset-left));
-}
-
-.mobile-topbar > button {
-  min-width: 0;
-  height: 36px;
-}
-
-.mobile-project-picker {
-  position: relative;
-  display: flex;
-  min-width: 0;
-  max-width: 48%;
-  height: 36px;
-  align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface-raised);
-}
-
-.mobile-project-picker select {
-  width: 100%;
-  height: 100%;
-  appearance: none;
-  overflow: hidden;
-  border: 0;
-  background: transparent;
-  padding: 0 28px 0 10px;
-  color: var(--foreground);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  outline: none;
-}
-
-.mobile-project-picker svg {
-  position: absolute;
-  right: 8px;
-  width: 13px;
-  pointer-events: none;
-}
-
-.mobile-content,
-.mobile-list-page,
-.mobile-detail,
-.mobile-panel-host {
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.mobile-list-page,
-.mobile-detail {
-  display: flex;
-  height: 100%;
-  flex-direction: column;
-}
-
-.mobile-page-actions {
-  display: flex;
-  min-height: 62px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px max(10px, env(safe-area-inset-right)) 10px max(10px, env(safe-area-inset-left));
-}
-
-.mobile-page-actions h1 {
-  margin: 0;
-  font-size: 17px;
-  font-weight: 650;
-}
-
-.mobile-page-actions p {
-  margin: 3px 0 0;
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
-.mobile-scroll-list {
-  min-height: 0;
-  flex: 1;
-  overflow-y: auto;
-  padding: 0 max(8px, env(safe-area-inset-right)) 24px max(8px, env(safe-area-inset-left));
-  overscroll-behavior: contain;
-}
-
-.mobile-list-heading {
-  margin: 14px 8px 5px;
-  color: var(--muted-foreground);
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
-}
-
-.mobile-list-row {
-  display: flex;
-  width: 100%;
-  min-height: 62px;
-  align-items: flex-start;
-  gap: 10px;
-  border-bottom: 1px solid var(--border);
-  padding: 11px 8px;
-  text-align: left;
-}
-
-.mobile-list-row:active {
-  background: var(--accent);
-}
-
-.mobile-list-row strong,
-.mobile-list-row small {
-  display: block;
-}
-
-.mobile-list-row strong {
-  overflow: hidden;
-  font-size: 13px;
-  font-weight: 550;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mobile-list-row small {
-  display: flex;
-  min-width: 0;
-  gap: 5px;
-  overflow: hidden;
-  margin-top: 5px;
-  color: var(--muted-foreground);
-  font-size: 10px;
-  white-space: nowrap;
-}
-
-.mobile-row-icon {
-  display: grid;
-  width: 27px;
-  height: 27px;
-  flex: none;
-  place-items: center;
-  border-radius: 7px;
-  background: var(--secondary);
-}
-
-.mobile-row-icon svg {
-  width: 14px;
-  height: 14px;
-}
-
-.mobile-empty {
-  padding: 52px 20px;
-  color: var(--muted-foreground);
-  font-size: 12px;
-  line-height: 1.6;
-  text-align: center;
-}
-
-.mobile-detail-header {
-  display: flex;
-  min-height: 49px;
-  align-items: center;
-  gap: 7px;
-  border-bottom: 1px solid var(--border);
-  padding: 5px max(8px, env(safe-area-inset-right)) 5px max(4px, env(safe-area-inset-left));
-}
-
-.mobile-segment {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px;
-  border-bottom: 1px solid var(--border);
-  padding: 5px 8px;
-}
-
-.mobile-segment button {
-  display: flex;
-  height: 34px;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border-radius: 7px;
-  color: var(--muted-foreground);
-  font-size: 11px;
-}
-
-.mobile-segment button.active {
-  background: var(--accent);
-  color: var(--foreground);
-}
-
-.mobile-segment svg {
-  width: 14px;
-}
-
-.mobile-panel-host {
-  flex: 1;
-  background: var(--surface);
-}
-
-.mobile-panel-host > * {
-  height: 100%;
-}
-
-.mobile-more-content {
-  display: grid;
-  min-height: 0;
-  gap: 16px;
-  overflow-y: auto;
-  padding: 0 max(10px, env(safe-area-inset-right)) 28px max(10px, env(safe-area-inset-left));
-}
-
-.mobile-bottom-nav {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  border-top: 1px solid var(--border);
-  background: var(--surface-sunken);
-  padding: 4px max(8px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(8px, env(safe-area-inset-left));
-}
-
-.mobile-bottom-nav button {
-  display: grid;
-  min-height: 48px;
-  place-items: center;
-  align-content: center;
-  gap: 3px;
-  border-radius: 8px;
-  color: var(--muted-foreground);
-  font-size: 9px;
-}
-
-.mobile-bottom-nav button.active {
-  color: var(--foreground);
-}
-
-.mobile-bottom-nav button.active svg {
-  color: var(--primary);
-}
-
-.mobile-bottom-nav svg {
-  width: 19px;
-  height: 19px;
-}
-
-.mobile-shell .dialog-content {
-  bottom: max(8px, env(safe-area-inset-bottom));
-  max-height: calc(100dvh - max(16px, env(safe-area-inset-top)) - max(16px, env(safe-area-inset-bottom)));
 }
 
 .diff-add { background: color-mix(in srgb, var(--success) 12%, transparent); color: var(--success); }

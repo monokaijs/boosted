@@ -1887,6 +1887,10 @@ async fn run_integration_sync(state: &AppState, id: &str) -> AppResult<Integrati
             let message = error.to_string();
             sqlx::query("UPDATE integrations SET last_synced_at=?,last_sync_status='failed',last_sync_error=?,updated_at=? WHERE id=?")
                 .bind(Utc::now().to_rfc3339()).bind(&message).bind(Utc::now().to_rfc3339()).bind(id).execute(&state.db.pool).await?;
+            state.emit(
+                "integration.synced",
+                json!({"projectId":integration.project_id,"integrationId":id,"imported":0,"skipped":0,"failed":1,"status":"failed","error":message}),
+            );
             return Err(error);
         }
     };
@@ -1924,7 +1928,7 @@ async fn run_integration_sync(state: &AppState, id: &str) -> AppResult<Integrati
         .bind(&now).bind(status).bind(if failed > 0 { Some(message.as_str()) } else { None }).bind(&now).bind(id).execute(&state.db.pool).await?;
     state.emit(
         "integration.synced",
-        json!({"projectId":integration.project_id,"integrationId":id,"imported":imported}),
+        json!({"projectId":integration.project_id,"integrationId":id,"imported":imported,"skipped":skipped,"failed":failed,"status":status}),
     );
     Ok(IntegrationSyncResult {
         imported,
@@ -3193,5 +3197,23 @@ mod tests {
         let response = embedded_web_asset("/workspace/active".parse().unwrap()).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CONTENT_TYPE], "text/html");
+    }
+
+    #[cfg(feature = "embedded-web")]
+    #[tokio::test]
+    async fn embedded_web_serves_installable_pwa_assets() {
+        for (path, content_type) in [
+            ("/manifest.webmanifest", "application/manifest+json"),
+            ("/sw.js", "text/javascript"),
+            ("/pwa-192x192.png", "image/png"),
+        ] {
+            let response = embedded_web_asset(path.parse().unwrap()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                content_type,
+                "{path}"
+            );
+        }
     }
 }

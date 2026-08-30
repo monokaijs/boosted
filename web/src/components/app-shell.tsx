@@ -11,6 +11,7 @@ import { ConnectionsDialog, MachineSwitcher } from "@/components/machine-manager
 import { Workspace } from "@/components/workspace";
 import { api, setToken } from "@/lib/api";
 import { useLiveEvents } from "@/hooks/use-live-events";
+import { useNotificationNavigation } from "@/hooks/use-notification-navigation";
 import { useAppStore } from "@/lib/store";
 import { formatUpdateProgress, useAppUpdateState } from "@/lib/updater";
 import { cn } from "@/lib/utils";
@@ -45,6 +46,7 @@ function openPanel(id: string) {
 
 export function AppShell() {
   useLiveEvents();
+  useNotificationNavigation();
   const appUpdate = useAppUpdateState();
   const [drawerView, setDrawerView] = useState<"tasks" | "chats">("tasks");
   const [drawerWidth, setDrawerWidth] = useState(initialDrawerWidth);
@@ -76,13 +78,22 @@ export function AppShell() {
   useEffect(() => {
     const openNewTask = () => setNewTaskDialogOpen(true);
     const openProject = () => setProjectDialogOpen(true);
+    const showDrawer = (event: Event) => {
+      const view = (event as CustomEvent<"tasks" | "chats">).detail;
+      if (view === "tasks" || view === "chats") {
+        setDrawerView(view);
+        setDrawerOpen(true);
+      }
+    };
     window.addEventListener("boosted:new-task", openNewTask);
     window.addEventListener("boosted:open-project", openProject);
+    window.addEventListener("boosted:show-drawer", showDrawer);
     return () => {
       window.removeEventListener("boosted:new-task", openNewTask);
       window.removeEventListener("boosted:open-project", openProject);
+      window.removeEventListener("boosted:show-drawer", showDrawer);
     };
-  }, []);
+  }, [setDrawerOpen]);
 
   useEffect(() => {
     localStorage.setItem(drawerWidthKey, String(drawerWidth));

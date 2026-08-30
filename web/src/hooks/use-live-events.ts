@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getToken } from "@/lib/api";
 import { useBoostedApiClient } from "@/lib/api-context";
+import { notifyForLiveEvent } from "@/lib/notifications";
 import type { LiveEvent } from "@/lib/types";
 
 export function useLiveEvents() {
@@ -21,6 +22,7 @@ export function useLiveEvents() {
       connection.addEventListener("message", (message) => {
         try {
           const event = JSON.parse(message.data) as LiveEvent;
+          void notifyForLiveEvent(event, api);
           if (event.topic.startsWith("task.")) {
             void queryClient.invalidateQueries({ queryKey: ["tasks"] });
             const taskId = (event.data as { taskId?: string })?.taskId;
