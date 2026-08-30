@@ -1,4 +1,5 @@
-use boosted_server::{Config, run};
+use boosted_server::{cli::Cli, run};
+use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -8,6 +9,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .add_directive("boosted_server=info".parse()?),
         )
         .init();
-    run(Config::from_env()).await?;
+    run(Cli::parse().into_config()).await?;
     Ok(())
 }

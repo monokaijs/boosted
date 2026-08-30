@@ -1,4 +1,5 @@
 mod auth;
+pub mod cli;
 mod codex;
 mod db;
 mod error;
@@ -42,6 +43,11 @@ use tower_http::{
 };
 use uuid::Uuid;
 
+#[cfg(feature = "embedded-web")]
+use axum::http::{Uri, header};
+#[cfg(feature = "embedded-web")]
+use rust_embed::Embed;
+
 use crate::{
     auth::{authenticate, create_session, hash_password, validate_username, verify_password},
     codex::{CodexClient, CodexManager},
@@ -59,6 +65,16 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn default_data_dir() -> PathBuf {
+        dirs_next::data_local_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("boosted")
+    }
+
+    pub fn default_web_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../web/dist")
+    }
+
     pub fn from_env() -> Self {
         let bind = std::env::var("BOOSTED_BIND")
             .unwrap_or_else(|_| "127.0.0.1:4782".into())
@@ -66,14 +82,10 @@ impl Config {
             .expect("BOOSTED_BIND must be a socket address");
         let data_dir = std::env::var_os("BOOSTED_DATA_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                dirs_next::data_local_dir()
-                    .unwrap_or_else(std::env::temp_dir)
-                    .join("boosted")
-            });
+            .unwrap_or_else(Self::default_data_dir);
         let web_dir = std::env::var_os("BOOSTED_WEB_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../web/dist"));
+            .unwrap_or_else(Self::default_web_dir);
         Self {
             bind,
             data_dir,
@@ -81,6 +93,11 @@ impl Config {
         }
     }
 }
+
+#[cfg(feature = "embedded-web")]
+#[derive(Embed)]
+#[folder = "../web/dist/"]
+struct EmbeddedWeb;
 
 #[derive(Clone)]
 struct PendingInput {
@@ -271,10 +288,8 @@ fn router(state: AppState, web_dir: &Path) -> Router {
             auth_middleware,
         ));
     let api = public.merge(protected).with_state(state);
-    let index = web_dir.join("index.html");
-    Router::new()
+    let app = Router::new()
         .nest("/api/v1", api)
-        .fallback_service(ServeDir::new(web_dir).not_found_service(ServeFile::new(index)))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -287,7 +302,50 @@ fn router(state: AppState, web_dir: &Path) -> Router {
                     Method::DELETE,
                 ]),
         )
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http());
+    let index = web_dir.join("index.html");
+    if index.is_file() {
+        return app
+            .fallback_service(ServeDir::new(web_dir).not_found_service(ServeFile::new(index)));
+    }
+    embedded_web_fallback(app, web_dir)
+}
+
+#[cfg(feature = "embedded-web")]
+fn embedded_web_fallback(app: Router, web_dir: &Path) -> Router {
+    tracing::debug!(path=%web_dir.display(), "external web assets not found; using embedded frontend");
+    app.fallback(embedded_web_asset)
+}
+
+#[cfg(feature = "embedded-web")]
+async fn embedded_web_asset(uri: Uri) -> Response {
+    let requested = uri.path().trim_start_matches('/');
+    let path = if requested.is_empty() {
+        "index.html"
+    } else {
+        requested
+    };
+    let asset = EmbeddedWeb::get(path)
+        .map(|asset| (path, asset))
+        .or_else(|| EmbeddedWeb::get("index.html").map(|asset| ("index.html", asset)));
+    match asset {
+        Some((asset_path, asset)) => {
+            let content_type = mime_guess::from_path(asset_path).first_or_octet_stream();
+            (
+                [(header::CONTENT_TYPE, content_type.as_ref())],
+                asset.data.into_owned(),
+            )
+                .into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[cfg(not(feature = "embedded-web"))]
+fn embedded_web_fallback(app: Router, web_dir: &Path) -> Router {
+    tracing::warn!(path=%web_dir.display(), "web assets not found; build the frontend or set BOOSTED_WEB_DIR");
+    let index = web_dir.join("index.html");
+    app.fallback_service(ServeDir::new(web_dir).not_found_service(ServeFile::new(index)))
 }
 
 async fn auth_middleware(
@@ -2887,5 +2945,12 @@ mod tests {
         );
         assert!(codex_attachment_path(root.path(), "../attachment.png").is_err());
         assert!(codex_attachment_path(root.path(), "not-a-uuid.png").is_err());
+    }
+    #[cfg(feature = "embedded-web")]
+    #[tokio::test]
+    async fn embedded_web_serves_the_spa_entrypoint() {
+        let response = embedded_web_asset("/workspace/active".parse().unwrap()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "text/html");
     }
 }
