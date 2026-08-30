@@ -86,4 +86,36 @@ describe("workspace state", () => {
       openFilePath: "src/beta.ts",
     });
   });
+
+  it("restores a separate workspace for every active machine", async () => {
+    const { useAppStore } = await import("@/lib/store");
+
+    useAppStore.getState().activateMachine("machine-a");
+    useAppStore.getState().selectProject(firstProject);
+    useAppStore.getState().selectTask(task("task-a", firstProject.id));
+    useAppStore.getState().selectCodexChat("chat-a");
+
+    useAppStore.getState().activateMachine("machine-b");
+    expect(useAppStore.getState()).toMatchObject({
+      selectedProjectId: undefined,
+      selectedTaskId: undefined,
+      selectedCodexChatId: undefined,
+    });
+    useAppStore.getState().selectProject(secondProject);
+    useAppStore.getState().selectTask(task("task-b", secondProject.id));
+
+    useAppStore.getState().activateMachine("machine-a");
+    expect(useAppStore.getState()).toMatchObject({
+      selectedProjectId: firstProject.id,
+      selectedTaskId: "task-a",
+      selectedCodexChatId: "chat-a",
+    });
+
+    useAppStore.getState().activateMachine("machine-b");
+    expect(useAppStore.getState()).toMatchObject({
+      selectedProjectId: secondProject.id,
+      selectedTaskId: "task-b",
+      selectedCodexChatId: undefined,
+    });
+  });
 });

@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { api } from "@/lib/api";
 import { appendCodexDelta, upsertCodexMessage } from "@/lib/codex-chat-state";
+import { machinePreferenceKey } from "@/lib/store";
 import type { CodexAccessOption, CodexAttachment, CodexChatMessage, CodexChatThread, CodexLiveEvent } from "@/lib/types";
 
 function UserMessage() {
@@ -98,10 +99,10 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
   const [messages, setMessages] = useState<CodexChatMessage[]>(thread.messages);
   const [isRunning, setIsRunning] = useState(thread.chat.status === "active");
   const [error, setError] = useState<string>();
-  const [model, setModel] = useState(() => localStorage.getItem("boosted.codex.model") ?? thread.chat.model ?? "");
-  const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem("boosted.codex.effort") ?? "");
+  const [model, setModel] = useState(() => localStorage.getItem(machinePreferenceKey("boosted.codex.model")) ?? thread.chat.model ?? "");
+  const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem(machinePreferenceKey("boosted.codex.effort")) ?? "");
   const [accessMode, setAccessMode] = useState<CodexAccessOption["id"]>(() => {
-    const stored = localStorage.getItem("boosted.codex.access");
+    const stored = localStorage.getItem(machinePreferenceKey("boosted.codex.access"));
     return stored === "workspaceWrite" || stored === "readOnly" ? stored : "fullAccess";
   });
   const [attachments, setAttachments] = useState<CodexAttachment[]>([]);
@@ -122,15 +123,15 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
     if (nextModel && nextModel.model !== model) {
       setModel(nextModel.model);
       setReasoningEffort(nextModel.defaultReasoningEffort);
-      localStorage.setItem("boosted.codex.model", nextModel.model);
-      localStorage.setItem("boosted.codex.effort", nextModel.defaultReasoningEffort);
+      localStorage.setItem(machinePreferenceKey("boosted.codex.model"), nextModel.model);
+      localStorage.setItem(machinePreferenceKey("boosted.codex.effort"), nextModel.defaultReasoningEffort);
     } else if (nextModel && !nextModel.supportedReasoningEfforts.some((effort) => effort.id === reasoningEffort)) {
       setReasoningEffort(nextModel.defaultReasoningEffort);
-      localStorage.setItem("boosted.codex.effort", nextModel.defaultReasoningEffort);
+      localStorage.setItem(machinePreferenceKey("boosted.codex.effort"), nextModel.defaultReasoningEffort);
     }
     if (!codexOptions.data.accessModes.some((entry) => entry.id === accessMode)) {
       setAccessMode(codexOptions.data.defaultAccessMode);
-      localStorage.setItem("boosted.codex.access", codexOptions.data.defaultAccessMode);
+      localStorage.setItem(machinePreferenceKey("boosted.codex.access"), codexOptions.data.defaultAccessMode);
     }
   }, [accessMode, codexOptions.data, model, reasoningEffort, thread.chat.model]);
 
@@ -234,10 +235,10 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
   const selectModel = useCallback((value: string) => {
     const next = codexOptions.data?.models.find((entry) => entry.model === value);
     setModel(value);
-    localStorage.setItem("boosted.codex.model", value);
+    localStorage.setItem(machinePreferenceKey("boosted.codex.model"), value);
     if (next) {
       setReasoningEffort(next.defaultReasoningEffort);
-      localStorage.setItem("boosted.codex.effort", next.defaultReasoningEffort);
+      localStorage.setItem(machinePreferenceKey("boosted.codex.effort"), next.defaultReasoningEffort);
       if (!next.inputModalities.includes("image")) {
         const removed = attachments;
         setAttachments([]);
@@ -248,13 +249,13 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
 
   const selectEffort = useCallback((value: string) => {
     setReasoningEffort(value);
-    localStorage.setItem("boosted.codex.effort", value);
+    localStorage.setItem(machinePreferenceKey("boosted.codex.effort"), value);
   }, []);
 
   const selectAccess = useCallback((value: string) => {
     const next = value as CodexAccessOption["id"];
     setAccessMode(next);
-    localStorage.setItem("boosted.codex.access", next);
+    localStorage.setItem(machinePreferenceKey("boosted.codex.access"), next);
   }, []);
 
   const cancelTurn = useCallback(async () => {

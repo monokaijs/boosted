@@ -17,6 +17,9 @@ const paths = {
   cargoLock: resolve(root, "Cargo.lock"),
   rootPackage: resolve(root, "package.json"),
   desktopPackage: resolve(root, "desktop/package.json"),
+  mobilePackage: resolve(root, "mobile/package.json"),
+  mobileAndroidGradle: resolve(root, "mobile/android/app/build.gradle"),
+  mobileIosProject: resolve(root, "mobile/ios/App/App.xcodeproj/project.pbxproj"),
   webPackage: resolve(root, "web/package.json"),
   tauriConfig: resolve(root, "desktop/src-tauri/tauri.conf.json"),
 };
@@ -31,9 +34,21 @@ if (!workspaceVersionMatch) {
 }
 
 const currentVersion = workspaceVersionMatch[2];
+const androidGradle = readFileSync(paths.mobileAndroidGradle, "utf8");
+const iosProject = readFileSync(paths.mobileIosProject, "utf8");
+
+if (!new RegExp(`versionName "${currentVersion.replaceAll(".", "\\.")}"`).test(androidGradle)) {
+  throw new Error("Android versionName does not match the Boosted version");
+}
+
+const iosVersions = [...iosProject.matchAll(/MARKETING_VERSION = ([^;]+);/g)].map((match) => match[1]);
+if (iosVersions.length === 0 || iosVersions.some((version) => version !== currentVersion)) {
+  throw new Error("iOS MARKETING_VERSION does not match the Boosted version");
+}
 const jsonFiles = [
   paths.rootPackage,
   paths.desktopPackage,
+  paths.mobilePackage,
   paths.webPackage,
   paths.tauriConfig,
 ];
@@ -61,6 +76,7 @@ if (bumpType === "major") {
 }
 
 const nextVersion = versionParts.join(".");
+const nextBuildNumber = versionParts[0] * 1_000_000 + versionParts[1] * 1_000 + versionParts[2];
 
 writeFileSync(
   paths.cargoManifest,
@@ -75,6 +91,20 @@ for (const file of jsonFiles) {
   contents.version = nextVersion;
   writeFileSync(file, `${JSON.stringify(contents, null, 2)}\n`);
 }
+
+writeFileSync(
+  paths.mobileAndroidGradle,
+  androidGradle
+    .replace(/versionCode \d+/, `versionCode ${nextBuildNumber}`)
+    .replace(/versionName "[^"]+"/, `versionName "${nextVersion}"`),
+);
+
+writeFileSync(
+  paths.mobileIosProject,
+  iosProject
+    .replace(/CURRENT_PROJECT_VERSION = \d+;/g, `CURRENT_PROJECT_VERSION = ${nextBuildNumber};`)
+    .replace(/MARKETING_VERSION = [^;]+;/g, `MARKETING_VERSION = ${nextVersion};`),
+);
 
 const workspacePackages = new Set(["boosted-desktop", "boosted-server"]);
 let updatedLockPackages = 0;

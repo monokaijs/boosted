@@ -12,11 +12,50 @@ pnpm dev
 cargo run -p boosted-server
 ```
 
-The web client defaults to `http://127.0.0.1:4782`. Set `VITE_BOOSTED_API_URL` when the service runs elsewhere. The server stores local state under the platform application-data directory, or under `BOOSTED_DATA_DIR` when set.
+The browser client uses its current origin; during Vite development, `/api` and WebSocket requests are proxied to `http://127.0.0.1:4782`. Set `VITE_BOOSTED_API_URL` when the service runs elsewhere. The server stores local state under the platform application-data directory, or under `BOOSTED_DATA_DIR` when set.
 
 The first browser visit creates the administrator. The admin then creates member accounts. All authenticated users share projects, tasks, history, terminals, and host-level execution access; only the first user can manage accounts and the shared Codex connection.
 
 > Boosted currently starts Codex with full host access, matching the selected product policy. Only expose the server to trusted users, and put remote access behind your own authenticated TLS proxy or tunnel.
+
+## Machine connections
+
+Every web, desktop, and mobile frontend can save multiple Boosted servers and switch between them from the machine selector or **Settings → Connections**. A connection has its own session and workspace state; switching replaces the whole active workspace, and Boosted never polls or combines data from saved machines.
+
+When adding a machine, enter its local alias, URL, and account credentials. A scheme-less host such as `office-pc.local` becomes `http://office-pc.local:4782`; explicit HTTP/HTTPS schemes and ports are preserved. The server must already have its first administrator. Only the automatically generated local browser or desktop connection can perform first-run setup.
+
+Boosted connects directly to the URL you provide. It does not provide TLS, server discovery, QR pairing, a relay, VPN/tunnel setup, port forwarding, DNS, or other remote-access configuration. Configure trusted routing and exposure yourself. Plain HTTP is supported by the native apps, while browsers can block an HTTP server when the frontend itself was loaded over HTTPS; use an HTTPS reverse proxy or load Boosted over HTTP in that case.
+
+Existing installations migrate automatically. Browser clients retain the current origin, desktop clients retain `http://127.0.0.1:4782`, and development builds continue to honor `VITE_BOOSTED_API_URL`. The existing session and selected workspace move into that generated connection.
+
+## Mobile development
+
+The `mobile` workspace contains tracked Capacitor iOS and Android projects using app ID `app.boosted.mobile`. It copies the existing Vite build and renders a control-focused native shell for tasks, plans, Codex chats, account actions, and connection management. Project registration, files, terminals, integrations, team/Codex administration, and global server configuration remain desktop/web workflows.
+
+Install the normal repository prerequisites plus Xcode for iOS and Android Studio with an Android SDK for Android, then synchronize the web bundle and native plugins:
+
+```bash
+pnpm install
+pnpm mobile:sync
+```
+
+Open or run a native project:
+
+```bash
+pnpm mobile:ios
+pnpm mobile:android
+pnpm --dir mobile run run:ios
+pnpm --dir mobile run run:android
+```
+
+Build local debug artifacts without publishing:
+
+```bash
+pnpm --dir mobile run build:android
+pnpm --dir mobile run build:ios
+```
+
+iOS simulator builds can also be checked without signing with `xcodebuild -project mobile/ios/App/App.xcodeproj -scheme App -sdk iphonesimulator -configuration Debug CODE_SIGNING_ALLOWED=NO build`. Android debug APKs can be built from `mobile/android` with `./gradlew assembleDebug`. App Store/Play Store signing, accounts, CI native builds, push notifications, and publishing are intentionally not configured.
 
 ## Headless server
 

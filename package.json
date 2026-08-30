@@ -32,6 +32,9 @@
     "typecheck": "pnpm --filter @boosted/web typecheck",
     "desktop": "pnpm --filter @boosted/desktop tauri dev",
     "desktop:build": "pnpm --filter @boosted/desktop tauri build",
+    "mobile:sync": "pnpm --filter @boosted/mobile sync",
+    "mobile:ios": "pnpm --filter @boosted/mobile run:ios",
+    "mobile:android": "pnpm --filter @boosted/mobile run:android",
     "server": "cargo run -p boosted-server",
     "test:cli": "node --test test/npm-cli.test.mjs"
   }

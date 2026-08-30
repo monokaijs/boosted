@@ -1800,6 +1800,7 @@ fn validate_integration(input: &IntegrationCreate) -> AppResult<()> {
             ));
         }
     }
+    integrations::validate_config(&input.provider, &input.config)?;
     Ok(())
 }
 

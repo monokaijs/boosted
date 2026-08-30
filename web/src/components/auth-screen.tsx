@@ -1,9 +1,12 @@
 import { useState, type FormEvent } from "react";
-import { Bot, LoaderCircle } from "lucide-react";
+import { Bot, LoaderCircle, Server } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { api, setToken } from "@/lib/api";
+import { setToken } from "@/lib/api";
+import { useBoostedApiClient } from "@/lib/api-context";
 import type { SetupState, User } from "@/lib/types";
+import { ConnectionsDialog, MachineSwitcher } from "@/components/machine-manager";
+import { useMachineStore } from "@/lib/machines";
 
 type Props = {
   setup: SetupState;
@@ -11,10 +14,13 @@ type Props = {
 };
 
 export function AuthScreen({ setup, onAuthenticated }: Props) {
+  const api = useBoostedApiClient();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [connectionsOpen, setConnectionsOpen] = useState(false);
+  const machine = useMachineStore((state) => state.profiles.find((profile) => profile.id === state.activeId));
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -32,7 +38,7 @@ export function AuthScreen({ setup, onAuthenticated }: Props) {
       const session = setup.needsSetup
         ? await api.createAdmin(username, password)
         : await api.login(username, password);
-      setToken(session.token);
+      await setToken(session.token);
       onAuthenticated(session.user);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to continue");
@@ -47,6 +53,7 @@ export function AuthScreen({ setup, onAuthenticated }: Props) {
         <header className="grid gap-3">
           <div className="flex size-10 items-center justify-center rounded-xl border border-primary/25 bg-primary/10 text-primary"><Bot className="size-5" /></div>
           <h1 className="text-xl font-semibold tracking-tight">{setup.needsSetup ? "Set up Boosted" : "Sign in"}</h1>
+          {machine && <MachineSwitcher onManage={() => setConnectionsOpen(true)}><Button variant="secondary" size="sm" className="w-fit max-w-full"><Server /><span className="truncate">{machine.name}</span></Button></MachineSwitcher>}
         </header>
 
         <form className="grid gap-3" onSubmit={submit} noValidate>
@@ -65,6 +72,7 @@ export function AuthScreen({ setup, onAuthenticated }: Props) {
           </Button>
         </form>
       </section>
+      <ConnectionsDialog open={connectionsOpen} onOpenChange={setConnectionsOpen} />
     </main>
   );
 }

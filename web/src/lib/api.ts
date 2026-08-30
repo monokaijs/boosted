@@ -25,10 +25,7 @@ import type {
   WorkspaceCodexSettings,
   User,
 } from "@/lib/types";
-
-const isTauri = "__TAURI_INTERNALS__" in window;
-const configuredBase = import.meta.env.VITE_BOOSTED_API_URL?.replace(/\/$/, "") ?? (isTauri ? "http://127.0.0.1:4782" : "");
-const TOKEN_KEY = "boosted.session";
+import { activeMachine, activeMachineToken, useMachineStore, type MachineProfile } from "@/lib/machines";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -36,37 +33,58 @@ export class ApiError extends Error {
   }
 }
 
-export function getToken() {
-  return localStorage.getItem(TOKEN_KEY);
-}
-
-export function setToken(token?: string) {
-  if (token) localStorage.setItem(TOKEN_KEY, token);
-  else localStorage.removeItem(TOKEN_KEY);
-}
-
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers);
-  headers.set("Accept", "application/json");
-  if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  const token = getToken();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(`${configuredBase}/api/v1${path}`, { ...init, headers });
-  if (response.status === 204) return undefined as T;
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    if (response.status === 401) setToken();
-    throw new ApiError(response.status, body.error ?? body.message ?? `Request failed (${response.status})`);
-  }
-  return body as T;
-}
-
 function json(method: string, body?: unknown): RequestInit {
   return { method, body: body === undefined ? undefined : JSON.stringify(body) };
 }
 
-export const api = {
-  health: () => request<Health>("/health"),
+type ApiClientOptions = {
+  profile: Pick<MachineProfile, "id" | "baseUrl">;
+  getToken: () => string | undefined;
+  onUnauthorized?: () => void | Promise<void>;
+};
+
+export function createBoostedApiClient(options: ApiClientOptions) {
+  const baseUrl = options.profile.baseUrl.replace(/\/$/, "");
+  const activeRequests = new Set<AbortController>();
+
+  async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const headers = new Headers(init.headers);
+    headers.set("Accept", "application/json");
+    if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    const token = options.getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const controller = new AbortController();
+    const relayAbort = () => controller.abort(init.signal?.reason);
+    if (init.signal?.aborted) relayAbort();
+    else init.signal?.addEventListener("abort", relayAbort, { once: true });
+    activeRequests.add(controller);
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}/api/v1${path}`, { ...init, headers, signal: controller.signal });
+    } catch (error) {
+      if (error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError")) {
+        throw new ApiError(408, "Connection timed out.");
+      }
+      throw new ApiError(0, error instanceof Error ? error.message : "Unable to reach the Boosted server.");
+    } finally {
+      activeRequests.delete(controller);
+      init.signal?.removeEventListener("abort", relayAbort);
+    }
+    if (response.status === 204) return undefined as T;
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 401) await options.onUnauthorized?.();
+      throw new ApiError(response.status, body.error ?? body.message ?? `Request failed (${response.status})`);
+    }
+    return body as T;
+  }
+
+  const client = {
+  cancelRequests: () => {
+    for (const controller of activeRequests) controller.abort();
+    activeRequests.clear();
+  },
+  health: (signal?: AbortSignal) => request<Health>("/health", { signal }),
   setupState: () => request<SetupState>("/setup"),
   createAdmin: (username: string, password: string) => request<Session>("/setup/admin", json("POST", { username, password })),
   login: (username: string, password: string) => request<Session>("/auth/login", json("POST", { username, password })),
@@ -113,10 +131,20 @@ export const api = {
   createTask: (projectId: string, title: string, description: string, options: { baseBranch?: string; model?: string; reasoningEffort?: string; accessMode?: CodexAccessOption["id"]; attachmentIds?: string[] } = {}) => request<Task>("/tasks", json("POST", { projectId, title, description, ...options })),
   downloadTaskAttachment: async (taskId: string, attachment: TaskAttachment) => {
     const headers = new Headers();
-    const token = getToken();
+    const token = options.getToken();
     if (token) headers.set("Authorization", `Bearer ${token}`);
-    const response = await fetch(`${configuredBase}/api/v1/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(attachment.id)}`, { headers });
-    if (!response.ok) throw new ApiError(response.status, "Unable to download attachment");
+    const controller = new AbortController();
+    activeRequests.add(controller);
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(attachment.id)}`, { headers, signal: controller.signal });
+    } finally {
+      activeRequests.delete(controller);
+    }
+    if (!response.ok) {
+      if (response.status === 401) await options.onUnauthorized?.();
+      throw new ApiError(response.status, "Unable to download attachment");
+    }
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement("a");
     link.href = url; link.download = attachment.name; link.click();
@@ -147,13 +175,60 @@ export const api = {
   gitCommit: (taskId: string, message: string) => request<{ commit: string }>(`/tasks/${taskId}/git/commit`, json("POST", { message })),
   gitHistory: (taskId: string, limit = 100) => request<GitCommit[]>(`/tasks/${taskId}/git/history?limit=${limit}`),
   createTerminal: (taskId: string) => request<{ id: string }>(`/tasks/${taskId}/terminals`, json("POST")),
-};
+  };
+
+  function webSocket(path: string) {
+    const url = new URL(baseUrl);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.pathname = `/api/v1${path}`;
+    url.search = "";
+    return url.toString();
+  }
+
+  return { ...client, webSocket, profileId: options.profile.id, baseUrl };
+}
+
+export type BoostedApiClient = ReturnType<typeof createBoostedApiClient>;
+
+let cachedClient: BoostedApiClient | undefined;
+let cachedKey = "";
+
+export function getActiveApiClient() {
+  const profile = activeMachine();
+  if (!profile) throw new ApiError(0, "Add a Boosted machine to continue.");
+  const key = `${profile.id}\0${profile.baseUrl}`;
+  if (!cachedClient || cachedKey !== key) {
+    const profileId = profile.id;
+    cachedClient = createBoostedApiClient({
+      profile,
+      getToken: () => useMachineStore.getState().tokens[profileId],
+      onUnauthorized: () => useMachineStore.getState().setToken(profileId),
+    });
+    cachedKey = key;
+  }
+  return cachedClient;
+}
+
+export const api = new Proxy({} as BoostedApiClient, {
+  get: (_target, property: keyof BoostedApiClient) => {
+    const value = getActiveApiClient()[property];
+    if (typeof value !== "function") return value;
+    return (...args: unknown[]) => {
+      const current = getActiveApiClient()[property] as (...input: unknown[]) => unknown;
+      return current(...args);
+    };
+  },
+});
+
+export function getToken() {
+  return activeMachineToken();
+}
+
+export async function setToken(token?: string) {
+  const state = useMachineStore.getState();
+  if (state.activeId) await state.setToken(state.activeId, token);
+}
 
 export function apiWebSocket(path: string) {
-  const explicit = configuredBase || window.location.origin;
-  const url = new URL(explicit);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.pathname = `/api/v1${path}`;
-  url.search = "";
-  return url.toString();
+  return getActiveApiClient().webSocket(path);
 }

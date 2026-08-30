@@ -18,6 +18,7 @@ import { PlanPanel } from "@/components/panels/plan-panel";
 import { TaskboardPanel } from "@/components/panels/taskboard-panel";
 import { newTerminalEvent, TerminalPanel } from "@/components/panels/terminal-panel";
 import { Button } from "@/components/ui/button";
+import { machinePreferenceKey } from "@/lib/store";
 
 const CodexChatPanel = lazy(() => import("@/components/panels/codex-chat-panel").then((module) => ({ default: module.CodexChatPanel })));
 
@@ -34,15 +35,15 @@ function workspaceLayoutMode(): WorkspaceLayoutMode {
 }
 
 function workspaceLayoutKey(mode: WorkspaceLayoutMode, workspaceId: string) {
-  return `boosted.layout.v5.${mode}.${workspaceId}`;
+  return machinePreferenceKey(`boosted.layout.v5.${mode}.${workspaceId}`);
 }
 
 function legacyWorkspaceLayoutKey(mode: WorkspaceLayoutMode) {
-  return mode === "compact" ? compactLayoutKey : desktopLayoutKey;
+  return machinePreferenceKey(mode === "compact" ? compactLayoutKey : desktopLayoutKey);
 }
 
 function workspaceActivePanelKey(mode: WorkspaceLayoutMode, workspaceId: string) {
-  return `boosted.workspace.active-panel.${mode}.${workspaceId}`;
+  return machinePreferenceKey(`boosted.workspace.active-panel.${mode}.${workspaceId}`);
 }
 
 const components = {
@@ -431,7 +432,7 @@ export function Workspace({ workspaceId }: { workspaceId: string }) {
         api.fromJSON(JSON.parse(saved));
         localStorage.setItem(layoutKey, saved);
         const activePanelId = localStorage.getItem(workspaceActivePanelKey(mode, workspaceId))
-          ?? localStorage.getItem(`boosted.workspace.active-panel.${mode}`);
+          ?? localStorage.getItem(machinePreferenceKey(`boosted.workspace.active-panel.${mode}`));
         if (activePanelId) api.getPanel(activePanelId)?.api.setActive();
         return;
       } catch {

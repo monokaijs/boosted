@@ -7,6 +7,7 @@ import { ForcePasswordDialog, NewTaskDialog, OpenProjectDialog } from "@/compone
 import { SettingsDialog } from "@/components/settings-dialog";
 import { TaskDrawer } from "@/components/task-drawer";
 import { CodexChatsDrawer } from "@/components/codex-chats-drawer";
+import { ConnectionsDialog, MachineSwitcher } from "@/components/machine-manager";
 import { Workspace } from "@/components/workspace";
 import { api, setToken } from "@/lib/api";
 import { useLiveEvents } from "@/hooks/use-live-events";
@@ -52,6 +53,7 @@ export function AppShell() {
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [newTaskDialogOpen, setNewTaskDialogOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [connectionsOpen, setConnectionsOpen] = useState(false);
   const selectedProjectId = useAppStore((state) => state.selectedProjectId);
   const selectedTaskId = useAppStore((state) => state.selectedTaskId);
   const drawerOpen = useAppStore((state) => state.taskDrawerOpen);
@@ -99,10 +101,9 @@ export function AppShell() {
     setDrawerOpen(true);
   }
 
-  function logout() {
-    setToken();
+  async function logout() {
+    await setToken();
     useAppStore.getState().setUser(undefined);
-    window.location.reload();
   }
 
   function startDrawerResize(event: ReactPointerEvent<HTMLDivElement>) {
@@ -146,6 +147,8 @@ export function AppShell() {
     >
       <header className="app-topbar">
         <div className="app-brand flex h-full w-12 items-center justify-center"><img src="/favicon.svg" alt="Boosted" className="size-6" /></div>
+        <MachineSwitcher onManage={() => setConnectionsOpen(true)} />
+        <div className="app-machine-divider mx-1 h-4 w-px bg-border" />
         <div className="app-drawer-switchers ml-1 flex items-center gap-0.5">
           <Button className={cn(drawerOpen && drawerView === "tasks" && "bg-accent")} variant="ghost" size="icon-sm" title="Tasks" aria-label="Tasks" aria-pressed={drawerOpen && drawerView === "tasks"} onClick={() => toggleDrawer("tasks")}><ListTodo /></Button>
           <Button className={cn(drawerOpen && drawerView === "chats" && "bg-accent")} variant="ghost" size="icon-sm" title="Codex chats" aria-label="Codex chats" aria-pressed={drawerOpen && drawerView === "chats"} onClick={() => toggleDrawer("chats")}><MessagesSquare /></Button>
@@ -173,7 +176,7 @@ export function AppShell() {
         <div className="app-actions ml-auto flex items-center gap-1 pr-2">
           {["downloading", "installing", "restarting"].includes(appUpdate.phase) && <button type="button" className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[10px] text-muted-foreground hover:bg-accent" onClick={() => setSettingsOpen(true)}><span className="size-3 animate-spin rounded-full border-2 border-current border-r-transparent" />{appUpdate.phase === "downloading" ? `Updating${formatUpdateProgress(appUpdate) !== undefined ? ` ${formatUpdateProgress(appUpdate)}%` : ""}` : appUpdate.phase === "installing" ? "Installing update" : "Restarting"}</button>}
           <Button variant="ghost" size="icon-sm" title="Settings" onClick={() => setSettingsOpen(true)}><Settings /></Button>
-          <Button variant="ghost" size="icon-sm" onClick={logout} title="Sign out"><LogOut /></Button>
+          <Button variant="ghost" size="icon-sm" onClick={() => void logout()} title="Sign out of this machine"><LogOut /></Button>
         </div>
       </header>
 
@@ -212,6 +215,7 @@ export function AppShell() {
       <OpenProjectDialog open={projectDialogOpen} onOpenChange={setProjectDialogOpen} />
       <NewTaskDialog open={newTaskDialogOpen} onOpenChange={setNewTaskDialogOpen} />
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <ConnectionsDialog open={connectionsOpen} onOpenChange={setConnectionsOpen} />
       <ForcePasswordDialog />
     </main>
   );

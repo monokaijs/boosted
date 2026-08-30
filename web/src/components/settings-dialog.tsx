@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, Bot, ChevronRight, CircleGauge, CloudDownload, Code2, Copy, ExternalLink, GitBranch, Globe2, LoaderCircle, Plug, Plus, RefreshCw, Save, Settings2, Shield, Trash2, UserPlus, Users, Workflow } from "lucide-react";
+import { Activity, Bot, ChevronRight, CircleGauge, CloudDownload, Code2, Copy, ExternalLink, GitBranch, Globe2, LoaderCircle, Pencil, Plug, Plus, RefreshCw, Save, Server, Settings2, Shield, Trash2, UserPlus, Users, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -10,13 +10,15 @@ import { useAppStore } from "@/lib/store";
 import type { Integration } from "@/lib/types";
 import { checkAndInstallAppUpdate, formatUpdateProgress, isDesktopApp, useAppUpdateState } from "@/lib/updater";
 import { cn, relativeTime } from "@/lib/utils";
+import { ConnectionsManager } from "@/components/machine-manager";
 
 const Gitlab = GitBranch;
 
-type Section = "web" | "application" | "team" | "workspace" | "integrations" | "codex";
+type Section = "connections" | "web" | "application" | "team" | "workspace" | "integrations" | "codex";
 
 const sectionGroups: { label: string; sections: { id: Section; label: string; icon: typeof Settings2 }[] }[] = [
   { label: "Global", sections: [
+    { id: "connections", label: "Connections", icon: Server },
     { id: "web", label: "Web interface", icon: Globe2 },
     { id: "application", label: "Application", icon: RefreshCw },
     { id: "team", label: "Team", icon: Users },
@@ -27,6 +29,10 @@ const sectionGroups: { label: string; sections: { id: Section; label: string; ic
     { id: "codex", label: "Codex", icon: Bot },
   ] },
 ];
+
+function ConnectionsSettings() {
+  return <div className="settings-content"><SettingsSection title="Boosted machines" description="Switch between independent Boosted servers. Accounts, projects, tasks, and sessions stay isolated per connection."><ConnectionsManager embedded /></SettingsSection></div>;
+}
 
 function SettingsSection({ title, description, children }: { title: string; description: string; children: ReactNode }) {
   return <section className="settings-section"><div className="mb-4"><h2 className="text-sm font-semibold">{title}</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p></div>{children}</section>;
@@ -115,32 +121,172 @@ const scheduleOptions = [
   { value: "1440", label: "Every day" },
 ];
 
+type GitlabTarget = { kind: "project" | "group"; identifier: string; legacyExternalIds?: boolean };
+type HulyTarget = { workspace: string; project: string; legacyExternalIds?: boolean };
+
 function providerIcon(provider: Integration["provider"]) {
   return provider === "gitlab" ? GitBranch : Code2;
+}
+
+function configString(config: Record<string, unknown>, key: string, fallback = "") {
+  const value = config[key];
+  return typeof value === "string" ? value : fallback;
+}
+
+function configTargets(config: Record<string, unknown>) {
+  return Array.isArray(config.targets)
+    ? config.targets.filter((target): target is Record<string, unknown> => Boolean(target) && typeof target === "object")
+    : [];
+}
+
+function integrationTargetCount(integration: Integration) {
+  return Math.max(configTargets(integration.config).length, configString(integration.config, "project") ? 1 : 0);
 }
 
 function IntegrationsSettings() {
   const projectId = useAppStore((state) => state.selectedProjectId);
   const queryClient = useQueryClient();
   const [installing, setInstalling] = useState<Integration["provider"]>();
+  const [editingId, setEditingId] = useState<string>();
   const [name, setName] = useState("");
   const [schedule, setSchedule] = useState("");
-  const [config, setConfig] = useState<Record<string, string>>({});
+  const [config, setConfig] = useState<Record<string, unknown>>({});
+  const [gitlabTargets, setGitlabTargets] = useState<GitlabTarget[]>([{ kind: "project", identifier: "" }]);
+  const [hulyTargets, setHulyTargets] = useState<HulyTarget[]>([{ workspace: "", project: "" }]);
   const integrations = useQuery({ queryKey: ["integrations", projectId], queryFn: () => api.integrations(projectId!), enabled: Boolean(projectId) });
-  const install = useMutation({ mutationFn: () => api.createIntegration(projectId!, { provider: installing!, name, config, enabled: true, syncIntervalMinutes: schedule ? Number(schedule) : undefined }), onSuccess: () => { setInstalling(undefined); setName(""); setSchedule(""); setConfig({}); void queryClient.invalidateQueries({ queryKey: ["integrations", projectId] }); } });
+  const save = useMutation({
+    mutationFn: () => {
+      if (!installing) throw new Error("Choose an integration provider");
+      const { targets: _targets, project: _project, workspace: _workspace, ...sharedConfig } = config;
+      const nextConfig = installing === "gitlab"
+        ? { ...sharedConfig, targets: gitlabTargets.map((target) => ({ kind: target.kind, identifier: target.identifier.trim(), legacyExternalIds: Boolean(target.legacyExternalIds) })) }
+        : { ...sharedConfig, targets: hulyTargets.map((target) => ({ workspace: target.workspace.trim(), project: target.project.trim(), legacyExternalIds: Boolean(target.legacyExternalIds) })) };
+      const enabled = editingId ? integrations.data?.find((entry) => entry.id === editingId)?.enabled ?? true : true;
+      const input = { name, config: nextConfig, enabled, syncIntervalMinutes: schedule ? Number(schedule) : undefined };
+      return editingId
+        ? api.updateIntegration(projectId!, editingId, input)
+        : api.createIntegration(projectId!, { provider: installing, ...input });
+    },
+    onSuccess: () => {
+      closeEditor();
+      void queryClient.invalidateQueries({ queryKey: ["integrations", projectId] });
+    },
+  });
   const sync = useMutation({ mutationFn: (id: string) => api.syncIntegration(projectId!, id), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["integrations", projectId] }); void queryClient.invalidateQueries({ queryKey: ["tasks", projectId] }); } });
   const remove = useMutation({ mutationFn: (id: string) => api.deleteIntegration(projectId!, id), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["integrations", projectId] }) });
   const toggle = useMutation({ mutationFn: (entry: Integration) => api.updateIntegration(projectId!, entry.id, { name: entry.name, config: entry.config, enabled: !entry.enabled, syncIntervalMinutes: entry.syncIntervalMinutes }), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["integrations", projectId] }) });
 
   function begin(provider: Integration["provider"]) {
-    setInstalling(provider); setName(provider === "gitlab" ? "GitLab issues" : "Huly tasks"); setSchedule("");
-    setConfig(provider === "gitlab" ? { baseUrl: "https://gitlab.com", project: "", token: "" } : { endpoint: "", workspace: "", project: "", token: "" });
+    setInstalling(provider);
+    setEditingId(undefined);
+    setName(provider === "gitlab" ? "GitLab issues" : "Huly tasks");
+    setSchedule("");
+    setConfig(provider === "gitlab" ? { baseUrl: "https://gitlab.com", token: "" } : { endpoint: "", token: "" });
+    setGitlabTargets([{ kind: "project", identifier: "" }]);
+    setHulyTargets([{ workspace: "", project: "" }]);
   }
 
-  return <div className="settings-content"><SettingsSection title="Installed integrations" description="Connections belong to this workspace. Import on demand or keep the taskboard synchronized on a schedule."><div className="grid gap-2">{integrations.isLoading && <p className="text-xs text-muted-foreground">Loading integrations…</p>}{integrations.data?.map((entry) => { const Icon = providerIcon(entry.provider); return <div key={entry.id} className="settings-card flex items-start gap-3"><div className="grid size-9 shrink-0 place-items-center rounded-lg bg-secondary"><Icon className="size-4" /></div><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><p className="text-xs font-medium">{entry.name}</p><span className={cn("rounded-full px-1.5 py-0.5 text-[9px] capitalize", entry.enabled ? "bg-success/10 text-success" : "bg-secondary text-muted-foreground")}>{entry.enabled ? "Active" : "Paused"}</span>{entry.lastSyncStatus && <span className="text-[10px] capitalize text-muted-foreground">{entry.lastSyncStatus}</span>}</div><p className="mt-1 text-[11px] capitalize text-muted-foreground">{entry.provider} · {entry.syncIntervalMinutes ? scheduleOptions.find((option) => Number(option.value) === entry.syncIntervalMinutes)?.label : "Manual sync"}{entry.lastSyncedAt ? ` · synced ${relativeTime(entry.lastSyncedAt)}` : " · never synced"}</p>{entry.lastSyncError && <p className="mt-1 text-[11px] text-destructive">{entry.lastSyncError}</p>}</div><div className="flex shrink-0 items-center gap-1"><Button variant="ghost" size="sm" onClick={() => toggle.mutate(entry)}>{entry.enabled ? "Pause" : "Enable"}</Button><Button variant="secondary" size="sm" disabled={sync.isPending} onClick={() => sync.mutate(entry.id)}>{sync.isPending && sync.variables === entry.id ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}Sync now</Button><Button variant="ghost" size="icon-sm" title="Remove integration" onClick={() => remove.mutate(entry.id)}><Trash2 /></Button></div></div>; })}{integrations.data?.length === 0 && <div className="rounded-lg border border-dashed border-border px-5 py-8 text-center"><CloudDownload className="mx-auto size-6 text-muted-foreground" /><p className="mt-2 text-xs font-medium">No integrations installed</p><p className="mt-1 text-[11px] text-muted-foreground">Install a provider below to import external work.</p></div>}</div></SettingsSection>
-    <SettingsSection title="Integration plugins" description="Choose a provider to install into this workspace."><div className="grid gap-2 sm:grid-cols-2"><button className="integration-plugin-card" onClick={() => begin("gitlab")}><span className="grid size-10 place-items-center rounded-lg bg-[#FC6D26]/10 text-[#FC6D26]"><Gitlab className="size-5" /></span><span className="min-w-0 flex-1"><span className="block text-xs font-medium">GitLab</span><span className="mt-1 block text-[11px] leading-4 text-muted-foreground">Import open issues from GitLab.com or self-managed projects.</span></span><ChevronRight className="size-4 text-muted-foreground" /></button><button className="integration-plugin-card" onClick={() => begin("huly")}><span className="grid size-10 place-items-center rounded-lg bg-primary/10 text-primary"><Code2 className="size-5" /></span><span className="min-w-0 flex-1"><span className="block text-xs font-medium">Huly</span><span className="mt-1 block text-[11px] leading-4 text-muted-foreground">Import project issues through a Huly SDK connector.</span></span><ChevronRight className="size-4 text-muted-foreground" /></button></div></SettingsSection>
-    {installing && <SettingsSection title={`Install ${installing === "gitlab" ? "GitLab" : "Huly"}`} description={installing === "gitlab" ? "Use a personal, project, or group access token with permission to read issues." : "Point Boosted at a connector backed by Huly’s official API client. It should return an issue array from a GET request."}><form className="settings-card grid gap-3" onSubmit={(event) => { event.preventDefault(); install.mutate(); }}><label className="grid gap-1.5"><span className="settings-label">Connection name</span><Input value={name} onChange={(event) => setName(event.target.value)} required /></label>{installing === "gitlab" ? <><label className="grid gap-1.5"><span className="settings-label">GitLab URL</span><Input value={config.baseUrl ?? ""} onChange={(event) => setConfig({ ...config, baseUrl: event.target.value })} placeholder="https://gitlab.com" required /></label><label className="grid gap-1.5"><span className="settings-label">Project path or ID</span><Input value={config.project ?? ""} onChange={(event) => setConfig({ ...config, project: event.target.value })} placeholder="group/project" required /></label></> : <><label className="grid gap-1.5"><span className="settings-label">Connector endpoint</span><Input value={config.endpoint ?? ""} onChange={(event) => setConfig({ ...config, endpoint: event.target.value })} placeholder="https://connector.example.com/huly/issues" required /></label><div className="grid gap-3 sm:grid-cols-2"><label className="grid gap-1.5"><span className="settings-label">Huly workspace</span><Input value={config.workspace ?? ""} onChange={(event) => setConfig({ ...config, workspace: event.target.value })} required /></label><label className="grid gap-1.5"><span className="settings-label">Project identifier</span><Input value={config.project ?? ""} onChange={(event) => setConfig({ ...config, project: event.target.value })} required /></label></div></>}<label className="grid gap-1.5"><span className="settings-label">Access token</span><Input type="password" value={config.token ?? ""} onChange={(event) => setConfig({ ...config, token: event.target.value })} required /></label><label className="grid gap-1.5"><span className="settings-label">Automatic import</span><select className="settings-select" value={schedule} onChange={(event) => setSchedule(event.target.value)}>{scheduleOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>{install.error && <p className="text-xs text-destructive">{install.error.message}</p>}<div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={() => setInstalling(undefined)}>Cancel</Button><Button disabled={install.isPending || !name.trim()}>{install.isPending && <LoaderCircle className="animate-spin" />}Install plugin</Button></div></form></SettingsSection>}
-    {sync.data && <p className="text-xs text-success">{sync.data.message}</p>}{sync.error && <p className="text-xs text-destructive">{sync.error.message}</p>}</div>;
+  function edit(entry: Integration) {
+    setInstalling(entry.provider);
+    setEditingId(entry.id);
+    setName(entry.name);
+    setSchedule(entry.syncIntervalMinutes ? String(entry.syncIntervalMinutes) : "");
+    setConfig(entry.config);
+    const targets = configTargets(entry.config);
+    if (entry.provider === "gitlab") {
+      const parsed = targets.flatMap((target): GitlabTarget[] => {
+        const kind = target.kind === "group" ? "group" : "project";
+        const identifier = typeof target.identifier === "string" ? target.identifier : "";
+        return identifier ? [{ kind, identifier, legacyExternalIds: target.legacyExternalIds === true }] : [];
+      });
+      setGitlabTargets(parsed.length ? parsed : [{ kind: "project", identifier: configString(entry.config, "project"), legacyExternalIds: true }]);
+    } else {
+      const parsed = targets.flatMap((target): HulyTarget[] => {
+        const workspace = typeof target.workspace === "string" ? target.workspace : "";
+        const project = typeof target.project === "string" ? target.project : "";
+        return workspace || project ? [{ workspace, project, legacyExternalIds: target.legacyExternalIds === true }] : [];
+      });
+      setHulyTargets(parsed.length ? parsed : [{ workspace: configString(entry.config, "workspace"), project: configString(entry.config, "project"), legacyExternalIds: true }]);
+    }
+  }
+
+  function closeEditor() {
+    setInstalling(undefined);
+    setEditingId(undefined);
+    setName("");
+    setSchedule("");
+    setConfig({});
+  }
+
+  const targetsValid = installing === "gitlab"
+    ? gitlabTargets.length > 0 && gitlabTargets.every((target) => target.identifier.trim())
+    : hulyTargets.length > 0 && hulyTargets.every((target) => target.workspace.trim() && target.project.trim());
+
+  return <div className="settings-content">
+    <SettingsSection title="Installed integrations" description="Connections belong to this workspace and can import from several external projects, repositories, or groups.">
+      <div className="grid gap-2">
+        {integrations.isLoading && <p className="text-xs text-muted-foreground">Loading integrations…</p>}
+        {integrations.data?.map((entry) => {
+          const Icon = providerIcon(entry.provider);
+          const targetCount = integrationTargetCount(entry);
+          return <div key={entry.id} className="settings-card flex items-start gap-3">
+            <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-secondary"><Icon className="size-4" /></div>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2"><p className="text-xs font-medium">{entry.name}</p><span className={cn("rounded-full px-1.5 py-0.5 text-[9px] capitalize", entry.enabled ? "bg-success/10 text-success" : "bg-secondary text-muted-foreground")}>{entry.enabled ? "Active" : "Paused"}</span>{entry.lastSyncStatus && <span className="text-[10px] capitalize text-muted-foreground">{entry.lastSyncStatus}</span>}</div>
+              <p className="mt-1 text-[11px] capitalize text-muted-foreground">{entry.provider} · {targetCount} {targetCount === 1 ? "source" : "sources"} · {entry.syncIntervalMinutes ? scheduleOptions.find((option) => Number(option.value) === entry.syncIntervalMinutes)?.label : "Manual sync"}{entry.lastSyncedAt ? ` · synced ${relativeTime(entry.lastSyncedAt)}` : " · never synced"}</p>
+              {entry.lastSyncError && <p className="mt-1 text-[11px] text-destructive">{entry.lastSyncError}</p>}
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <Button variant="ghost" size="icon-sm" title="Edit integration" onClick={() => edit(entry)}><Pencil /></Button>
+              <Button variant="ghost" size="sm" onClick={() => toggle.mutate(entry)}>{entry.enabled ? "Pause" : "Enable"}</Button>
+              <Button variant="secondary" size="sm" disabled={sync.isPending} onClick={() => sync.mutate(entry.id)}>{sync.isPending && sync.variables === entry.id ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}Sync now</Button>
+              <Button variant="ghost" size="icon-sm" title="Remove integration" onClick={() => remove.mutate(entry.id)}><Trash2 /></Button>
+            </div>
+          </div>;
+        })}
+        {integrations.data?.length === 0 && <div className="rounded-lg border border-dashed border-border px-5 py-8 text-center"><CloudDownload className="mx-auto size-6 text-muted-foreground" /><p className="mt-2 text-xs font-medium">No integrations installed</p><p className="mt-1 text-[11px] text-muted-foreground">Install a provider below to import external work.</p></div>}
+      </div>
+    </SettingsSection>
+    <SettingsSection title="Integration plugins" description="Choose a provider to install into this workspace.">
+      <div className="grid gap-2 sm:grid-cols-2">
+        <button className="integration-plugin-card" onClick={() => begin("gitlab")}><span className="grid size-10 place-items-center rounded-lg bg-[#FC6D26]/10 text-[#FC6D26]"><Gitlab className="size-5" /></span><span className="min-w-0 flex-1"><span className="block text-xs font-medium">GitLab</span><span className="mt-1 block text-[11px] leading-4 text-muted-foreground">Import open issues from multiple GitLab projects, repositories, or groups.</span></span><ChevronRight className="size-4 text-muted-foreground" /></button>
+        <button className="integration-plugin-card" onClick={() => begin("huly")}><span className="grid size-10 place-items-center rounded-lg bg-primary/10 text-primary"><Code2 className="size-5" /></span><span className="min-w-0 flex-1"><span className="block text-xs font-medium">Huly</span><span className="mt-1 block text-[11px] leading-4 text-muted-foreground">Import issues from multiple Huly workspace projects.</span></span><ChevronRight className="size-4 text-muted-foreground" /></button>
+      </div>
+    </SettingsSection>
+    {installing && <SettingsSection title={`${editingId ? "Edit" : "Install"} ${installing === "gitlab" ? "GitLab" : "Huly"}`} description={installing === "gitlab" ? "Add every project, repository, or group whose open issues should feed this workspace." : "Add every Huly workspace/project pair that should feed this workspace through the connector."}>
+      <form className="settings-card grid gap-4" onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
+        <label className="grid gap-1.5"><span className="settings-label">Connection name</span><Input value={name} onChange={(event) => setName(event.target.value)} required /></label>
+        {installing === "gitlab" ? <>
+          <label className="grid gap-1.5"><span className="settings-label">GitLab URL</span><Input value={configString(config, "baseUrl", "https://gitlab.com")} onChange={(event) => setConfig({ ...config, baseUrl: event.target.value })} placeholder="https://gitlab.com" required /></label>
+          <div className="grid gap-2">
+            <div><span className="settings-label">Projects, repositories, and groups</span><p className="mt-1 text-[10px] leading-4 text-muted-foreground">A group imports issues from all projects visible to the token.</p></div>
+            {gitlabTargets.map((target, index) => <div key={index} className="grid items-end gap-2 sm:grid-cols-[120px_minmax(0,1fr)_auto]">
+              <label className="grid gap-1.5"><span className="text-[10px] text-muted-foreground">Type</span><select className="settings-select" value={target.kind} onChange={(event) => setGitlabTargets((current) => current.map((entry, targetIndex) => targetIndex === index ? { ...entry, kind: event.target.value as GitlabTarget["kind"], legacyExternalIds: false } : entry))}><option value="project">Project / repo</option><option value="group">Group</option></select></label>
+              <label className="grid gap-1.5"><span className="text-[10px] text-muted-foreground">Path or ID</span><Input value={target.identifier} onChange={(event) => setGitlabTargets((current) => current.map((entry, targetIndex) => targetIndex === index ? { ...entry, identifier: event.target.value, legacyExternalIds: false } : entry))} placeholder={target.kind === "group" ? "group/subgroup" : "group/project"} required /></label>
+              <Button type="button" variant="ghost" size="icon-sm" title="Remove target" disabled={gitlabTargets.length === 1} onClick={() => setGitlabTargets((current) => current.filter((_, targetIndex) => targetIndex !== index))}><Trash2 /></Button>
+            </div>)}
+            <Button className="justify-self-start" type="button" variant="secondary" size="sm" onClick={() => setGitlabTargets((current) => [...current, { kind: "project", identifier: "" }])}><Plus />Add GitLab target</Button>
+          </div>
+        </> : <>
+          <label className="grid gap-1.5"><span className="settings-label">Connector endpoint</span><Input value={configString(config, "endpoint")} onChange={(event) => setConfig({ ...config, endpoint: event.target.value })} placeholder="https://connector.example.com/huly/issues" required /></label>
+          <div className="grid gap-2">
+            <div><span className="settings-label">Huly projects</span><p className="mt-1 text-[10px] leading-4 text-muted-foreground">Each target may use a different Huly workspace.</p></div>
+            {hulyTargets.map((target, index) => <div key={index} className="grid items-end gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+              <label className="grid gap-1.5"><span className="text-[10px] text-muted-foreground">Workspace</span><Input value={target.workspace} onChange={(event) => setHulyTargets((current) => current.map((entry, targetIndex) => targetIndex === index ? { ...entry, workspace: event.target.value, legacyExternalIds: false } : entry))} placeholder="acme" required /></label>
+              <label className="grid gap-1.5"><span className="text-[10px] text-muted-foreground">Project identifier</span><Input value={target.project} onChange={(event) => setHulyTargets((current) => current.map((entry, targetIndex) => targetIndex === index ? { ...entry, project: event.target.value, legacyExternalIds: false } : entry))} placeholder="BOOST" required /></label>
+              <Button type="button" variant="ghost" size="icon-sm" title="Remove target" disabled={hulyTargets.length === 1} onClick={() => setHulyTargets((current) => current.filter((_, targetIndex) => targetIndex !== index))}><Trash2 /></Button>
+            </div>)}
+            <Button className="justify-self-start" type="button" variant="secondary" size="sm" onClick={() => setHulyTargets((current) => [...current, { workspace: "", project: "" }])}><Plus />Add Huly project</Button>
+          </div>
+        </>}
+        <label className="grid gap-1.5"><span className="settings-label">Access token</span><Input type="password" value={configString(config, "token")} onChange={(event) => setConfig({ ...config, token: event.target.value })} required /></label>
+        <label className="grid gap-1.5"><span className="settings-label">Automatic import</span><select className="settings-select" value={schedule} onChange={(event) => setSchedule(event.target.value)}>{scheduleOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+        {save.error && <p className="text-xs text-destructive">{save.error.message}</p>}
+        <div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={closeEditor}>Cancel</Button><Button disabled={save.isPending || !name.trim() || !targetsValid}>{save.isPending && <LoaderCircle className="animate-spin" />}{editingId ? "Save integration" : "Install plugin"}</Button></div>
+      </form>
+    </SettingsSection>}
+    {sync.data && <p className="text-xs text-success">{sync.data.message}</p>}{sync.error && <p className="text-xs text-destructive">{sync.error.message}</p>}
+  </div>;
 }
 
 function collectObjects(value: unknown): Record<string, any>[] {
@@ -189,6 +335,6 @@ function TeamSettings() {
 }
 
 export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
-  const [section, setSection] = useState<Section>("web");
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="settings-dialog max-w-5xl gap-0 overflow-hidden p-0"><div className="settings-layout"><aside className="settings-sidebar"><DialogHeader className="px-3 pb-4 pt-2"><DialogTitle>Settings</DialogTitle><DialogDescription>Global and workspace configuration.</DialogDescription></DialogHeader><nav className="settings-nav">{sectionGroups.map((group) => <div key={group.label} className="settings-nav-group"><p className="settings-nav-heading">{group.label}</p>{group.sections.map(({ id, label, icon: Icon }) => <button key={id} className={cn("settings-nav-item", section === id && "settings-nav-item-active")} onClick={() => setSection(id)}><Icon />{label}</button>)}</div>)}</nav></aside><main className="min-h-0 overflow-y-auto">{section === "web" && <GlobalWebSettings />}{section === "application" && <ApplicationSettings />}{section === "team" && <TeamSettings />}{section === "workspace" && <WorkspaceSettings />}{section === "integrations" && <IntegrationsSettings />}{section === "codex" && <CodexSettings />}</main></div></DialogContent></Dialog>;
+  const [section, setSection] = useState<Section>("connections");
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="settings-dialog max-w-5xl gap-0 overflow-hidden p-0"><div className="settings-layout"><aside className="settings-sidebar"><DialogHeader className="px-3 pb-4 pt-2"><DialogTitle>Settings</DialogTitle></DialogHeader><nav className="settings-nav">{sectionGroups.map((group) => <div key={group.label} className="settings-nav-group"><p className="settings-nav-heading">{group.label}</p>{group.sections.map(({ id, label, icon: Icon }) => <button key={id} className={cn("settings-nav-item", section === id && "settings-nav-item-active")} onClick={() => setSection(id)}><Icon />{label}</button>)}</div>)}</nav></aside><main className="min-h-0 overflow-y-auto">{section === "connections" && <ConnectionsSettings />}{section === "web" && <GlobalWebSettings />}{section === "application" && <ApplicationSettings />}{section === "team" && <TeamSettings />}{section === "workspace" && <WorkspaceSettings />}{section === "integrations" && <IntegrationsSettings />}{section === "codex" && <CodexSettings />}</main></div></DialogContent></Dialog>;
 }
