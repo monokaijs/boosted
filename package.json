@@ -1,0 +1,15 @@
+{
+  "name": "boosted",
+  "private": true,
+  "packageManager": "pnpm@10.34.5",
+  "scripts": {
+    "dev": "pnpm --filter @boosted/web dev",
+    "build": "pnpm --filter @boosted/web build",
+    "test": "pnpm --filter @boosted/web test",
+    "typecheck": "pnpm --filter @boosted/web typecheck",
+    "desktop": "pnpm --filter @boosted/desktop tauri dev",
+    "desktop:build": "pnpm --filter @boosted/desktop tauri build",
+    "server": "cargo run -p boosted-server"
+  }
+}
+
