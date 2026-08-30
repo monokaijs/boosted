@@ -1,7 +1,8 @@
 use crate::{
     error::{AppError, AppResult},
     models::{
-        AuthUser, Integration, Project, Task, TaskAttachment, TaskEvent, TaskPlan, TaskSource, User,
+        AuthUser, GlobalSettings, Integration, Project, Task, TaskAttachment, TaskEvent, TaskPlan,
+        TaskSource, User,
     },
 };
 use chrono::Utc;
@@ -65,6 +66,41 @@ impl Database {
     pub async fn users(&self) -> AppResult<Vec<User>> {
         let rows = sqlx::query("SELECT id, username, role, must_change_password, disabled, created_at FROM users ORDER BY created_at").fetch_all(&self.pool).await?;
         Ok(rows.iter().map(user_from_row).collect())
+    }
+
+    pub async fn global_settings(&self) -> AppResult<GlobalSettings> {
+        let row = sqlx::query(
+            "SELECT web_port,web_ui_enabled,allowed_ips_json,updated_at FROM global_settings WHERE id=1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(GlobalSettings::default());
+        };
+        Ok(GlobalSettings {
+            web_port: row.get::<i64, _>("web_port") as u16,
+            web_ui_enabled: row.get::<i64, _>("web_ui_enabled") != 0,
+            allowed_ips: serde_json::from_str(&row.get::<String, _>("allowed_ips_json"))
+                .unwrap_or_default(),
+            updated_at: row.get("updated_at"),
+        })
+    }
+
+    pub async fn update_global_settings(
+        &self,
+        settings: &GlobalSettings,
+    ) -> AppResult<GlobalSettings> {
+        let updated_at = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO global_settings(id,web_port,web_ui_enabled,allowed_ips_json,updated_at) VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET web_port=excluded.web_port,web_ui_enabled=excluded.web_ui_enabled,allowed_ips_json=excluded.allowed_ips_json,updated_at=excluded.updated_at")
+            .bind(i64::from(settings.web_port))
+            .bind(settings.web_ui_enabled)
+            .bind(serde_json::to_string(&settings.allowed_ips)?)
+            .bind(&updated_at)
+            .execute(&self.pool)
+            .await?;
+        let mut saved = settings.clone();
+        saved.updated_at = Some(updated_at);
+        Ok(saved)
     }
 
     pub async fn auth_by_token_hash(&self, hash: &str) -> AppResult<Option<AuthUser>> {
@@ -265,6 +301,7 @@ const TASK_SELECT: &str = "SELECT t.id,t.project_id,t.title,t.description,t.stat
 
 const MIGRATION: &str = r#"
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','member')), must_change_password INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS global_settings(id INTEGER PRIMARY KEY CHECK(id=1), web_port INTEGER NOT NULL CHECK(web_port BETWEEN 1 AND 65535), web_ui_enabled INTEGER NOT NULL DEFAULT 1, allowed_ips_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, repo_path TEXT NOT NULL UNIQUE, default_branch TEXT NOT NULL, created_by TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL, description TEXT NOT NULL, status TEXT NOT NULL, branch_name TEXT NOT NULL, worktree_path TEXT NOT NULL, provider_thread_id TEXT, active_turn_id TEXT, created_by TEXT NOT NULL REFERENCES users(id), additions INTEGER NOT NULL DEFAULT 0, deletions INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);

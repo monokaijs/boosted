@@ -31,7 +31,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
     steps:
-      - name: Require macOS signing secrets
+      - name: Require release signing secrets
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -39,6 +39,7 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           missing=()
           for name in \
@@ -47,15 +48,16 @@ jobs:
             APPLE_ID \
             APPLE_PASSWORD \
             APPLE_TEAM_ID \
-            KEYCHAIN_PASSWORD; do
+            KEYCHAIN_PASSWORD \
+            TAURI_SIGNING_PRIVATE_KEY; do
             if [[ -z "${!name}" ]]; then
               missing+=("$name")
             fi
           done
 
           if (( ${#missing[@]} > 0 )); then
-            echo "Missing required macOS signing secrets: ${missing[*]}" >&2
-            echo "Follow docs/macos-signing.md before running a release." >&2
+            echo "Missing required release signing secrets: ${missing[*]}" >&2
+            echo "Follow README.md and docs/macos-signing.md before running a release." >&2
             exit 1
           fi
 
@@ -211,6 +213,9 @@ jobs:
       - name: Build desktop bundles
         if: runner.os != 'macOS'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: desktop
           args: --ci ${{ matrix.args }}
@@ -222,6 +227,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: desktop
           args: --ci ${{ matrix.args }}
@@ -245,10 +252,16 @@ jobs:
           compression-level: 0
           path: |
             target/**/release/bundle/**/*.AppImage
+            target/**/release/bundle/**/*.AppImage.sig
+            target/**/release/bundle/**/*.app.tar.gz
+            target/**/release/bundle/**/*.app.tar.gz.sig
             target/**/release/bundle/**/*.deb
+            target/**/release/bundle/**/*.deb.sig
             target/**/release/bundle/**/*.dmg
             target/**/release/bundle/**/*.exe
+            target/**/release/bundle/**/*.exe.sig
             target/**/release/bundle/**/*.msi
+            target/**/release/bundle/**/*.msi.sig
 
   build-headless:
     name: Build Linux headless CLI
@@ -335,6 +348,13 @@ jobs:
           path: release-artifacts
           merge-multiple: true
 
+      - name: Generate desktop update manifest
+        env:
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: node .github/scripts/generate-update-manifest.mjs release-artifacts "$VERSION" "$TAG" "$REPOSITORY" release-artifacts/latest.json
+
       - name: Commit and tag the release
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -383,4 +403,5 @@ jobs:
           gh release create "$TAG" "${files[@]}" \
             --title "Boosted $VERSION" \
             --generate-notes \
+            --latest \
             --verify-tag

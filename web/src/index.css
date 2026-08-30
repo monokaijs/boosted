@@ -771,6 +771,27 @@ textarea {
   padding: 16px 10px;
 }
 
+.settings-nav,
+.settings-nav-group {
+  display: grid;
+  gap: 2px;
+}
+
+.settings-nav-group + .settings-nav-group {
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.settings-nav-heading {
+  padding: 0 9px 5px;
+  color: var(--muted-foreground);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
 .settings-nav-item {
   display: flex;
   width: 100%;
@@ -1174,6 +1195,24 @@ textarea {
     display: flex;
     gap: 3px;
     overflow-x: auto;
+  }
+
+  .settings-nav-group {
+    display: flex;
+    flex: none;
+    gap: 3px;
+  }
+
+  .settings-nav-group + .settings-nav-group {
+    margin-top: 0;
+    border-top: 0;
+    border-left: 1px solid var(--border);
+    padding-top: 0;
+    padding-left: 6px;
+  }
+
+  .settings-nav-heading {
+    display: none;
   }
 
   .settings-nav-item {

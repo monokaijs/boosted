@@ -10,6 +10,7 @@ import { AppShell } from "@/components/app-shell";
 import { api, getToken } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 import type { SetupState, User } from "@/lib/types";
+import { startAutomaticAppUpdates } from "@/lib/updater";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -25,6 +26,10 @@ function Root() {
     queryFn: api.me,
     enabled: Boolean(getToken()) && setup.data?.needsSetup === false,
   });
+
+  useEffect(() => {
+    startAutomaticAppUpdates();
+  }, []);
 
   useEffect(() => {
     if (me.data) setUser(me.data);

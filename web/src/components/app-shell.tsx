@@ -11,6 +11,7 @@ import { Workspace } from "@/components/workspace";
 import { api, setToken } from "@/lib/api";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import { useAppStore } from "@/lib/store";
+import { formatUpdateProgress, useAppUpdateState } from "@/lib/updater";
 import { cn } from "@/lib/utils";
 
 const railPanels = [
@@ -43,6 +44,7 @@ function openPanel(id: string) {
 
 export function AppShell() {
   useLiveEvents();
+  const appUpdate = useAppUpdateState();
   const [drawerView, setDrawerView] = useState<"tasks" | "chats">("tasks");
   const [drawerWidth, setDrawerWidth] = useState(initialDrawerWidth);
   const [drawerResizing, setDrawerResizing] = useState(false);
@@ -169,6 +171,7 @@ export function AppShell() {
         <Button className="app-open-project" variant="ghost" size="icon-sm" title="Open project folder" onClick={() => setProjectDialogOpen(true)}><FolderOpen /></Button>
         {selectedTask && <span className="app-selected-task min-w-0"><span className="mx-2 text-muted-foreground">/</span><span className="inline-block max-w-[38vw] truncate align-middle text-xs text-muted-foreground">{selectedTask.title}</span></span>}
         <div className="app-actions ml-auto flex items-center gap-1 pr-2">
+          {["downloading", "installing", "restarting"].includes(appUpdate.phase) && <button type="button" className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[10px] text-muted-foreground hover:bg-accent" onClick={() => setSettingsOpen(true)}><span className="size-3 animate-spin rounded-full border-2 border-current border-r-transparent" />{appUpdate.phase === "downloading" ? `Updating${formatUpdateProgress(appUpdate) !== undefined ? ` ${formatUpdateProgress(appUpdate)}%` : ""}` : appUpdate.phase === "installing" ? "Installing update" : "Restarting"}</button>}
           <Button variant="ghost" size="icon-sm" title="Settings" onClick={() => setSettingsOpen(true)}><Settings /></Button>
           <Button variant="ghost" size="icon-sm" onClick={logout} title="Sign out"><LogOut /></Button>
         </div>

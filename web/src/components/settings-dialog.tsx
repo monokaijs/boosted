@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, Bot, ChevronRight, CircleGauge, CloudDownload, Code2, Copy, ExternalLink, GitBranch, LoaderCircle, Plug, Plus, RefreshCw, Save, Settings2, Shield, Trash2, UserPlus, Users, Workflow } from "lucide-react";
+import { Activity, Bot, ChevronRight, CircleGauge, CloudDownload, Code2, Copy, ExternalLink, GitBranch, Globe2, LoaderCircle, Plug, Plus, RefreshCw, Save, Settings2, Shield, Trash2, UserPlus, Users, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -8,21 +8,75 @@ import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 import type { Integration } from "@/lib/types";
+import { checkAndInstallAppUpdate, formatUpdateProgress, isDesktopApp, useAppUpdateState } from "@/lib/updater";
 import { cn, relativeTime } from "@/lib/utils";
 
 const Gitlab = GitBranch;
 
-type Section = "workspace" | "integrations" | "codex" | "team";
+type Section = "web" | "application" | "team" | "workspace" | "integrations" | "codex";
 
-const sections: { id: Section; label: string; icon: typeof Settings2 }[] = [
-  { id: "workspace", label: "Workspace", icon: Settings2 },
-  { id: "integrations", label: "Integrations", icon: Plug },
-  { id: "codex", label: "Codex", icon: Bot },
-  { id: "team", label: "Team", icon: Users },
+const sectionGroups: { label: string; sections: { id: Section; label: string; icon: typeof Settings2 }[] }[] = [
+  { label: "Global", sections: [
+    { id: "web", label: "Web interface", icon: Globe2 },
+    { id: "application", label: "Application", icon: RefreshCw },
+    { id: "team", label: "Team", icon: Users },
+  ] },
+  { label: "Workspace", sections: [
+    { id: "workspace", label: "General", icon: Settings2 },
+    { id: "integrations", label: "Integrations", icon: Plug },
+    { id: "codex", label: "Codex", icon: Bot },
+  ] },
 ];
 
 function SettingsSection({ title, description, children }: { title: string; description: string; children: ReactNode }) {
   return <section className="settings-section"><div className="mb-4"><h2 className="text-sm font-semibold">{title}</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p></div>{children}</section>;
+}
+
+function GlobalWebSettings() {
+  const user = useAppStore((state) => state.user);
+  const queryClient = useQueryClient();
+  const settings = useQuery({ queryKey: ["global-settings"], queryFn: api.globalSettings });
+  const [port, setPort] = useState("4782");
+  const [webUiEnabled, setWebUiEnabled] = useState(true);
+  const [allowedIps, setAllowedIps] = useState("");
+  useEffect(() => {
+    if (!settings.data) return;
+    setPort(String(settings.data.webPort));
+    setWebUiEnabled(settings.data.webUiEnabled);
+    setAllowedIps(settings.data.allowedIps.join("\n"));
+  }, [settings.data]);
+  const parsedPort = Number(port);
+  const save = useMutation({
+    mutationFn: () => api.updateGlobalSettings({
+      webPort: parsedPort,
+      webUiEnabled,
+      allowedIps: allowedIps.split(/[\n,]+/).map((value) => value.trim()).filter(Boolean),
+    }),
+    onSuccess: (saved) => {
+      setPort(String(saved.webPort));
+      setAllowedIps(saved.allowedIps.join("\n"));
+      void queryClient.invalidateQueries({ queryKey: ["global-settings"] });
+    },
+  });
+  const isAdmin = user?.role === "admin";
+  const validPort = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535;
+  return <div className="settings-content">
+    <SettingsSection title="Web interface" description="Configure how this Boosted instance accepts browser connections. The default is public access on port 4782.">
+      <div className="settings-card grid gap-4">
+        <label className="grid gap-1.5"><span className="settings-label">Listening port</span><Input type="number" min={1} max={65535} value={port} disabled={!isAdmin} onChange={(event) => setPort(event.target.value)} /></label>
+        <label className="flex items-start gap-3"><input className="mt-0.5 size-4 accent-primary" type="checkbox" checked={webUiEnabled} disabled={!isAdmin} onChange={(event) => setWebUiEnabled(event.target.checked)} /><span><span className="block text-xs font-medium">Serve the web UI</span><span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">Turn this off to keep the API available without serving the browser application.</span></span></label>
+        <label className="grid gap-1.5"><span className="settings-label">Allowed remote IPs</span><Textarea className="min-h-28 font-mono text-xs leading-5" value={allowedIps} disabled={!isAdmin} onChange={(event) => setAllowedIps(event.target.value)} placeholder={"Leave empty for public access\n192.0.2.10\n2001:db8::10"} /><span className="text-[10px] leading-4 text-muted-foreground">Enter one IPv4 or IPv6 address per line. Localhost is always allowed.</span></label>
+        {!isAdmin && <p className="text-xs text-muted-foreground">Only an administrator can change global web settings.</p>}
+        {settings.error && <p className="text-xs text-destructive">{settings.error.message}</p>}
+        {save.error && <p className="text-xs text-destructive">{save.error.message}</p>}
+        {save.isSuccess && <p className="text-xs text-success">Settings saved. Restart Boosted to apply them.</p>}
+        <div className="flex items-center justify-between gap-3"><span className="text-[10px] leading-4 text-muted-foreground">CLI options override saved settings for that launch.</span><Button size="sm" disabled={!isAdmin || !validPort || save.isPending} onClick={() => save.mutate()}>{save.isPending ? <LoaderCircle className="animate-spin" /> : <Save />}Save web settings</Button></div>
+      </div>
+    </SettingsSection>
+    <SettingsSection title="Access behavior" description="An empty allowlist accepts connections from any remote address. Once addresses are listed, all other remote clients receive a forbidden response.">
+      <div className="settings-card flex items-center gap-3"><Shield className="size-5 text-muted-foreground" /><div><p className="text-xs font-medium">Authentication still applies</p><p className="mt-0.5 text-[11px] text-muted-foreground">The IP allowlist is an additional network boundary; users must still sign in to protected Boosted APIs.</p></div></div>
+    </SettingsSection>
+  </div>;
 }
 
 function WorkspaceSettings() {
@@ -30,6 +84,29 @@ function WorkspaceSettings() {
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const project = projects.data?.find((entry) => entry.id === projectId);
   return <div className="settings-content"><SettingsSection title="Workspace details" description="Settings on this page apply only to the selected workspace.">{project ? <div className="settings-card grid gap-4"><label className="grid gap-1.5"><span className="settings-label">Name</span><Input value={project.name} readOnly /></label><label className="grid gap-1.5"><span className="settings-label">Repository</span><Input className="font-mono text-xs" value={project.repoPath} readOnly /></label><label className="grid gap-1.5"><span className="settings-label">Default branch</span><Input className="font-mono text-xs" value={project.defaultBranch} readOnly /></label></div> : <p className="text-xs text-muted-foreground">Open a workspace to configure it.</p>}</SettingsSection><SettingsSection title="Task defaults" description="Imported and manually created tasks start on this workspace’s default branch."><div className="settings-card flex items-center gap-3"><Workflow className="size-5 text-muted-foreground" /><div><p className="text-xs font-medium">One isolated worktree per task</p><p className="mt-0.5 text-[11px] text-muted-foreground">Every task receives its own boosted/* branch and execution directory.</p></div></div></SettingsSection></div>;
+}
+
+function ApplicationSettings() {
+  const update = useAppUpdateState();
+  const progress = formatUpdateProgress(update);
+  const busy = ["checking", "downloading", "installing", "restarting"].includes(update.phase);
+  const status = update.phase === "unsupported"
+    ? "Automatic updates are available in the Boosted desktop app."
+    : update.phase === "checking"
+      ? "Checking GitHub Releases…"
+      : update.phase === "up-to-date"
+        ? "Boosted is up to date."
+        : update.phase === "downloading"
+          ? `Downloading version ${update.targetVersion ?? ""}${progress === undefined ? "…" : ` — ${progress}%`}`
+          : update.phase === "installing"
+            ? `Installing version ${update.targetVersion ?? ""}…`
+            : update.phase === "restarting"
+              ? "Update installed. Restarting Boosted…"
+              : update.phase === "error"
+                ? "The update check failed."
+                : "Boosted checks for updates automatically.";
+
+  return <div className="settings-content"><SettingsSection title="Application updates" description="Boosted checks GitHub Releases at startup and every six hours. New signed releases are downloaded, installed, and relaunched automatically."><div className="settings-card flex items-start gap-3"><div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><CloudDownload className="size-4" /></div><div className="min-w-0 flex-1"><p className="text-xs font-medium">{status}</p><p className="mt-1 text-[11px] text-muted-foreground">{update.currentVersion ? `Current version ${update.currentVersion}` : isDesktopApp() ? "Reading desktop version…" : "Browser session"}{update.lastCheckedAt ? ` · checked ${relativeTime(update.lastCheckedAt)} ago` : ""}</p>{update.error && <p className="mt-1 break-words text-[11px] text-destructive">{update.error}</p>}{update.phase === "downloading" && update.totalBytes && <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${progress ?? 0}%` }} /></div>}</div><Button variant="secondary" size="sm" disabled={!isDesktopApp() || busy} onClick={() => void checkAndInstallAppUpdate()}>{busy ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}{update.phase === "error" ? "Try again" : "Check now"}</Button></div></SettingsSection><SettingsSection title="Release security" description="Every downloaded updater package must match Boosted’s embedded signing key before it can be installed."><div className="settings-card flex items-center gap-3"><Shield className="size-5 text-success" /><div><p className="text-xs font-medium">Signed updates required</p><p className="mt-0.5 text-[11px] text-muted-foreground">Update metadata and packages are served from monokaijs/boosted on GitHub.</p></div></div></SettingsSection></div>;
 }
 
 const scheduleOptions = [
@@ -108,10 +185,10 @@ function TeamSettings() {
   const [username, setUsername] = useState(""); const [password, setPassword] = useState("");
   const users = useQuery({ queryKey: ["users"], queryFn: api.users, enabled: user?.role === "admin" });
   const create = useMutation({ mutationFn: () => api.createUser(username, password), onSuccess: () => { setUsername(""); setPassword(""); void queryClient.invalidateQueries({ queryKey: ["users"] }); } });
-  return <div className="settings-content"><SettingsSection title="Workspace access" description="Boosted members currently have access to every registered workspace and task."><div className="grid gap-1">{users.data?.map((entry) => <div key={entry.id} className="settings-card flex items-center gap-3 py-2.5"><div className="grid size-8 place-items-center rounded-full bg-secondary text-xs font-semibold uppercase">{entry.username.slice(0, 1)}</div><div className="min-w-0 flex-1"><p className="text-xs font-medium">{entry.username}</p><p className="text-[10px] capitalize text-muted-foreground">{entry.role}{entry.mustChangePassword ? " · password change required" : ""}</p></div>{entry.disabled && <span className="text-[10px] text-destructive">Disabled</span>}</div>)}</div></SettingsSection>{user?.role === "admin" && <SettingsSection title="Invite member" description="Create an account with a temporary password. The member must replace it on first login."><form className="settings-card grid gap-2" onSubmit={(event: FormEvent) => { event.preventDefault(); create.mutate(); }}><div className="grid gap-2 sm:grid-cols-2"><Input placeholder="Username" minLength={3} value={username} onChange={(event) => setUsername(event.target.value)} required /><Input type="password" placeholder="Temporary password" value={password} onChange={(event) => setPassword(event.target.value)} required /></div><div className="flex justify-end"><Button size="sm" disabled={create.isPending || username.length < 3 || !password}>{create.isPending ? <LoaderCircle className="animate-spin" /> : <UserPlus />}Create member</Button></div>{create.error && <p className="text-xs text-destructive">{create.error.message}</p>}</form></SettingsSection>}</div>;
+  return <div className="settings-content"><SettingsSection title="Global access" description="Boosted members have access to every registered workspace and task on this instance."><div className="grid gap-1">{users.data?.map((entry) => <div key={entry.id} className="settings-card flex items-center gap-3 py-2.5"><div className="grid size-8 place-items-center rounded-full bg-secondary text-xs font-semibold uppercase">{entry.username.slice(0, 1)}</div><div className="min-w-0 flex-1"><p className="text-xs font-medium">{entry.username}</p><p className="text-[10px] capitalize text-muted-foreground">{entry.role}{entry.mustChangePassword ? " · password change required" : ""}</p></div>{entry.disabled && <span className="text-[10px] text-destructive">Disabled</span>}</div>)}</div></SettingsSection>{user?.role === "admin" && <SettingsSection title="Invite member" description="Create an account with a temporary password. The member must replace it on first login."><form className="settings-card grid gap-2" onSubmit={(event: FormEvent) => { event.preventDefault(); create.mutate(); }}><div className="grid gap-2 sm:grid-cols-2"><Input placeholder="Username" minLength={3} value={username} onChange={(event) => setUsername(event.target.value)} required /><Input type="password" placeholder="Temporary password" value={password} onChange={(event) => setPassword(event.target.value)} required /></div><div className="flex justify-end"><Button size="sm" disabled={create.isPending || username.length < 3 || !password}>{create.isPending ? <LoaderCircle className="animate-spin" /> : <UserPlus />}Create member</Button></div>{create.error && <p className="text-xs text-destructive">{create.error.message}</p>}</form></SettingsSection>}</div>;
 }
 
 export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
-  const [section, setSection] = useState<Section>("workspace");
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="settings-dialog max-w-5xl gap-0 overflow-hidden p-0"><div className="settings-layout"><aside className="settings-sidebar"><DialogHeader className="px-3 pb-4 pt-2"><DialogTitle>Settings</DialogTitle><DialogDescription>Workspace and Codex configuration.</DialogDescription></DialogHeader><nav className="grid gap-0.5">{sections.map(({ id, label, icon: Icon }) => <button key={id} className={cn("settings-nav-item", section === id && "settings-nav-item-active")} onClick={() => setSection(id)}><Icon />{label}</button>)}</nav></aside><main className="min-h-0 overflow-y-auto">{section === "workspace" && <WorkspaceSettings />}{section === "integrations" && <IntegrationsSettings />}{section === "codex" && <CodexSettings />}{section === "team" && <TeamSettings />}</main></div></DialogContent></Dialog>;
+  const [section, setSection] = useState<Section>("web");
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="settings-dialog max-w-5xl gap-0 overflow-hidden p-0"><div className="settings-layout"><aside className="settings-sidebar"><DialogHeader className="px-3 pb-4 pt-2"><DialogTitle>Settings</DialogTitle><DialogDescription>Global and workspace configuration.</DialogDescription></DialogHeader><nav className="settings-nav">{sectionGroups.map((group) => <div key={group.label} className="settings-nav-group"><p className="settings-nav-heading">{group.label}</p>{group.sections.map(({ id, label, icon: Icon }) => <button key={id} className={cn("settings-nav-item", section === id && "settings-nav-item-active")} onClick={() => setSection(id)}><Icon />{label}</button>)}</div>)}</nav></aside><main className="min-h-0 overflow-y-auto">{section === "web" && <GlobalWebSettings />}{section === "application" && <ApplicationSettings />}{section === "team" && <TeamSettings />}{section === "workspace" && <WorkspaceSettings />}{section === "integrations" && <IntegrationsSettings />}{section === "codex" && <CodexSettings />}</main></div></DialogContent></Dialog>;
 }

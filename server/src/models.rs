@@ -40,6 +40,35 @@ pub struct UserPatch {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GlobalSettings {
+    pub web_port: u16,
+    pub web_ui_enabled: bool,
+    pub allowed_ips: Vec<String>,
+    pub updated_at: Option<String>,
+}
+
+impl Default for GlobalSettings {
+    fn default() -> Self {
+        Self {
+            web_port: 4782,
+            web_ui_enabled: true,
+            allowed_ips: Vec::new(),
+            updated_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalSettingsUpdate {
+    pub web_port: u16,
+    pub web_ui_enabled: bool,
+    #[serde(default)]
+    pub allowed_ips: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: String,
     pub name: String,

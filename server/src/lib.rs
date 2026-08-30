@@ -13,7 +13,8 @@ use axum::{
     Extension, Json, Router,
     body::Body,
     extract::{
-        DefaultBodyLimit, Multipart, Path as AxumPath, Query, Request, State, WebSocketUpgrade,
+        ConnectInfo, DefaultBodyLimit, Multipart, Path as AxumPath, Query, Request, State,
+        WebSocketUpgrade,
         ws::{Message as WsMessage, WebSocket},
     },
     http::{HeaderMap, Method, StatusCode},
@@ -28,7 +29,7 @@ use serde_json::{Value, json};
 use sqlx::Row;
 use std::{
     collections::{HashMap, HashSet},
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -59,9 +60,12 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    pub bind: SocketAddr,
+    pub bind: Option<SocketAddr>,
+    pub local_bind: Option<SocketAddr>,
     pub data_dir: PathBuf,
     pub web_dir: PathBuf,
+    pub web_ui_enabled: Option<bool>,
+    pub allowed_ips: Option<Vec<IpAddr>>,
 }
 
 impl Config {
@@ -76,20 +80,39 @@ impl Config {
     }
 
     pub fn from_env() -> Self {
-        let bind = std::env::var("BOOSTED_BIND")
-            .unwrap_or_else(|_| "127.0.0.1:4782".into())
-            .parse()
-            .expect("BOOSTED_BIND must be a socket address");
+        let bind = std::env::var("BOOSTED_BIND").ok().map(|value| {
+            value
+                .parse()
+                .expect("BOOSTED_BIND must be a socket address")
+        });
         let data_dir = std::env::var_os("BOOSTED_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(Self::default_data_dir);
         let web_dir = std::env::var_os("BOOSTED_WEB_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(Self::default_web_dir);
+        let web_ui_enabled = std::env::var("BOOSTED_DISABLE_WEB_UI")
+            .ok()
+            .map(|value| !matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"));
+        let allowed_ips = std::env::var("BOOSTED_ALLOWED_IPS").ok().map(|value| {
+            value
+                .split(',')
+                .filter(|entry| !entry.trim().is_empty())
+                .map(|entry| {
+                    entry
+                        .trim()
+                        .parse()
+                        .expect("BOOSTED_ALLOWED_IPS must contain comma-separated IP addresses")
+                })
+                .collect()
+        });
         Self {
             bind,
+            local_bind: None,
             data_dir,
             web_dir,
+            web_ui_enabled,
+            allowed_ips,
         }
     }
 }
@@ -173,6 +196,21 @@ impl AppState {
 pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     tokio::fs::create_dir_all(&config.data_dir).await?;
     let db = Database::connect(&config.data_dir.join("boosted.sqlite3")).await?;
+    let global_settings = db.global_settings().await?;
+    let bind = config.bind.unwrap_or_else(|| {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), global_settings.web_port)
+    });
+    let web_ui_enabled = config
+        .web_ui_enabled
+        .unwrap_or(global_settings.web_ui_enabled);
+    let allowed_ips = match config.allowed_ips {
+        Some(allowed_ips) => allowed_ips,
+        None => global_settings
+            .allowed_ips
+            .iter()
+            .map(|value| value.parse::<IpAddr>())
+            .collect::<Result<Vec<_>, _>>()?,
+    };
     let codex = CodexManager::new().await;
     let uploads_dir = config.data_dir.join("uploads");
     tokio::fs::create_dir_all(&uploads_dir).await?;
@@ -192,14 +230,48 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         integration_scheduler(scheduler_state).await;
     });
-    let app = router(state, &config.web_dir);
-    let listener = tokio::net::TcpListener::bind(config.bind).await?;
-    tracing::info!(address=%config.bind, "Boosted server listening");
-    axum::serve(listener, app).await?;
+    let app = router(state, &config.web_dir, web_ui_enabled, allowed_ips);
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    let local_listener = match config
+        .local_bind
+        .filter(|local_bind| !bind_covers(bind, *local_bind))
+    {
+        Some(local_bind) => Some((local_bind, tokio::net::TcpListener::bind(local_bind).await?)),
+        None => None,
+    };
+    if let Some((local_bind, local_listener)) = local_listener {
+        let local_app = app.clone();
+        tokio::spawn(async move {
+            tracing::info!(address=%local_bind, "Boosted local API listening");
+            if let Err(error) = axum::serve(
+                local_listener,
+                local_app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            {
+                tracing::warn!(%error, address=%local_bind, "Boosted local API stopped");
+            }
+        });
+    }
+    tracing::info!(address=%bind, web_ui_enabled, "Boosted server listening");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
-fn router(state: AppState, web_dir: &Path) -> Router {
+fn bind_covers(bind: SocketAddr, local_bind: SocketAddr) -> bool {
+    bind.port() == local_bind.port() && (bind.ip().is_unspecified() || bind.ip() == local_bind.ip())
+}
+
+fn router(
+    state: AppState,
+    web_dir: &Path,
+    web_ui_enabled: bool,
+    allowed_ips: Vec<IpAddr>,
+) -> Router {
     let public = Router::new()
         .route("/health", get(health))
         .route("/setup", get(setup_state))
@@ -210,6 +282,10 @@ fn router(state: AppState, web_dir: &Path) -> Router {
     let protected = Router::new()
         .route("/auth/me", get(me))
         .route("/auth/password", put(change_password))
+        .route(
+            "/settings/global",
+            get(read_global_settings).put(update_global_settings),
+        )
         .route("/users", get(list_users).post(create_user))
         .route("/users/{id}", patch(patch_user))
         .route("/codex/login", post(start_codex_login))
@@ -303,12 +379,67 @@ fn router(state: AppState, web_dir: &Path) -> Router {
                 ]),
         )
         .layer(TraceLayer::new_for_http());
+    let app = if web_ui_enabled {
+        web_app_fallback(app, web_dir)
+    } else {
+        tracing::info!("Web UI serving is disabled");
+        app
+    };
+    let allowed_ips = Arc::new(
+        allowed_ips
+            .into_iter()
+            .map(normalize_ip)
+            .collect::<HashSet<_>>(),
+    );
+    app.layer(middleware::from_fn_with_state(
+        allowed_ips,
+        ip_allowlist_middleware,
+    ))
+}
+
+fn web_app_fallback(app: Router, web_dir: &Path) -> Router {
     let index = web_dir.join("index.html");
     if index.is_file() {
         return app
             .fallback_service(ServeDir::new(web_dir).not_found_service(ServeFile::new(index)));
     }
     embedded_web_fallback(app, web_dir)
+}
+
+fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
+        ip => ip,
+    }
+}
+
+async fn ip_allowlist_middleware(
+    State(allowed_ips): State<Arc<HashSet<IpAddr>>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if allowed_ips.is_empty() {
+        return next.run(request).await;
+    }
+    let peer_ip = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(address)| normalize_ip(address.ip()));
+    if peer_ip_allowed(&allowed_ips, peer_ip) {
+        next.run(request).await
+    } else {
+        StatusCode::FORBIDDEN.into_response()
+    }
+}
+
+fn peer_ip_allowed(allowed_ips: &HashSet<IpAddr>, peer_ip: Option<IpAddr>) -> bool {
+    allowed_ips.is_empty()
+        || peer_ip
+            .map(normalize_ip)
+            .is_some_and(|ip| ip.is_loopback() || allowed_ips.contains(&ip))
 }
 
 #[cfg(feature = "embedded-web")]
@@ -469,6 +600,46 @@ async fn change_password(
         .execute(&state.db.pool)
         .await?;
     Ok(Json(state.db.user(&user.id).await?))
+}
+
+async fn read_global_settings(
+    State(state): State<AppState>,
+    Extension(_user): Extension<AuthUser>,
+) -> AppResult<Json<GlobalSettings>> {
+    Ok(Json(state.db.global_settings().await?))
+}
+
+async fn update_global_settings(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(input): Json<GlobalSettingsUpdate>,
+) -> AppResult<Json<GlobalSettings>> {
+    ensure_admin(&user)?;
+    if input.web_port == 0 {
+        return Err(AppError::BadRequest(
+            "web port must be between 1 and 65535".into(),
+        ));
+    }
+    let mut allowed_ips = HashSet::new();
+    for value in input.allowed_ips {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let ip = value.parse::<IpAddr>().map_err(|_| {
+            AppError::BadRequest(format!("'{value}' is not a valid IPv4 or IPv6 address"))
+        })?;
+        allowed_ips.insert(normalize_ip(ip).to_string());
+    }
+    let mut allowed_ips = allowed_ips.into_iter().collect::<Vec<_>>();
+    allowed_ips.sort();
+    let settings = GlobalSettings {
+        web_port: input.web_port,
+        web_ui_enabled: input.web_ui_enabled,
+        allowed_ips,
+        updated_at: None,
+    };
+    Ok(Json(state.db.update_global_settings(&settings).await?))
 }
 
 async fn list_users(
@@ -2945,6 +3116,74 @@ mod tests {
         );
         assert!(codex_attachment_path(root.path(), "../attachment.png").is_err());
         assert!(codex_attachment_path(root.path(), "not-a-uuid.png").is_err());
+    }
+    #[test]
+    fn ip_allowlist_is_public_when_empty_and_always_accepts_localhost() {
+        let empty = HashSet::new();
+        assert!(peer_ip_allowed(
+            &empty,
+            Some("198.51.100.8".parse().unwrap())
+        ));
+
+        let allowed = HashSet::from(["192.0.2.10".parse().unwrap()]);
+        assert!(peer_ip_allowed(
+            &allowed,
+            Some("192.0.2.10".parse().unwrap())
+        ));
+        assert!(peer_ip_allowed(
+            &allowed,
+            Some("127.0.0.1".parse().unwrap())
+        ));
+        assert!(!peer_ip_allowed(
+            &allowed,
+            Some("198.51.100.8".parse().unwrap())
+        ));
+        assert!(!peer_ip_allowed(&allowed, None));
+    }
+    #[test]
+    fn public_listener_covers_the_desktop_local_port() {
+        assert!(bind_covers(
+            "0.0.0.0:4782".parse().unwrap(),
+            "127.0.0.1:4782".parse().unwrap()
+        ));
+        assert!(bind_covers(
+            "127.0.0.1:4782".parse().unwrap(),
+            "127.0.0.1:4782".parse().unwrap()
+        ));
+        assert!(!bind_covers(
+            "0.0.0.0:9000".parse().unwrap(),
+            "127.0.0.1:4782".parse().unwrap()
+        ));
+    }
+    #[tokio::test]
+    async fn global_web_settings_default_and_round_trip() {
+        let root = tempfile::tempdir().expect("temporary database directory");
+        let db = Database::connect(&root.path().join("boosted.sqlite3"))
+            .await
+            .expect("database");
+        let defaults = db.global_settings().await.expect("default settings");
+        assert_eq!(defaults.web_port, 4782);
+        assert!(defaults.web_ui_enabled);
+        assert!(defaults.allowed_ips.is_empty());
+
+        let saved = db
+            .update_global_settings(&GlobalSettings {
+                web_port: 9000,
+                web_ui_enabled: false,
+                allowed_ips: vec!["192.0.2.10".into()],
+                updated_at: None,
+            })
+            .await
+            .expect("saved settings");
+        assert_eq!(saved.web_port, 9000);
+        assert!(!saved.web_ui_enabled);
+        assert_eq!(
+            db.global_settings()
+                .await
+                .expect("reloaded settings")
+                .allowed_ips,
+            vec!["192.0.2.10"]
+        );
     }
     #[cfg(feature = "embedded-web")]
     #[tokio::test]

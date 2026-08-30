@@ -3,6 +3,9 @@
   "identifier": "default",
   "description": "Default capability for the main Boosted window",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "process:allow-restart",
+    "updater:default"
+  ]
 }
-

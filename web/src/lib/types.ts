@@ -14,6 +14,13 @@ export interface Session {
   user: User;
 }
 
+export interface GlobalSettings {
+  webPort: number;
+  webUiEnabled: boolean;
+  allowedIps: string[];
+  updatedAt?: string;
+}
+
 export interface SetupState {
   needsSetup: boolean;
   codex: {
