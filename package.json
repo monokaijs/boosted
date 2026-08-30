@@ -1,6 +1,29 @@
 {
-  "name": "boosted",
-  "private": true,
+  "name": "boosted-cli",
+  "version": "0.1.2",
+  "description": "Run the Boosted local-first coding workspace from the command line",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/monokaijs/boosted.git"
+  },
+  "homepage": "https://github.com/monokaijs/boosted#readme",
+  "bugs": "https://github.com/monokaijs/boosted/issues",
+  "type": "module",
+  "bin": {
+    "boosted-cli": "bin/boosted-cli.mjs"
+  },
+  "files": [
+    "bin/boosted-cli.mjs",
+    "npm/launcher.mjs"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "packageManager": "pnpm@10.34.5",
   "scripts": {
     "dev": "pnpm --filter @boosted/web dev",
@@ -9,7 +32,7 @@
     "typecheck": "pnpm --filter @boosted/web typecheck",
     "desktop": "pnpm --filter @boosted/desktop tauri dev",
     "desktop:build": "pnpm --filter @boosted/desktop tauri build",
-    "server": "cargo run -p boosted-server"
+    "server": "cargo run -p boosted-server",
+    "test:cli": "node --test test/npm-cli.test.mjs"
   }
 }
-

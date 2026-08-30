@@ -15,6 +15,7 @@ const root = process.cwd();
 const paths = {
   cargoManifest: resolve(root, "Cargo.toml"),
   cargoLock: resolve(root, "Cargo.lock"),
+  rootPackage: resolve(root, "package.json"),
   desktopPackage: resolve(root, "desktop/package.json"),
   webPackage: resolve(root, "web/package.json"),
   tauriConfig: resolve(root, "desktop/src-tauri/tauri.conf.json"),
@@ -31,6 +32,7 @@ if (!workspaceVersionMatch) {
 
 const currentVersion = workspaceVersionMatch[2];
 const jsonFiles = [
+  paths.rootPackage,
   paths.desktopPackage,
   paths.webPackage,
   paths.tauriConfig,

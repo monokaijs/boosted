@@ -8,7 +8,7 @@ use crate::Config;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "boosted",
+    name = "boosted-cli",
     version,
     about = "Run the Boosted web workspace without a desktop shell"
 )]
@@ -34,7 +34,7 @@ pub struct Cli {
     )]
     port: Option<u16>,
 
-    /// Directory used for the database, uploads, and managed worktrees.
+    /// Directory used for local state. Defaults to the platform application-data directory.
     #[arg(long, global = true, env = "BOOSTED_DATA_DIR", value_name = "PATH")]
     data_dir: Option<PathBuf>,
 
@@ -116,11 +116,12 @@ mod tests {
 
     #[test]
     fn defaults_to_saved_settings_and_public_fallback() {
-        let config = Cli::try_parse_from(["boosted"])
+        let config = Cli::try_parse_from(["boosted-cli"])
             .expect("default CLI arguments")
             .into_config();
 
         assert_eq!(config.bind, None);
+        assert_eq!(config.data_dir, Config::default_data_dir());
         assert_eq!(config.web_ui_enabled, None);
         assert_eq!(config.allowed_ips, None);
     }
@@ -128,7 +129,7 @@ mod tests {
     #[test]
     fn accepts_serve_options_after_the_subcommand() {
         let config = Cli::try_parse_from([
-            "boosted",
+            "boosted-cli",
             "serve",
             "--bind",
             "0.0.0.0:8080",
@@ -148,7 +149,7 @@ mod tests {
     #[test]
     fn accepts_web_access_overrides() {
         let config = Cli::try_parse_from([
-            "boosted",
+            "boosted-cli",
             "serve",
             "--port",
             "9000",

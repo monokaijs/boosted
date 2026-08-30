@@ -20,15 +20,19 @@ The first browser visit creates the administrator. The admin then creates member
 
 ## Headless server
 
-GitHub Releases include a standalone Linux CLI with the web app embedded, so it does not need a desktop environment or WebKit. The server host still needs Git and the Codex CLI. Download and extract `boosted-<version>-linux-x86_64.tar.gz`, then run:
+The quickest way to start the headless server is through npm (Node.js 18+):
 
 ```bash
-./boosted serve --data-dir ./data
+npx boosted-cli
 ```
+
+Or install it globally and run `boosted-cli`. The npm launcher downloads and caches the native CLI for Linux x64, macOS Intel/Apple Silicon, or Windows x64. The CLI has the web app embedded, so it does not need a desktop environment or WebKit. The server host still needs Git and the Codex CLI.
+
+No data-directory argument is required. Boosted stores its database, uploads, and managed worktrees in the platform application-data directory by default (`BOOSTED_DATA_DIR` remains available when a custom location is needed).
 
 Open `http://<server>:4782` in a browser. The first launch listens publicly on `0.0.0.0:4782`. Administrators can change the port, disable browser UI serving, or allowlist remote IPv4/IPv6 addresses under **Settings → Global → Web interface**; saved changes apply after restarting Boosted. Localhost remains available when an allowlist is active.
 
-Run `./boosted serve --help` for launch overrides. `--bind`, `--port`, `--disable-web-ui`, repeated `--allow-ip`, and `--public` override saved settings for that launch. `BOOSTED_BIND`, `BOOSTED_PORT`, `BOOSTED_DISABLE_WEB_UI`, `BOOSTED_ALLOWED_IPS`, `BOOSTED_DATA_DIR`, and `BOOSTED_WEB_DIR` provide environment equivalents; an external web directory overrides the embedded frontend.
+Run `npx boosted-cli --help` for launch overrides. `--bind`, `--port`, `--disable-web-ui`, repeated `--allow-ip`, and `--public` override saved settings for that launch. `BOOSTED_BIND`, `BOOSTED_PORT`, `BOOSTED_DISABLE_WEB_UI`, `BOOSTED_ALLOWED_IPS`, `BOOSTED_DATA_DIR`, and `BOOSTED_WEB_DIR` provide environment equivalents; an external web directory overrides the embedded frontend.
 
 Public access gives authenticated users host-level execution access. Use the IP allowlist or a firewall for trusted networks, and put internet-facing access behind an authenticated TLS proxy or tunnel.
 
@@ -39,9 +43,13 @@ pnpm build
 cargo run --release -p boosted-server --features embedded-web -- serve
 ```
 
+GitHub Releases also provide the standalone native CLI executables used by the npm launcher.
+
 ## Releases
 
-Run the **Release Boosted** workflow from the repository's Actions tab and choose a `patch`, `minor`, or `major` version increment. The workflow builds the standalone Linux CLI, Linux (`.deb` and `.AppImage`), Windows (`.exe` and `.msi`), and universal macOS (`.dmg`) installers. Once every build succeeds, it commits the synchronized version bump, creates the version tag, and publishes a GitHub Release with SHA-256 checksums.
+Run the **Release Boosted** workflow from the repository's Actions tab and choose a `patch`, `minor`, or `major` version increment. The workflow builds standalone CLIs for Linux x64, Windows x64, and macOS Intel/Apple Silicon, plus Linux (`.deb` and `.AppImage`), Windows (`.exe` and `.msi`), and universal macOS (`.dmg`) installers. Once every build succeeds, it commits the synchronized version bump, creates the version tag, publishes a GitHub Release with SHA-256 checksums, and publishes `boosted-cli` to npm through Trusted Publishing.
+
+Trusted Publishing requires an existing npm package. Bootstrap `boosted-cli` with one authenticated manual publish, then configure its npm package settings with GitHub organization/user `monokaijs`, repository `boosted`, and workflow filename `release.yml`. No npm token is needed for later releases.
 
 Desktop builds check `monokaijs/boosted` GitHub Releases shortly after startup and every six hours. When a newer signed release is available, Boosted downloads it, verifies its updater signature, installs it, and relaunches. A manual **Check now** action and update progress are available under **Settings → Application**. Browser and headless-server sessions do not run the desktop updater.
 
