@@ -22,4 +22,4 @@ The first browser visit creates the administrator. The admin then creates member
 
 Run the **Release desktop apps** workflow from the repository's Actions tab and choose a `patch`, `minor`, or `major` version increment. The workflow builds Linux (`.deb` and `.AppImage`), Windows (`.exe` and `.msi`), and universal macOS (`.dmg`) installers. Once every build succeeds, it commits the synchronized version bump, creates the version tag, and publishes a GitHub Release with SHA-256 checksums.
 
-The macOS bundle uses an ad-hoc signature. Windows installers are unsigned, and the macOS app is not notarized, so production distribution will require platform signing credentials.
+The release workflow requires a Developer ID certificate and Apple notarization credentials for macOS. Follow [the macOS signing guide](docs/macos-signing.md) before the first release. Local macOS builds fall back to an ad-hoc signature; Windows installers remain unsigned.
