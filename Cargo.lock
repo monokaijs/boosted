@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "boosted-desktop"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "boosted-server",
  "tauri",
@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "boosted-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "argon2",
  "axum",
