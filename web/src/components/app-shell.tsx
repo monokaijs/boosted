@@ -1,6 +1,6 @@
 import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Bot, Files, Folder, FolderOpen, GitBranch, GitCommitHorizontal, KanbanSquare, ListTodo, LogOut, MessagesSquare, Settings, TerminalSquare } from "lucide-react";
+import { Files, Folder, FolderOpen, GitBranch, GitCommitHorizontal, KanbanSquare, ListTodo, LogOut, MessagesSquare, Settings, TerminalSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ForcePasswordDialog, NewTaskDialog, OpenProjectDialog } from "@/components/create-dialogs";
@@ -143,7 +143,7 @@ export function AppShell() {
       style={{ "--drawer-width": `${drawerWidth}px` } as CSSProperties}
     >
       <header className="app-topbar">
-        <div className="app-brand flex h-full w-12 items-center justify-center"><div className="flex size-6 items-center justify-center rounded-md bg-primary/15 text-primary"><Bot className="size-3.5" /></div></div>
+        <div className="app-brand flex h-full w-12 items-center justify-center"><img src="/favicon.svg" alt="Boosted" className="size-6" /></div>
         <div className="app-drawer-switchers ml-1 flex items-center gap-0.5">
           <Button className={cn(drawerOpen && drawerView === "tasks" && "bg-accent")} variant="ghost" size="icon-sm" title="Tasks" aria-label="Tasks" aria-pressed={drawerOpen && drawerView === "tasks"} onClick={() => toggleDrawer("tasks")}><ListTodo /></Button>
           <Button className={cn(drawerOpen && drawerView === "chats" && "bg-accent")} variant="ghost" size="icon-sm" title="Codex chats" aria-label="Codex chats" aria-pressed={drawerOpen && drawerView === "chats"} onClick={() => toggleDrawer("chats")}><MessagesSquare /></Button>
