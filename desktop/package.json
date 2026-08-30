@@ -1,7 +1,7 @@
 {
   "name": "@boosted/desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "scripts": {
     "tauri": "tauri"
   },
@@ -9,4 +9,3 @@
     "@tauri-apps/cli": "^2.11.4"
   }
 }
-
