@@ -77,15 +77,15 @@ for (const file of jsonFiles) {
 const workspacePackages = new Set(["boosted-desktop", "boosted-server"]);
 let updatedLockPackages = 0;
 const cargoLock = readFileSync(paths.cargoLock, "utf8").replace(
-  /\[\[package\]\]\n[\s\S]*?(?=\n\[\[package\]\]|$)/g,
+  /\[\[package\]\]\r?\n[\s\S]*?(?=\r?\n\[\[package\]\]|$)/g,
   (packageBlock) => {
-    const name = packageBlock.match(/^name = "([^"]+)"$/m)?.[1];
+    const name = packageBlock.match(/^name = "([^"]+)"\r?$/m)?.[1];
     if (!workspacePackages.has(name)) {
       return packageBlock;
     }
 
     const versionPattern = new RegExp(
-      `^version = "${currentVersion.replaceAll(".", "\\.")}"$`,
+      `^version = "${currentVersion.replaceAll(".", "\\.")}"(\\r?)$`,
       "m",
     );
     if (!versionPattern.test(packageBlock)) {
@@ -93,7 +93,10 @@ const cargoLock = readFileSync(paths.cargoLock, "utf8").replace(
     }
 
     updatedLockPackages += 1;
-    return packageBlock.replace(versionPattern, `version = "${nextVersion}"`);
+    return packageBlock.replace(
+      versionPattern,
+      (_match, carriageReturn) => `version = "${nextVersion}"${carriageReturn}`,
+    );
   },
 );
 
