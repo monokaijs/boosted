@@ -114,13 +114,17 @@ export async function installBinary({
   return binary;
 }
 
-export async function run({ argv = process.argv.slice(2), env = process.env } = {}) {
-  const binary = await installBinary({ env });
-  const child = spawn(binary, argv, {
+export function spawnOptions(env = process.env) {
+  return {
     env,
     stdio: "inherit",
-    windowsHide: false,
-  });
+    windowsHide: true,
+  };
+}
+
+export async function run({ argv = process.argv.slice(2), env = process.env } = {}) {
+  const binary = await installBinary({ env });
+  const child = spawn(binary, argv, spawnOptions(env));
 
   await new Promise((resolve, reject) => {
     child.once("error", reject);

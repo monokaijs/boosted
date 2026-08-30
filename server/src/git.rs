@@ -1,16 +1,16 @@
 use crate::{
     error::{AppError, AppResult},
     models::{GitChange, GitCommit, GitStatus},
+    process::background_command,
 };
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::Stdio,
 };
-use tokio::process::Command;
 
 async fn git(repo: &Path, args: &[&str]) -> AppResult<String> {
-    let output = Command::new("git")
+    let output = background_command("git")
         .arg("-C")
         .arg(repo)
         .args(args)

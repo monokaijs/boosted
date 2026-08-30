@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
 
-import { cacheRoot, releaseAsset, version } from "../npm/launcher.mjs";
+import { cacheRoot, releaseAsset, spawnOptions, version } from "../npm/launcher.mjs";
 
 test("maps supported npm platforms to versioned release assets", () => {
   assert.equal(releaseAsset("linux", "x64"), `boosted-${version}-linux-x86_64`);
@@ -20,4 +20,13 @@ test("honors an explicit binary cache without treating it as app data", () => {
     cacheRoot("linux", { BOOSTED_CLI_CACHE_DIR: join("tmp", "boosted-cache") }),
     join("tmp", "boosted-cache"),
   );
+});
+
+test("hides the native subprocess console window", () => {
+  const env = { BOOSTED_TEST: "1" };
+  assert.deepEqual(spawnOptions(env), {
+    env,
+    stdio: "inherit",
+    windowsHide: true,
+  });
 });

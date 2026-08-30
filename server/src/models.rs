@@ -67,6 +67,20 @@ pub struct GlobalSettingsUpdate {
     pub allowed_ips: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexBinarySettings {
+    pub binary_path: Option<String>,
+    pub resolved_binary_path: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexBinarySettingsUpdate {
+    pub binary_path: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {

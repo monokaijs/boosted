@@ -113,12 +113,12 @@ export function NewTaskDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   return (
     <Dialog open={open} onOpenChange={close}>
       <DialogContent className="task-create-dialog max-w-3xl gap-0 overflow-hidden p-0">
-        <DialogHeader className="border-b border-border px-6 py-5 pr-12"><DialogTitle>Create a task</DialogTitle><DialogDescription>Capture the full context now, then plan and execute it with Codex when you are ready.</DialogDescription></DialogHeader>
+        <DialogHeader className="border-b border-border px-6 py-5 pr-12"><DialogTitle>Create task</DialogTitle></DialogHeader>
         <form onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
           <div className="grid gap-4 px-6 py-5">
-            <label className="grid gap-1.5"><span className="text-xs font-medium">Title</span><Input autoFocus className="h-10 text-sm" placeholder="What needs to be done?" value={title} onChange={(event) => setTitle(event.target.value)} required /></label>
+            <label className="grid gap-1.5"><span className="text-xs font-medium">Title</span><Input autoFocus className="h-10 text-sm" value={title} onChange={(event) => setTitle(event.target.value)} required /></label>
             <div className="grid gap-1.5">
-              <div className="flex items-end justify-between"><div><p className="text-xs font-medium">Description</p><p className="mt-0.5 text-[11px] text-muted-foreground">Markdown, tables, checklists, and code blocks are supported.</p></div><div className="flex rounded-md bg-background p-0.5"><Button type="button" size="sm" variant="ghost" className={mode === "write" ? "h-6 bg-accent px-2" : "h-6 px-2"} onClick={() => setMode("write")}><Pencil />Write</Button><Button type="button" size="sm" variant="ghost" className={mode === "preview" ? "h-6 bg-accent px-2" : "h-6 px-2"} onClick={() => setMode("preview")}><Eye />Preview</Button></div></div>
+              <div className="flex items-end justify-between"><p className="text-xs font-medium">Description</p><div className="flex rounded-md bg-background p-0.5"><Button type="button" size="sm" variant="ghost" className={mode === "write" ? "h-6 bg-accent px-2" : "h-6 px-2"} onClick={() => setMode("write")}><Pencil />Write</Button><Button type="button" size="sm" variant="ghost" className={mode === "preview" ? "h-6 bg-accent px-2" : "h-6 px-2"} onClick={() => setMode("preview")}><Eye />Preview</Button></div></div>
               <div className="overflow-hidden rounded-lg border border-input bg-[var(--surface-input)] focus-within:border-primary/60">
                 {mode === "write" && <><div className="flex items-center gap-0.5 border-b border-border px-2 py-1"><Button type="button" variant="ghost" size="icon-sm" title="Bold" onClick={() => format("**")}><Bold /></Button><Button type="button" variant="ghost" size="icon-sm" title="Italic" onClick={() => format("_", "_")}><Italic /></Button><Button type="button" variant="ghost" size="icon-sm" title="Link" onClick={() => format("[", "](https://)", "link text")}><Link /></Button><span className="mx-1 h-4 w-px bg-border" /><Button type="button" variant="ghost" size="icon-sm" title="Bulleted list" onClick={() => format("- ", "", "list item")}><List /></Button><Button type="button" variant="ghost" size="icon-sm" title="Numbered list" onClick={() => format("1. ", "", "list item")}><ListOrdered /></Button><Button type="button" variant="ghost" size="icon-sm" title="Code" onClick={() => format("`", "`")}><Code2 /></Button></div><Textarea ref={textareaRef} className="min-h-52 resize-y rounded-none border-0 bg-transparent p-3 text-[13px] leading-6 shadow-none focus-visible:border-0 focus-visible:ring-0" placeholder="Describe the outcome, constraints, acceptance criteria, and useful implementation context…" value={description} onChange={(event) => setDescription(event.target.value)} required /></>}
                 {mode === "preview" && <div className="aui-markdown min-h-64 p-4">{description.trim() ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{description}</ReactMarkdown> : <p className="text-muted-foreground">Nothing to preview yet.</p>}</div>}
@@ -129,7 +129,7 @@ export function NewTaskDialog({ open, onOpenChange }: { open: boolean; onOpenCha
             {optionsOpen && <div className="grid grid-cols-1 gap-3 rounded-lg border border-border bg-background/25 p-3 sm:grid-cols-3"><label className="grid gap-1.5 text-[11px] text-muted-foreground">Base branch<select className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none" value={baseBranch} onChange={(event) => setBaseBranch(event.target.value)}>{branches.data?.map((branch) => <option key={branch}>{branch}</option>)}</select></label><label className="grid gap-1.5 text-[11px] text-muted-foreground">Model<select className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none" value={model} onChange={(event) => { const next = codexOptions.data?.models.find((entry) => entry.model === event.target.value); setModel(event.target.value); if (next) setReasoningEffort(next.defaultReasoningEffort); }}>{codexOptions.data?.models.map((entry) => <option key={entry.id} value={entry.model}>{entry.displayName}</option>)}</select></label><label className="grid gap-1.5 text-[11px] text-muted-foreground">Access<select className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none" value={accessMode} onChange={(event) => setAccessMode(event.target.value as CodexAccessOption["id"])}>{codexOptions.data?.accessModes.map((entry) => <option key={entry.id} value={entry.id}>{entry.label}</option>)}</select></label>{selectedModel && <label className="grid gap-1.5 text-[11px] text-muted-foreground sm:col-start-2">Reasoning<select className="h-8 rounded-md border border-input bg-background px-2 text-xs capitalize text-foreground outline-none" value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value)}>{selectedModel.supportedReasoningEfforts.map((entry) => <option key={entry.id}>{entry.id}</option>)}</select></label>}</div>}
           </div>
           {(create.error || branches.error || codexOptions.error) && <p className="px-6 pb-3 text-xs text-destructive">{create.error?.message ?? branches.error?.message ?? codexOptions.error?.message}</p>}
-          <DialogFooter className="border-t border-border bg-background/25 px-6 py-4"><Button type="button" variant="ghost" onClick={() => close(false)}>Cancel</Button><Button disabled={create.isPending || uploading || !title.trim() || !description.trim() || !baseBranch}>{create.isPending && <LoaderCircle className="animate-spin" />}Create task</Button></DialogFooter>
+          <DialogFooter className="border-t border-border bg-background/25 px-6 py-4"><Button type="button" variant="ghost" onClick={() => close(false)}>Cancel</Button><Button disabled={create.isPending || uploading || !title.trim() || !description.trim() || !baseBranch}>{create.isPending && <LoaderCircle className="animate-spin" />}Create</Button></DialogFooter>
         </form>
       </DialogContent>
     </Dialog>
@@ -173,7 +173,7 @@ export function OpenProjectDialog({ open, onOpenChange }: { open: boolean; onOpe
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
-        <DialogHeader><div className="mb-2 flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary"><FolderOpen className="size-4" /></div><DialogTitle>Open project</DialogTitle><DialogDescription>Choose a Git repository folder on the machine running Boosted.</DialogDescription></DialogHeader>
+        <DialogHeader><div className="mb-2 flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary"><FolderOpen className="size-4" /></div><DialogTitle>Open project</DialogTitle></DialogHeader>
         <div className="overflow-hidden rounded-lg border border-border bg-background/35">
           <form className="flex items-center gap-1.5 p-2" onSubmit={(event) => { event.preventDefault(); if (location.trim()) navigate(location.trim()); }}>
             <Button type="button" variant="ghost" size="icon-sm" title="Parent folder" disabled={!folders.data?.parent} onClick={() => folders.data?.parent && navigate(folders.data.parent)}><ArrowUp /></Button>
@@ -211,12 +211,10 @@ export function OpenProjectDialog({ open, onOpenChange }: { open: boolean; onOpe
             </div>
           </ScrollArea>
 
-          <div className="flex min-h-9 items-center gap-2 border-t border-border px-3 text-[11px] text-muted-foreground">
-            {openPath ? <><GitBranch className="size-3.5" /><span className="min-w-0 flex-1 truncate">{openPath}</span></> : <span>Select a Git repository folder. Double-click a folder to browse it.</span>}
-          </div>
+          {openPath && <div className="flex min-h-9 items-center gap-2 border-t border-border px-3 text-[11px] text-muted-foreground"><GitBranch className="size-3.5" /><span className="min-w-0 flex-1 truncate">{openPath}</span></div>}
         </div>
         {openProject.error && <p className="text-xs text-destructive">{openProject.error.message}</p>}
-        <DialogFooter><Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button><Button disabled={openProject.isPending || !openPath} onClick={() => openProject.mutate()}>{openProject.isPending && <LoaderCircle className="animate-spin" />}<FolderOpen />Open project</Button></DialogFooter>
+        <DialogFooter><Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button><Button disabled={openProject.isPending || !openPath} onClick={() => openProject.mutate()}>{openProject.isPending && <LoaderCircle className="animate-spin" />}<FolderOpen />Open</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   );
@@ -231,7 +229,7 @@ export function UsersDialog({ open, onOpenChange }: { open: boolean; onOpenChang
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
-        <DialogHeader><div className="mb-2 flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary"><UserPlus className="size-4" /></div><DialogTitle>Manage users</DialogTitle><DialogDescription>Members can access every project, task, terminal, and agent run.</DialogDescription></DialogHeader>
+        <DialogHeader><div className="mb-2 flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary"><UserPlus className="size-4" /></div><DialogTitle>Manage users</DialogTitle></DialogHeader>
         <div className="grid max-h-52 gap-1 overflow-auto">
           {users.data?.map((user) => <div key={user.id} className="flex items-center justify-between rounded-md px-2 py-2 hover:bg-accent"><div><p className="text-sm font-medium">{user.username}</p><p className="text-[11px] capitalize text-muted-foreground">{user.role}{user.mustChangePassword ? " · password change required" : ""}</p></div>{user.disabled && <span className="text-xs text-destructive">Disabled</span>}</div>)}
         </div>
@@ -239,7 +237,7 @@ export function UsersDialog({ open, onOpenChange }: { open: boolean; onOpenChang
           <p className="text-xs font-medium">Create member</p>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2"><Input placeholder="Username" value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} required /><Input type="password" placeholder="Temporary password" value={password} onChange={(event) => setPassword(event.target.value)} required /></div>
           {create.error && <p className="text-xs text-destructive">{create.error.message}</p>}
-          <DialogFooter><Button disabled={create.isPending || username.length < 3 || !password}>{create.isPending && <LoaderCircle className="animate-spin" />}Create member</Button></DialogFooter>
+          <DialogFooter><Button disabled={create.isPending || username.length < 3 || !password}>{create.isPending && <LoaderCircle className="animate-spin" />}Create</Button></DialogFooter>
         </form>
       </DialogContent>
     </Dialog>

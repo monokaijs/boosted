@@ -7,6 +7,7 @@ mod files;
 mod git;
 mod integrations;
 mod models;
+mod process;
 mod terminal;
 
 use axum::{

@@ -1,8 +1,8 @@
 use crate::{
     error::{AppError, AppResult},
     models::{
-        AuthUser, GlobalSettings, Integration, Project, Task, TaskAttachment, TaskEvent, TaskPlan,
-        TaskSource, User,
+        AuthUser, CodexBinarySettings, GlobalSettings, Integration, Project, Task, TaskAttachment,
+        TaskEvent, TaskPlan, TaskSource, User,
     },
 };
 use chrono::Utc;
@@ -101,6 +101,37 @@ impl Database {
         let mut saved = settings.clone();
         saved.updated_at = Some(updated_at);
         Ok(saved)
+    }
+
+    pub async fn codex_binary_settings(&self) -> AppResult<CodexBinarySettings> {
+        let row = sqlx::query("SELECT binary_path,updated_at FROM codex_settings WHERE id=1")
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Ok(CodexBinarySettings::default());
+        };
+        Ok(CodexBinarySettings {
+            binary_path: row.get("binary_path"),
+            resolved_binary_path: None,
+            updated_at: row.get("updated_at"),
+        })
+    }
+
+    pub async fn update_codex_binary_settings(
+        &self,
+        binary_path: Option<&str>,
+    ) -> AppResult<CodexBinarySettings> {
+        let updated_at = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO codex_settings(id,binary_path,updated_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET binary_path=excluded.binary_path,updated_at=excluded.updated_at")
+            .bind(binary_path)
+            .bind(&updated_at)
+            .execute(&self.pool)
+            .await?;
+        Ok(CodexBinarySettings {
+            binary_path: binary_path.map(str::to_owned),
+            resolved_binary_path: None,
+            updated_at: Some(updated_at),
+        })
     }
 
     pub async fn auth_by_token_hash(&self, hash: &str) -> AppResult<Option<AuthUser>> {
@@ -316,5 +347,6 @@ CREATE INDEX IF NOT EXISTS idx_task_attachments_task ON task_attachments(task_id
 CREATE TABLE IF NOT EXISTS integrations(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), provider TEXT NOT NULL CHECK(provider IN ('gitlab','huly')), name TEXT NOT NULL, config_json TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, sync_interval_minutes INTEGER, last_synced_at TEXT, last_sync_status TEXT, last_sync_error TEXT, created_by TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_integrations_project ON integrations(project_id,created_at);
 CREATE TABLE IF NOT EXISTS task_sources(task_id TEXT PRIMARY KEY REFERENCES tasks(id), integration_id TEXT NOT NULL, provider TEXT NOT NULL, external_id TEXT NOT NULL, external_url TEXT, UNIQUE(integration_id,external_id));
+CREATE TABLE IF NOT EXISTS codex_settings(id INTEGER PRIMARY KEY CHECK(id=1), binary_path TEXT, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS workspace_codex_settings(project_id TEXT PRIMARY KEY REFERENCES projects(id), instructions TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL);
 "#;

@@ -1,4 +1,7 @@
-use crate::error::{AppError, AppResult};
+use crate::{
+    error::{AppError, AppResult},
+    process::background_command,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 #[cfg(target_os = "macos")]
@@ -36,7 +39,7 @@ impl CodexCommand {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(&self.program);
+        let mut command = background_command(&self.program);
         if let Some(path) = &self.path {
             command.env("PATH", path);
         }
@@ -103,7 +106,7 @@ async fn login_shell_path() -> Option<OsString> {
     let shell = std::env::var_os("SHELL")
         .filter(|value| Path::new(value).is_absolute())
         .unwrap_or_else(|| OsString::from("/bin/zsh"));
-    let mut command = Command::new(shell);
+    let mut command = background_command(shell);
     command
         .args([
             "-ilc",
