@@ -55,7 +55,7 @@ function TimelineEvent({ event }: { event: TaskEvent }) {
     return <div className="my-3 flex items-center gap-2 text-[11px] text-muted-foreground"><span className="h-px flex-1 bg-border" /><ListChecks className="size-3.5" /><span>Plan updated</span><span className="h-px flex-1 bg-border" /></div>;
   }
   if (event.kind === "reasoning") {
-    return <details className="my-2 rounded-md border border-border/70 bg-background/20 px-3 py-2 text-xs text-muted-foreground"><summary className="cursor-pointer select-none">Reasoning summary</summary><div className="mt-2 whitespace-pre-wrap leading-5">{textPayload(event)}</div></details>;
+    return <details className="my-2 rounded-md border border-border/70 bg-background/20 px-3 py-2 text-xs text-muted-foreground"><summary className="cursor-pointer select-none">Reasoning summary</summary><div className="selectable-text mt-2 whitespace-pre-wrap leading-5">{textPayload(event)}</div></details>;
   }
   const user = event.kind === "user_message";
   const error = event.kind === "error";
@@ -64,7 +64,7 @@ function TimelineEvent({ event }: { event: TaskEvent }) {
       <div className={cn("mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border", user ? "border-primary/20 bg-primary/10 text-primary" : error ? "border-destructive/25 bg-destructive/10 text-destructive" : "border-border bg-secondary text-muted-foreground")}>{user ? <UserRound className="size-3.5" /> : <Bot className="size-3.5" />}</div>
       <div className={cn("min-w-0 max-w-[84%]", user && "text-right")}>
         <div className="mb-1 text-[10px] text-muted-foreground">{user ? event.actorName ?? "You" : error ? "Error" : "Codex"}</div>
-        <div className={cn("whitespace-pre-wrap text-[13px] leading-5", user && "inline-block rounded-lg bg-primary/10 px-3 py-2 text-left", error && "text-destructive")}>{textPayload(event)}</div>
+        <div className={cn("selectable-text whitespace-pre-wrap text-[13px] leading-5", user && "inline-block rounded-lg bg-primary/10 px-3 py-2 text-left", error && "text-destructive")}>{textPayload(event)}</div>
       </div>
     </article>
   );

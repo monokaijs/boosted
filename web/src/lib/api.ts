@@ -25,6 +25,11 @@ import type {
   IntegrationSyncResult,
   WorkspaceCodexSettings,
   User,
+  RemoteViewerSettings,
+  RemoteViewerCapabilities,
+  CaptureSource,
+  ViewerSessionRequest,
+  ViewerSession,
 } from "@/lib/types";
 import { activeMachine, activeMachineToken, useMachineStore, type MachineProfile } from "@/lib/machines";
 
@@ -90,9 +95,29 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   createAdmin: (username: string, password: string) => request<Session>("/setup/admin", json("POST", { username, password })),
   login: (username: string, password: string) => request<Session>("/auth/login", json("POST", { username, password })),
   me: () => request<User>("/auth/me"),
+  logout: () => request<void>("/auth/session", { method: "DELETE" }),
   changePassword: (currentPassword: string, nextPassword: string) => request<User>("/auth/password", json("PUT", { currentPassword, nextPassword })),
   globalSettings: () => request<GlobalSettings>("/settings/global"),
   updateGlobalSettings: (settings: Pick<GlobalSettings, "webPort" | "webUiEnabled" | "allowedIps">) => request<GlobalSettings>("/settings/global", json("PUT", settings)),
+  remoteViewerSettings: () => request<RemoteViewerSettings>("/settings/remote-viewer"),
+  updateRemoteViewerSettings: (settings: RemoteViewerSettings) => request<RemoteViewerSettings>("/settings/remote-viewer", json("PUT", settings)),
+  remoteViewerCapabilities: () => request<RemoteViewerCapabilities>("/remote-viewer/capabilities"),
+  remoteViewerSources: (kind: CaptureSource["kind"]) => request<CaptureSource[]>(`/remote-viewer/sources?kind=${kind}`),
+  remoteViewerThumbnail: async (id: string) => {
+    const headers = new Headers();
+    const token = options.getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const response = await fetch(`${baseUrl}/api/v1/remote-viewer/sources/${encodeURIComponent(id)}/thumbnail`, { headers });
+    if (!response.ok) {
+      if (response.status === 401) await options.onUnauthorized?.();
+      const body = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, body.error ?? "Unable to load source preview");
+    }
+    return response.blob();
+  },
+  createRemoteViewerSession: (requestBody: ViewerSessionRequest) => request<ViewerSession>("/remote-viewer/sessions", json("POST", requestBody)),
+  updateRemoteViewerSession: (id: string, requestBody: Partial<ViewerSessionRequest>) => request<ViewerSession>(`/remote-viewer/sessions/${encodeURIComponent(id)}`, json("PATCH", requestBody)),
+  deleteRemoteViewerSession: (id: string) => request<void>(`/remote-viewer/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
   users: () => request<User[]>("/users"),
   createUser: (username: string, password: string) => request<User>("/users", json("POST", { username, password })),
   setUserDisabled: (id: string, disabled: boolean) => request<User>(`/users/${id}`, json("PATCH", { disabled })),

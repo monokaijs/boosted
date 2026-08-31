@@ -23,13 +23,13 @@ export function PlanPanel() {
           {!plan && planning && <div className="grid justify-items-center gap-3 py-16 text-center text-xs text-muted-foreground"><LoaderCircle className="size-6 animate-spin text-primary" /><div><p className="font-medium text-foreground">Building the plan</p><p className="mt-1">Codex is inspecting the worktree and defining the execution steps.</p></div></div>}
           {!plan && !planning && <div className="empty-state min-h-64"><ListChecks className="size-7" /><p>No plan is available yet.</p></div>}
           {plan && <>
-            {plan.explanation && <p className="mb-4 text-xs leading-5 text-muted-foreground">{plan.explanation}</p>}
-            {plan.markdown && <div className="mb-4 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{plan.markdown}</div>}
+            {plan.explanation && <p className="selectable-text mb-4 text-xs leading-5 text-muted-foreground">{plan.explanation}</p>}
+            {plan.markdown && <div className="selectable-text mb-4 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{plan.markdown}</div>}
             <ol className="grid gap-1.5">
               {plan.steps.map((item, index) => (
                 <li key={`${item.step}-${index}`} className="grid grid-cols-[22px_1fr] gap-2 rounded-md border border-border/70 bg-background/25 px-3 py-2.5">
                   <span className={cn("mt-px flex size-5 items-center justify-center rounded-full border text-[10px]", item.status === "completed" ? "border-success/30 bg-success/10 text-success" : item.status === "in_progress" ? "border-primary/40 bg-primary/10 text-primary" : "border-border text-muted-foreground")}>{item.status === "completed" ? <Check className="size-3" /> : index + 1}</span>
-                  <span className={cn("text-xs leading-5", item.status === "completed" && "text-muted-foreground line-through")}>{item.step}</span>
+                  <span className={cn("selectable-text text-xs leading-5", item.status === "completed" && "text-muted-foreground line-through")}>{item.step}</span>
                 </li>
               ))}
             </ol>

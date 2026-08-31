@@ -1,8 +1,8 @@
 use crate::{
     error::{AppError, AppResult},
     models::{
-        AuthUser, CodexBinarySettings, GlobalSettings, Integration, Project, Task, TaskAttachment,
-        TaskEvent, TaskPlan, TaskSource, User,
+        AuthUser, CodexBinarySettings, GlobalSettings, Integration, Project, RemoteViewerSettings,
+        Task, TaskAttachment, TaskEvent, TaskPlan, TaskSource, User,
     },
 };
 use chrono::Utc;
@@ -103,6 +103,30 @@ impl Database {
         Ok(saved)
     }
 
+    pub async fn remote_viewer_settings(&self) -> AppResult<RemoteViewerSettings> {
+        let content = sqlx::query_scalar::<_, String>(
+            "SELECT content_json FROM remote_viewer_settings WHERE id=1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        match content {
+            Some(content) => serde_json::from_str(&content).map_err(AppError::from),
+            None => Ok(RemoteViewerSettings::default()),
+        }
+    }
+
+    pub async fn update_remote_viewer_settings(
+        &self,
+        settings: &RemoteViewerSettings,
+    ) -> AppResult<RemoteViewerSettings> {
+        sqlx::query("INSERT INTO remote_viewer_settings(id,content_json,updated_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET content_json=excluded.content_json,updated_at=excluded.updated_at")
+            .bind(serde_json::to_string(settings)?)
+            .bind(Utc::now().to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+        Ok(settings.clone())
+    }
+
     pub async fn codex_binary_settings(&self) -> AppResult<CodexBinarySettings> {
         let row = sqlx::query("SELECT binary_path,updated_at FROM codex_settings WHERE id=1")
             .fetch_optional(&self.pool)
@@ -135,12 +159,20 @@ impl Database {
     }
 
     pub async fn auth_by_token_hash(&self, hash: &str) -> AppResult<Option<AuthUser>> {
-        let row = sqlx::query("SELECT u.id, u.username, u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.disabled=0").bind(hash).bind(Utc::now().to_rfc3339()).fetch_optional(&self.pool).await?;
+        let row = sqlx::query("SELECT u.id, u.username, u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND u.disabled=0").bind(hash).fetch_optional(&self.pool).await?;
         Ok(row.map(|row| AuthUser {
             id: row.get("id"),
             username: row.get("username"),
             role: row.get("role"),
         }))
+    }
+
+    pub async fn revoke_session(&self, hash: &str) -> AppResult<()> {
+        sqlx::query("DELETE FROM sessions WHERE token_hash=?")
+            .bind(hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn projects(&self) -> AppResult<Vec<Project>> {
@@ -333,7 +365,9 @@ const TASK_SELECT: &str = "SELECT t.id,t.project_id,t.title,t.description,t.stat
 const MIGRATION: &str = r#"
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','member')), must_change_password INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS global_settings(id INTEGER PRIMARY KEY CHECK(id=1), web_port INTEGER NOT NULL CHECK(web_port BETWEEN 1 AND 65535), web_ui_enabled INTEGER NOT NULL DEFAULT 1, allowed_ips_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS remote_viewer_settings(id INTEGER PRIMARY KEY CHECK(id=1), content_json TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
+UPDATE sessions SET expires_at='9999-12-31T23:59:59.999Z' WHERE expires_at!='9999-12-31T23:59:59.999Z';
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, repo_path TEXT NOT NULL UNIQUE, default_branch TEXT NOT NULL, created_by TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL, description TEXT NOT NULL, status TEXT NOT NULL, branch_name TEXT NOT NULL, worktree_path TEXT NOT NULL, provider_thread_id TEXT, active_turn_id TEXT, created_by TEXT NOT NULL REFERENCES users(id), additions INTEGER NOT NULL DEFAULT 0, deletions INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS task_options(task_id TEXT PRIMARY KEY REFERENCES tasks(id), base_branch TEXT NOT NULL, model TEXT, reasoning_effort TEXT, access_mode TEXT NOT NULL CHECK(access_mode IN ('fullAccess','workspaceWrite','readOnly')));

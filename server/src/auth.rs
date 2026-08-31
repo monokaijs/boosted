@@ -5,10 +5,12 @@ use crate::{
 };
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+pub const SESSION_NEVER_EXPIRES: &str = "9999-12-31T23:59:59.999Z";
 
 pub fn validate_username(username: &str) -> AppResult<String> {
     let value = username.trim();
@@ -68,7 +70,7 @@ pub async fn create_session(db: &Database, user: User) -> AppResult<(String, Use
     .bind(Uuid::new_v4().to_string())
     .bind(&user.id)
     .bind(token_hash(&token))
-    .bind((Utc::now() + Duration::days(30)).to_rfc3339())
+    .bind(SESSION_NEVER_EXPIRES)
     .bind(Utc::now().to_rfc3339())
     .execute(&db.pool)
     .await?;

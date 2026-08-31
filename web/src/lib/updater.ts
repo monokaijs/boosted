@@ -138,7 +138,7 @@ export function checkAndInstallAppUpdate() {
 }
 
 export function startAutomaticAppUpdates() {
-  if (!desktopRuntime || automaticUpdatesStarted) return;
+  if (!desktopRuntime || !import.meta.env.PROD || automaticUpdatesStarted) return;
   automaticUpdatesStarted = true;
 
   void refreshCurrentVersion();

@@ -1,6 +1,6 @@
 import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Files, Folder, FolderOpen, GitBranch, GitCommitHorizontal, KanbanSquare, ListTodo, LogOut, MessagesSquare, Settings, TerminalSquare } from "lucide-react";
+import { Files, Folder, FolderOpen, GitBranch, GitCommitHorizontal, KanbanSquare, ListTodo, LogOut, MessagesSquare, MonitorPlay, Settings, TerminalSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ForcePasswordDialog, NewTaskDialog, OpenProjectDialog } from "@/components/create-dialogs";
@@ -22,6 +22,7 @@ const railPanels = [
   { id: "git", label: "Git changes", icon: GitBranch },
   { id: "history", label: "Git history", icon: GitCommitHorizontal },
   { id: "terminal", label: "Terminal", icon: TerminalSquare },
+  { id: "remoteViewer", label: "Remote Viewer", icon: MonitorPlay },
 ] as const;
 
 const defaultDrawerWidth = 292;
@@ -42,6 +43,10 @@ function initialDrawerWidth() {
 
 function openPanel(id: string) {
   window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: id }));
+}
+
+function GitHubMark() {
+  return <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.26c0 4.55 2.87 8.41 6.84 9.77.5.09.68-.22.68-.49v-1.89c-2.78.62-3.37-1.2-3.37-1.2-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.63.07-.63 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.64-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05A9.38 9.38 0 0 1 12 6.84c.85 0 1.71.12 2.5.35 1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.8-4.57 5.05.36.32.68.94.68 1.9v2.81c0 .27.18.59.69.49A10.03 10.03 0 0 0 22 12.26C22 6.58 17.52 2 12 2Z" /></svg>;
 }
 
 export function AppShell() {
@@ -113,8 +118,14 @@ export function AppShell() {
   }
 
   async function logout() {
-    await setToken();
-    useAppStore.getState().setUser(undefined);
+    try {
+      await api.logout();
+    } catch {
+      // A disconnected machine should not prevent local sign-out.
+    } finally {
+      await setToken();
+      useAppStore.getState().setUser(undefined);
+    }
   }
 
   function startDrawerResize(event: ReactPointerEvent<HTMLDivElement>) {
@@ -196,7 +207,7 @@ export function AppShell() {
           <Tooltip key={id}><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label={label} onClick={() => openPanel(id)}><Icon /></Button></TooltipTrigger><TooltipContent side="left">{label}</TooltipContent></Tooltip>
         ))}
         <div className="mt-auto">
-          <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label="Open project folder" onClick={() => setProjectDialogOpen(true)}><FolderOpen /></Button></TooltipTrigger><TooltipContent side="left">Open project folder</TooltipContent></Tooltip>
+          <Tooltip><TooltipTrigger asChild><Button asChild variant="ghost" size="icon"><a href="https://github.com/monokaijs/boosted" target="_blank" rel="noreferrer" aria-label="Open Boosted on GitHub"><GitHubMark /></a></Button></TooltipTrigger><TooltipContent side="left">GitHub</TooltipContent></Tooltip>
         </div>
       </nav>
 

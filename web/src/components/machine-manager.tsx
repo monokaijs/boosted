@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { createBoostedApiClient } from "@/lib/api";
+import { createBoostedApiClient, getActiveApiClient } from "@/lib/api";
 import { isMixedContentConnection, normalizeMachineBaseUrl, useMachineStore, type MachineProfile } from "@/lib/machines";
 import { cn } from "@/lib/utils";
 
@@ -93,6 +93,16 @@ export function ConnectionsManager({ embedded = false, onClose }: { embedded?: b
   const setToken = useMachineStore((state) => state.setToken);
   const [form, setForm] = useState<"add" | MachineProfile>();
 
+  async function signOut(profileId: string) {
+    try {
+      await getActiveApiClient().logout();
+    } catch {
+      // Always allow local sign-out if the machine cannot be reached.
+    } finally {
+      await setToken(profileId);
+    }
+  }
+
   if (form) return <div className={cn(!embedded && "p-1")}><MachineForm editing={form === "add" ? undefined : form} onDone={() => setForm(undefined)} /></div>;
 
   return (
@@ -103,7 +113,7 @@ export function ConnectionsManager({ embedded = false, onClose }: { embedded?: b
             <span className={cn("grid size-9 shrink-0 place-items-center rounded-lg bg-secondary text-muted-foreground", profile.id === activeId && "bg-primary/10 text-primary")}><Server className="size-4" /></span>
             <span className="min-w-0 flex-1"><span className="flex items-center gap-1.5 text-xs font-medium">{profile.name}{profile.id === activeId && <Check className="size-3 text-success" />}</span><span className="mt-1 block truncate font-mono text-[10px] text-muted-foreground">{profile.baseUrl}</span></span>
             {profile.id !== activeId && <Button variant="secondary" size="sm" onClick={() => void setActive(profile.id)}>Switch</Button>}
-            {profile.id === activeId && tokens[profile.id] && <Button variant="ghost" size="icon-sm" title="Sign out" onClick={() => void setToken(profile.id)}><LogOut /></Button>}
+            {profile.id === activeId && tokens[profile.id] && <Button variant="ghost" size="icon-sm" title="Sign out" onClick={() => void signOut(profile.id)}><LogOut /></Button>}
             <Button variant="ghost" size="icon-sm" title="Edit machine" onClick={() => setForm(profile)}><Pencil /></Button>
             <Button variant="ghost" size="icon-sm" title="Remove machine" onClick={() => { if (window.confirm(`Remove ${profile.name} from this device?`)) void removeProfile(profile.id); }}><Trash2 /></Button>
           </div>

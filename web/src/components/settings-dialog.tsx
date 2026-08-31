@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, Bell, BellRing, Bot, ChevronRight, CircleGauge, Clock, CloudDownload, Code2, Copy, ExternalLink, Flame, GitBranch, Globe2, LoaderCircle, Pencil, Plug, Plus, RefreshCw, Save, Server, Settings2, Shield, Trash2, UserPlus, Users, Workflow } from "lucide-react";
+import { Activity, Bell, BellRing, Bot, ChevronRight, CircleGauge, Clock, CloudDownload, Code2, Copy, ExternalLink, Flame, GitBranch, Globe2, LoaderCircle, MonitorCog, Pencil, Plug, Plus, RefreshCw, Save, Server, Settings2, Shield, Trash2, UserPlus, Users, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -9,21 +9,24 @@ import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { formatDuration, formatExactNumber, formatPercent, formatWindowDuration, rateLimitBuckets, rateLimitLabel } from "@/lib/codex-usage";
 import { defaultNotificationSettings, notificationEventDefinitions, notificationPermission, readNotificationSettings, requestNotificationPermission, showTestNotification, writeNotificationSettings, type PwaNotificationSettings } from "@/lib/notifications";
+import { canUseMacOSPermissionHelper, openMacOSPrivacySettings, showMacOSPermissionHelper, type MacOSRemoteViewerPermission } from "@/lib/macos-permissions";
+import { useMachineStore } from "@/lib/machines";
 import { useAppStore } from "@/lib/store";
-import type { CodexRateLimitWindow, Integration, IntegrationDiscoveryTarget } from "@/lib/types";
+import type { CodexRateLimitWindow, Integration, IntegrationDiscoveryTarget, RemoteViewerResolution, RemoteViewerSettings } from "@/lib/types";
 import { checkAndInstallAppUpdate, formatUpdateProgress, isDesktopApp, useAppUpdateState } from "@/lib/updater";
 import { cn, relativeTime } from "@/lib/utils";
 import { ConnectionsManager } from "@/components/machine-manager";
 
 const Gitlab = GitBranch;
 
-type Section = "connections" | "notifications" | "web" | "application" | "team" | "workspace" | "integrations" | "codex";
+type Section = "connections" | "notifications" | "web" | "remoteViewer" | "application" | "team" | "workspace" | "integrations" | "codex";
 
 const sectionGroups: { label: string; sections: { id: Section; label: string; icon: typeof Settings2 }[] }[] = [
   { label: "Global", sections: [
     { id: "connections", label: "Connections", icon: Server },
     { id: "notifications", label: "Notifications", icon: Bell },
     { id: "web", label: "Web interface", icon: Globe2 },
+    { id: "remoteViewer", label: "Remote Viewer", icon: MonitorCog },
     { id: "application", label: "Application", icon: RefreshCw },
     { id: "team", label: "Team", icon: Users },
   ] },
@@ -85,6 +88,100 @@ function GlobalWebSettings() {
     </SettingsSection>
     <SettingsSection title="Access behavior" description="An empty allowlist accepts connections from any remote address. Once addresses are listed, all other remote clients receive a forbidden response.">
       <div className="settings-card flex items-center gap-3"><Shield className="size-5 text-muted-foreground" /><div><p className="text-xs font-medium">Authentication still applies</p><p className="mt-0.5 text-[11px] text-muted-foreground">The IP allowlist is an additional network boundary; users must still sign in to protected Boosted APIs.</p></div></div>
+    </SettingsSection>
+  </div>;
+}
+
+const defaultRemoteViewerSettings: RemoteViewerSettings = {
+  enabled: false,
+  controlEnabled: false,
+  audioEnabled: true,
+  preferredCodec: "auto",
+  defaultFps: 30,
+  maxFps: 60,
+  defaultResolution: "1080p",
+  maxResolution: "1440p",
+  maxBitrateKbps: 8000,
+  maxConcurrentStreams: 4,
+};
+
+const remoteResolutions: { value: RemoteViewerResolution; label: string }[] = [
+  { value: "720p", label: "720p" },
+  { value: "1080p", label: "1080p" },
+  { value: "1440p", label: "1440p" },
+  { value: "native", label: "Native" },
+];
+
+function RemoteViewerGlobalSettings() {
+  const user = useAppStore((state) => state.user);
+  const activeMachineId = useMachineStore((state) => state.activeId);
+  const machineProfiles = useMachineStore((state) => state.profiles);
+  const queryClient = useQueryClient();
+  const settings = useQuery({ queryKey: ["remote-viewer-settings"], queryFn: api.remoteViewerSettings });
+  const capabilities = useQuery({ queryKey: ["remote-viewer-capabilities"], queryFn: api.remoteViewerCapabilities });
+  const [draft, setDraft] = useState<RemoteViewerSettings>(defaultRemoteViewerSettings);
+  const [permissionHelperError, setPermissionHelperError] = useState<string>();
+  useEffect(() => { if (settings.data) setDraft(settings.data); }, [settings.data]);
+  useEffect(() => {
+    const refresh = () => { void capabilities.refetch(); };
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [capabilities.refetch]);
+  const save = useMutation({
+    mutationFn: () => api.updateRemoteViewerSettings(draft),
+    onSuccess: (saved) => {
+      setDraft(saved);
+      void queryClient.invalidateQueries({ queryKey: ["remote-viewer-settings"] });
+    },
+  });
+  const isAdmin = user?.role === "admin";
+  const activeMachine = machineProfiles.find((profile) => profile.id === activeMachineId);
+  const localPermissionHelper = canUseMacOSPermissionHelper() && activeMachine?.baseUrl === "http://127.0.0.1:4782";
+  const update = <K extends keyof RemoteViewerSettings>(key: K, value: RemoteViewerSettings[K]) => setDraft((current) => ({ ...current, [key]: value }));
+  async function openPermissionHelper(permission: MacOSRemoteViewerPermission) {
+    setPermissionHelperError(undefined);
+    try { await showMacOSPermissionHelper(permission); }
+    catch (error) { setPermissionHelperError(error instanceof Error ? error.message : String(error)); }
+  }
+  async function openMacOSPermission(permission: MacOSRemoteViewerPermission, granted: boolean) {
+    if (!granted) return openPermissionHelper(permission);
+    setPermissionHelperError(undefined);
+    try { await openMacOSPrivacySettings(permission); }
+    catch (error) { setPermissionHelperError(error instanceof Error ? error.message : String(error)); }
+  }
+  return <div className="settings-content">
+    <SettingsSection title="Remote Viewer" description="Stream a selected window or display through the authenticated Boosted WebSocket connection. Settings apply machine-wide.">
+      <div className="settings-card grid gap-4">
+        <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-medium">Enable viewing</p><p className="mt-1 text-[11px] leading-4 text-muted-foreground">Members can enumerate host windows and displays and start viewer sessions.</p></div><Switch checked={draft.enabled} disabled={!isAdmin} onCheckedChange={(value) => update("enabled", value)} /></div>
+        <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-medium">Enable remote control</p><p className="mt-1 text-[11px] leading-4 text-muted-foreground">Allows pointer and keyboard injection. Turning this off releases every active controller immediately.</p></div><Switch checked={draft.controlEnabled} disabled={!isAdmin || !draft.enabled} onCheckedChange={(value) => update("controlEnabled", value)} /></div>
+        <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-medium">Stream system audio</p><p className="mt-1 text-[11px] leading-4 text-muted-foreground">Uses the complete host output mix for both window and display sessions.</p></div><Switch checked={draft.audioEnabled} disabled={!isAdmin || !draft.enabled} onCheckedChange={(value) => update("audioEnabled", value)} /></div>
+      </div>
+      <div className="settings-card mt-3 grid gap-4 sm:grid-cols-2">
+        <label className="grid gap-1.5"><span className="settings-label">Codec policy</span><select className="settings-select" value={draft.preferredCodec} disabled={!isAdmin} onChange={(event) => update("preferredCodec", event.target.value as RemoteViewerSettings["preferredCodec"])}><option value="auto">Auto (H.264, then VP8)</option><option value="h264">H.264</option><option value="vp8">VP8</option></select></label>
+        <label className="grid gap-1.5"><span className="settings-label">Maximum bitrate</span><div className="relative"><Input className="pr-14" type="number" min={100} max={100000} value={draft.maxBitrateKbps} disabled={!isAdmin} onChange={(event) => update("maxBitrateKbps", Number(event.target.value))} /><span className="pointer-events-none absolute right-2 top-2 text-[10px] text-muted-foreground">Kbps</span></div></label>
+        <label className="grid gap-1.5"><span className="settings-label">Default FPS</span><Input type="number" min={1} max={draft.maxFps} value={draft.defaultFps} disabled={!isAdmin} onChange={(event) => update("defaultFps", Number(event.target.value))} /></label>
+        <label className="grid gap-1.5"><span className="settings-label">Maximum FPS</span><Input type="number" min={1} max={240} value={draft.maxFps} disabled={!isAdmin} onChange={(event) => update("maxFps", Number(event.target.value))} /></label>
+        <label className="grid gap-1.5"><span className="settings-label">Default resolution</span><select className="settings-select" value={draft.defaultResolution} disabled={!isAdmin} onChange={(event) => update("defaultResolution", event.target.value as RemoteViewerResolution)}>{remoteResolutions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+        <label className="grid gap-1.5"><span className="settings-label">Maximum resolution</span><select className="settings-select" value={draft.maxResolution} disabled={!isAdmin} onChange={(event) => update("maxResolution", event.target.value as RemoteViewerResolution)}>{remoteResolutions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+        <label className="grid gap-1.5 sm:col-span-2"><span className="settings-label">Maximum concurrent sessions</span><Input type="number" min={1} max={32} value={draft.maxConcurrentStreams} disabled={!isAdmin} onChange={(event) => update("maxConcurrentStreams", Number(event.target.value))} /></label>
+      </div>
+      {capabilities.data?.platform === "macos" && <div className="settings-card mt-3 grid gap-3">
+        <div><p className="text-xs font-medium">macOS permissions</p><p className="mt-1 text-[11px] leading-4 text-muted-foreground">Boosted must be added separately to Screen Recording for viewing and Accessibility for remote control.</p></div>
+        {([
+          { permission: "screen-recording", label: "Screen Recording", status: capabilities.data.capturePermission, description: "Captures selected windows, displays, and system audio." },
+          { permission: "accessibility", label: "Accessibility", status: capabilities.data.controlPermission, description: "Injects pointer and keyboard input into the selected source." },
+        ] as const).map((entry) => <div key={entry.permission} className="flex items-center gap-3 rounded-lg border border-border bg-background/40 px-3 py-2.5">
+          <div className="min-w-0 flex-1"><div className="flex items-center gap-2"><p className="text-xs font-medium">{entry.label}</p><span className={cn("rounded-full px-1.5 py-0.5 text-[9px] capitalize", entry.status === "granted" ? "bg-success/10 text-success" : "bg-warning/10 text-warning")}>{entry.status}</span></div><p className="mt-1 text-[10px] leading-4 text-muted-foreground">{entry.description}</p></div>
+          <Button variant={entry.status === "granted" ? "ghost" : "secondary"} size="sm" disabled={!localPermissionHelper} onClick={() => void openMacOSPermission(entry.permission, entry.status === "granted")}><ExternalLink />{entry.status === "granted" ? "Open" : "Set up"}</Button>
+        </div>)}
+        {!localPermissionHelper && <p className="text-[10px] leading-4 text-warning">Open the Boosted desktop app on the host Mac and select its “This PC” connection to set these permissions. A browser, remote connection, or standalone boosted-server cannot add the host’s Boosted.app to macOS Privacy &amp; Security.</p>}
+        {permissionHelperError && <p className="text-[10px] leading-4 text-destructive">{permissionHelperError}</p>}
+      </div>}
+      <div className="mt-3 flex items-center justify-between gap-3"><div className="text-[10px] leading-4 text-muted-foreground">{capabilities.data ? `${capabilities.data.platform === "unsupported" ? "Unsupported host" : capabilities.data.platform} · capture ${capabilities.data.capturePermission} · control ${capabilities.data.controlPermission}` : "Checking host capabilities…"}</div><Button size="sm" disabled={!isAdmin || save.isPending} onClick={() => save.mutate()}>{save.isPending ? <LoaderCircle className="animate-spin" /> : <Save />}Save viewer settings</Button></div>
+      {!isAdmin && <p className="mt-2 text-xs text-muted-foreground">Only an administrator can change Remote Viewer policy.</p>}
+      {settings.error && <p className="mt-2 text-xs text-destructive">{settings.error.message}</p>}
+      {save.error && <p className="mt-2 text-xs text-destructive">{save.error.message}</p>}
+      {save.isSuccess && <p className="mt-2 text-xs text-success">Viewer settings saved.</p>}
     </SettingsSection>
   </div>;
 }
@@ -688,5 +785,5 @@ function TeamSettings() {
 
 export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const [section, setSection] = useState<Section>("connections");
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="settings-dialog max-w-5xl gap-0 overflow-hidden p-0"><div className="settings-layout"><aside className="settings-sidebar"><DialogHeader className="px-3 pb-4 pt-2"><DialogTitle>Settings</DialogTitle></DialogHeader><nav className="settings-nav">{sectionGroups.map((group) => <div key={group.label} className="settings-nav-group"><p className="settings-nav-heading">{group.label}</p>{group.sections.map(({ id, label, icon: Icon }) => <button key={id} className={cn("settings-nav-item", section === id && "settings-nav-item-active")} onClick={() => setSection(id)}><Icon />{label}</button>)}</div>)}</nav></aside><main className="settings-main min-h-0 overflow-y-auto">{section === "connections" && <ConnectionsSettings />}{section === "notifications" && <NotificationSettings />}{section === "web" && <GlobalWebSettings />}{section === "application" && <ApplicationSettings />}{section === "team" && <TeamSettings />}{section === "workspace" && <WorkspaceSettings />}{section === "integrations" && <IntegrationsSettings />}{section === "codex" && <CodexSettings />}</main></div></DialogContent></Dialog>;
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="settings-dialog max-w-5xl gap-0 overflow-hidden p-0"><div className="settings-layout"><aside className="settings-sidebar"><DialogHeader className="px-3 pb-4 pt-2"><DialogTitle>Settings</DialogTitle></DialogHeader><nav className="settings-nav">{sectionGroups.map((group) => <div key={group.label} className="settings-nav-group"><p className="settings-nav-heading">{group.label}</p>{group.sections.map(({ id, label, icon: Icon }) => <button key={id} className={cn("settings-nav-item", section === id && "settings-nav-item-active")} onClick={() => setSection(id)}><Icon />{label}</button>)}</div>)}</nav></aside><main className="settings-main min-h-0 overflow-y-auto">{section === "connections" && <ConnectionsSettings />}{section === "notifications" && <NotificationSettings />}{section === "web" && <GlobalWebSettings />}{section === "remoteViewer" && <RemoteViewerGlobalSettings />}{section === "application" && <ApplicationSettings />}{section === "team" && <TeamSettings />}{section === "workspace" && <WorkspaceSettings />}{section === "integrations" && <IntegrationsSettings />}{section === "codex" && <CodexSettings />}</main></div></DialogContent></Dialog>;
 }

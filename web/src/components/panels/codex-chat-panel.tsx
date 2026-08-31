@@ -25,7 +25,7 @@ function UserMessage() {
     <MessagePrimitive.Root className="mx-auto flex w-full max-w-3xl justify-end gap-3 py-3">
       <div className="min-w-0 max-w-[84%]">
         <div className="mb-1 text-right text-[10px] text-muted-foreground">You</div>
-        <div className="rounded-lg bg-primary/10 px-3 py-2 text-left text-[13px] leading-5"><MessagePrimitive.Parts /></div>
+        <div className="selectable-text rounded-lg bg-primary/10 px-3 py-2 text-left text-[13px] leading-5"><MessagePrimitive.Parts /></div>
       </div>
       <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border border-primary/20 bg-primary/10 text-primary"><UserRound className="size-3.5" /></div>
     </MessagePrimitive.Root>

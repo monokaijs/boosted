@@ -28,6 +28,10 @@ Boosted connects directly to the URL you provide. It does not provide TLS, serve
 
 Existing installations migrate automatically. Browser clients retain the current origin, desktop clients retain `http://127.0.0.1:4782`, and development builds continue to honor `VITE_BOOSTED_API_URL`. The existing session and selected workspace move into that generated connection.
 
+## Remote Viewer
+
+On macOS and Windows, administrators can enable **Settings → Global → Remote Viewer** to let authenticated members select a host window or display, stream its video and system audio, and optionally control it from the web UI. Multiple independent viewer tabs can run concurrently. Media and input use authenticated WebSockets on the same Boosted HTTP(S) origin, including through WebSocket-capable cloudflared HTTPS tunnels; no TURN server or extra exposed port is required. See the [Remote Viewer guide](docs/remote-viewer.md) for permissions, protocol details, and security considerations.
+
 ## Issue integrations
 
 Install GitLab or Huly under **Settings → Integrations**. After connection details are entered, Boosted discovers the projects, groups, and workspaces visible to the supplied token and presents them as a searchable multi-select. GitLab discovery uses the instance's REST API and follows pagination, so paths or numeric IDs do not need to be copied from GitLab manually.

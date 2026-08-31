@@ -18,6 +18,7 @@ import { setupRetryDelay, shouldRetrySetup } from "@/lib/startup";
 import { useAppStore } from "@/lib/store";
 import type { SetupState, User } from "@/lib/types";
 import { startAutomaticAppUpdates } from "@/lib/updater";
+import { MacOSPermissionHelper } from "@/components/macos-permission-helper";
 
 const AppShell = lazy(() => import("@/components/app-shell").then((module) => ({ default: module.AppShell })));
 
@@ -109,4 +110,8 @@ function Bootstrap() {
   return <MachineBoundary key={`${profile.id}:${profile.baseUrl}`} profile={profile} />;
 }
 
-createRoot(document.getElementById("root")!).render(<StrictMode><Bootstrap />{!isTauriRuntime() && <PwaLifecycle />}</StrictMode>);
+const macOSPermissionHelper = window.__BOOSTED_MACOS_PERMISSION_HELPER__;
+
+createRoot(document.getElementById("root")!).render(macOSPermissionHelper
+  ? <StrictMode><MacOSPermissionHelper permission={macOSPermissionHelper} /></StrictMode>
+  : <StrictMode><Bootstrap />{!isTauriRuntime() && <PwaLifecycle />}</StrictMode>);

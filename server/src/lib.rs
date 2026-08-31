@@ -8,6 +8,7 @@ mod git;
 mod integrations;
 mod models;
 mod process;
+mod remote_viewer;
 mod terminal;
 
 use axum::{
@@ -36,6 +37,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 use tokio::sync::{RwLock, broadcast};
 use tower_http::{
@@ -51,11 +53,16 @@ use axum::http::{Uri, header};
 use rust_embed::Embed;
 
 use crate::{
-    auth::{authenticate, create_session, hash_password, validate_username, verify_password},
+    auth::{
+        authenticate, create_session, hash_password, token_hash, validate_username, verify_password,
+    },
     codex::{CodexClient, CodexManager},
     db::Database,
     error::{AppError, AppResult},
     models::*,
+    remote_viewer::{
+        ControlEvent, MediaMessage, RemoteViewerManager, ViewerSessionPatch, ViewerSessionRequest,
+    },
     terminal::TerminalManager,
 };
 
@@ -136,6 +143,7 @@ struct AppState {
     db: Database,
     codex: CodexManager,
     terminals: TerminalManager,
+    remote_viewer: RemoteViewerManager,
     live: broadcast::Sender<LiveEvent>,
     sequence: Arc<AtomicU64>,
     pending_inputs: Arc<RwLock<HashMap<String, PendingInput>>>,
@@ -228,10 +236,12 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let uploads_dir = config.data_dir.join("uploads");
     tokio::fs::create_dir_all(&uploads_dir).await?;
     let (live, _) = broadcast::channel(4096);
+    let remote_viewer_settings = db.remote_viewer_settings().await?;
     let state = AppState {
         db,
         codex,
         terminals: TerminalManager::default(),
+        remote_viewer: RemoteViewerManager::new(remote_viewer_settings),
         live,
         sequence: Arc::new(AtomicU64::new(1)),
         pending_inputs: Arc::new(RwLock::new(HashMap::new())),
@@ -283,13 +293,43 @@ fn router(
         .route("/setup/admin", post(create_admin))
         .route("/auth/login", post(login))
         .route("/ws", get(live_ws))
-        .route("/terminals/{id}/ws", get(terminal_ws));
+        .route("/terminals/{id}/ws", get(terminal_ws))
+        .route(
+            "/remote-viewer/sessions/{id}/media",
+            get(remote_viewer_media_ws),
+        )
+        .route(
+            "/remote-viewer/sessions/{id}/control",
+            get(remote_viewer_control_ws),
+        );
     let protected = Router::new()
         .route("/auth/me", get(me))
+        .route("/auth/session", delete(logout))
         .route("/auth/password", put(change_password))
         .route(
             "/settings/global",
             get(read_global_settings).put(update_global_settings),
+        )
+        .route(
+            "/settings/remote-viewer",
+            get(read_remote_viewer_settings).put(update_remote_viewer_settings),
+        )
+        .route(
+            "/remote-viewer/capabilities",
+            get(remote_viewer_capabilities),
+        )
+        .route("/remote-viewer/sources", get(remote_viewer_sources))
+        .route(
+            "/remote-viewer/sources/{id}/thumbnail",
+            get(remote_viewer_thumbnail),
+        )
+        .route(
+            "/remote-viewer/sessions",
+            post(create_remote_viewer_session),
+        )
+        .route(
+            "/remote-viewer/sessions/{id}",
+            patch(patch_remote_viewer_session).delete(delete_remote_viewer_session),
         )
         .route("/users", get(list_users).post(create_user))
         .route("/users/{id}", patch(patch_user))
@@ -589,6 +629,16 @@ async fn me(
     Ok(Json(state.db.user(&user.id).await?))
 }
 
+async fn logout(
+    State(state): State<AppState>,
+    Extension(_user): Extension<AuthUser>,
+    headers: HeaderMap,
+) -> AppResult<StatusCode> {
+    let token = bearer(&headers).ok_or(AppError::Unauthorized)?;
+    state.db.revoke_session(&token_hash(token)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn change_password(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
@@ -649,6 +699,92 @@ async fn update_global_settings(
         updated_at: None,
     };
     Ok(Json(state.db.update_global_settings(&settings).await?))
+}
+
+async fn read_remote_viewer_settings(
+    State(state): State<AppState>,
+    Extension(_user): Extension<AuthUser>,
+) -> AppResult<Json<RemoteViewerSettings>> {
+    Ok(Json(state.db.remote_viewer_settings().await?))
+}
+
+async fn update_remote_viewer_settings(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(settings): Json<RemoteViewerSettings>,
+) -> AppResult<Json<RemoteViewerSettings>> {
+    ensure_admin(&user)?;
+    remote_viewer::validate_settings(&settings)?;
+    let saved = state.db.update_remote_viewer_settings(&settings).await?;
+    state.remote_viewer.apply_settings(saved.clone());
+    Ok(Json(saved))
+}
+
+async fn remote_viewer_capabilities(
+    State(state): State<AppState>,
+    Extension(_user): Extension<AuthUser>,
+) -> Json<remote_viewer::RemoteViewerCapabilities> {
+    Json(state.remote_viewer.capabilities())
+}
+
+#[derive(Deserialize)]
+struct RemoteViewerSourcesQuery {
+    kind: Option<String>,
+}
+
+async fn remote_viewer_sources(
+    State(state): State<AppState>,
+    Extension(_user): Extension<AuthUser>,
+    Query(query): Query<RemoteViewerSourcesQuery>,
+) -> AppResult<Json<Vec<remote_viewer::CaptureSource>>> {
+    if let Some(kind) = query.kind.as_deref()
+        && !matches!(kind, "window" | "display")
+    {
+        return Err(AppError::BadRequest(
+            "source kind must be window or display".into(),
+        ));
+    }
+    Ok(Json(
+        state.remote_viewer.list_sources(query.kind.as_deref())?,
+    ))
+}
+
+async fn remote_viewer_thumbnail(
+    State(state): State<AppState>,
+    Extension(_user): Extension<AuthUser>,
+    AxumPath(id): AxumPath<String>,
+) -> AppResult<Response> {
+    let (bytes, content_type) = state.remote_viewer.thumbnail(&id)?;
+    Ok(([(axum::http::header::CONTENT_TYPE, content_type)], bytes).into_response())
+}
+
+async fn create_remote_viewer_session(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(request): Json<ViewerSessionRequest>,
+) -> AppResult<(StatusCode, Json<remote_viewer::ViewerSession>)> {
+    let session = state.remote_viewer.create_session(&user.id, request)?;
+    Ok((StatusCode::CREATED, Json(session)))
+}
+
+async fn patch_remote_viewer_session(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    AxumPath(id): AxumPath<String>,
+    Json(patch): Json<ViewerSessionPatch>,
+) -> AppResult<Json<remote_viewer::ViewerSession>> {
+    Ok(Json(
+        state.remote_viewer.patch_session(&user.id, &id, patch)?,
+    ))
+}
+
+async fn delete_remote_viewer_session(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    AxumPath(id): AxumPath<String>,
+) -> AppResult<StatusCode> {
+    state.remote_viewer.delete_session(&user.id, &id)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_users(
@@ -2596,6 +2732,145 @@ async fn terminal_ws(
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_terminal_ws(socket, state, id))
 }
+
+async fn remote_viewer_media_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_remote_viewer_media_ws(socket, state, id))
+}
+
+async fn handle_remote_viewer_media_ws(mut socket: WebSocket, state: AppState, id: String) {
+    let Some(user) = authenticate_websocket(&mut socket, &state).await else {
+        return;
+    };
+    if state
+        .remote_viewer
+        .owned_description(&user.id, &id)
+        .is_err()
+    {
+        let _ = socket.send(WsMessage::Close(None)).await;
+        return;
+    }
+    let Ok((mut media, config)) = state.remote_viewer.subscribe(&user.id, &id) else {
+        return;
+    };
+    if let Some(config) = config {
+        let _ = socket.send(WsMessage::Text(config.into())).await;
+    }
+    let _ = socket
+        .send(WsMessage::Text(
+            json!({"type":"status","state":"connected"})
+                .to_string()
+                .into(),
+        ))
+        .await;
+    let (mut sender, mut receiver) = socket.split();
+    loop {
+        tokio::select! {
+            message = media.recv() => match message {
+                Ok(MediaMessage::Text(text)) => {
+                    if sender.send(WsMessage::Text(text.into())).await.is_err() { break; }
+                }
+                Ok(MediaMessage::Binary(bytes)) => {
+                    if sender.send(WsMessage::Binary(bytes.into())).await.is_err() { break; }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let _ = state.remote_viewer.request_keyframe(&user.id, &id);
+                    continue;
+                }
+                Err(_) => break,
+            },
+            incoming = receiver.next() => match incoming {
+                Some(Ok(WsMessage::Text(text))) => {
+                    if serde_json::from_str::<Value>(&text).ok().and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned)).as_deref() == Some("keyframe") {
+                        let _ = state.remote_viewer.request_keyframe(&user.id, &id);
+                    }
+                }
+                Some(Ok(WsMessage::Ping(bytes))) => {
+                    if sender.send(WsMessage::Pong(bytes)).await.is_err() { break; }
+                }
+                Some(Ok(_)) => {}
+                _ => break,
+            }
+        }
+    }
+}
+
+async fn remote_viewer_control_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_remote_viewer_control_ws(socket, state, id))
+}
+
+async fn handle_remote_viewer_control_ws(mut socket: WebSocket, state: AppState, id: String) {
+    let Some(user) = authenticate_websocket(&mut socket, &state).await else {
+        return;
+    };
+    if state
+        .remote_viewer
+        .owned_description(&user.id, &id)
+        .is_err()
+    {
+        let _ = socket.send(WsMessage::Close(None)).await;
+        return;
+    }
+    let (mut sender, mut receiver) = socket.split();
+    let mut lease_check = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        tokio::select! {
+            _ = lease_check.tick() => state.remote_viewer.expire_leases(),
+            incoming = receiver.next() => match incoming {
+                Some(Ok(WsMessage::Text(text))) => {
+                    let response = match serde_json::from_str::<ControlEvent>(&text) {
+                        Ok(event) => state.remote_viewer.handle_control(&user.id, &id, event),
+                        Err(error) => Err(AppError::BadRequest(format!("invalid control event: {error}"))),
+                    };
+                    let message = match response {
+                        Ok(value) => value,
+                        Err(error) => json!({"type":"error","message":error.to_string()}),
+                    };
+                    if sender.send(WsMessage::Text(message.to_string().into())).await.is_err() { break; }
+                }
+                Some(Ok(WsMessage::Ping(bytes))) => {
+                    if sender.send(WsMessage::Pong(bytes)).await.is_err() { break; }
+                }
+                Some(Ok(_)) => {}
+                _ => break,
+            }
+        }
+    }
+    state.remote_viewer.release_control(&user.id, &id);
+}
+
+async fn authenticate_websocket(socket: &mut WebSocket, state: &AppState) -> Option<AuthUser> {
+    let Some(Ok(WsMessage::Text(auth_message))) = socket.recv().await else {
+        return None;
+    };
+    let token = serde_json::from_str::<Value>(&auth_message)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("token")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+    let Some(token) = token else {
+        let _ = socket.send(WsMessage::Close(None)).await;
+        return None;
+    };
+    match authenticate(&state.db, &token).await {
+        Ok(user) => Some(user),
+        Err(_) => {
+            let _ = socket.send(WsMessage::Close(None)).await;
+            None
+        }
+    }
+}
+
 async fn handle_terminal_ws(mut socket: WebSocket, state: AppState, id: String) {
     let Some(Ok(WsMessage::Text(auth_message))) = socket.recv().await else {
         return;
@@ -3208,6 +3483,84 @@ mod tests {
                 .expect("reloaded settings")
                 .allowed_ips,
             vec!["192.0.2.10"]
+        );
+    }
+    #[tokio::test]
+    async fn existing_sessions_are_migrated_to_never_expire() {
+        let root = tempfile::tempdir().expect("temporary database directory");
+        let database_path = root.path().join("boosted.sqlite3");
+        let db = Database::connect(&database_path).await.expect("database");
+        let user_id = Uuid::new_v4().to_string();
+        let raw_token = "persisted-session-token";
+        sqlx::query("INSERT INTO users(id,username,password_hash,role,must_change_password,disabled,created_at) VALUES(?,?,?,'member',0,0,?)")
+            .bind(&user_id)
+            .bind("persistent-user")
+            .bind("unused-password-hash")
+            .bind(Utc::now().to_rfc3339())
+            .execute(&db.pool)
+            .await
+            .expect("user fixture");
+        sqlx::query(
+            "INSERT INTO sessions(id,user_id,token_hash,expires_at,created_at) VALUES(?,?,?,?,?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&user_id)
+        .bind(token_hash(raw_token))
+        .bind("2000-01-01T00:00:00Z")
+        .bind(Utc::now().to_rfc3339())
+        .execute(&db.pool)
+        .await
+        .expect("expired session fixture");
+        db.pool.close().await;
+
+        let db = Database::connect(&database_path)
+            .await
+            .expect("reopened database");
+        let expires_at: String =
+            sqlx::query_scalar("SELECT expires_at FROM sessions WHERE user_id=?")
+                .bind(&user_id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("session expiry");
+        assert_eq!(expires_at, auth::SESSION_NEVER_EXPIRES);
+        let authenticated = db
+            .auth_by_token_hash(&token_hash(raw_token))
+            .await
+            .expect("authentication")
+            .expect("persistent session");
+        assert_eq!(authenticated.id, user_id);
+    }
+    #[tokio::test]
+    async fn remote_viewer_settings_default_disabled_and_round_trip() {
+        let root = tempfile::tempdir().expect("temporary database directory");
+        let db = Database::connect(&root.path().join("boosted.sqlite3"))
+            .await
+            .expect("database");
+        let defaults = db
+            .remote_viewer_settings()
+            .await
+            .expect("default viewer settings");
+        assert!(!defaults.enabled);
+        assert!(!defaults.control_enabled);
+        assert!(defaults.audio_enabled);
+        assert_eq!(defaults.default_fps, 30);
+        assert_eq!(defaults.max_concurrent_streams, 4);
+
+        let saved = RemoteViewerSettings {
+            enabled: true,
+            control_enabled: true,
+            max_fps: 45,
+            default_fps: 24,
+            ..defaults
+        };
+        db.update_remote_viewer_settings(&saved)
+            .await
+            .expect("saved viewer settings");
+        assert_eq!(
+            db.remote_viewer_settings()
+                .await
+                .expect("reloaded viewer settings"),
+            saved
         );
     }
     #[cfg(feature = "embedded-web")]

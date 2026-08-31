@@ -44,6 +44,18 @@ describe("Boosted API client", () => {
     expect(tokens).toEqual({ a: undefined, b: "token-b" });
   });
 
+  it("revokes the current server session on explicit sign-out", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await client("https://boosted.example", { token: "machine-token" }).logout();
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://boosted.example/api/v1/auth/session");
+    expect(init?.method).toBe("DELETE");
+    expect((init?.headers as Headers).get("Authorization")).toBe("Bearer machine-token");
+  });
+
   it("posts draft integration credentials to the workspace discovery endpoint", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ targets: [] }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
@@ -61,6 +73,29 @@ describe("Boosted API client", () => {
       provider: "gitlab",
       config: { baseUrl: "https://gitlab.example", token: "gitlab-token" },
     });
+  });
+
+  it("uses authenticated REST and WebSocket paths for Remote Viewer", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      id: "viewer-a",
+      source: { id: "source-a", kind: "window", name: "Simulator", width: 1280, height: 720, scale: 2 },
+      effectiveCodec: "h264",
+      effectiveFps: 30,
+      width: 1280,
+      height: 720,
+      audioEnabled: true,
+    }), { status: 201, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = client("https://boosted.example", { token: "machine-token" });
+
+    await api.createRemoteViewerSession({ sourceId: "source-a", fps: 30, resolution: "1080p" });
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://boosted.example/api/v1/remote-viewer/sessions");
+    expect(init?.method).toBe("POST");
+    expect((init?.headers as Headers).get("Authorization")).toBe("Bearer machine-token");
+    expect(api.webSocket("/remote-viewer/sessions/viewer-a/media")).toBe("wss://boosted.example/api/v1/remote-viewer/sessions/viewer-a/media");
+    expect(api.webSocket("/remote-viewer/sessions/viewer-a/control")).toBe("wss://boosted.example/api/v1/remote-viewer/sessions/viewer-a/control");
   });
 
   it("aborts this client's outstanding requests when its workspace is disposed", async () => {

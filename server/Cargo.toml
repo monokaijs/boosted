@@ -36,8 +36,29 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+enigo = "0.6.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+openh264 = "0.9.8"
+opus-pure = "0.1.0"
+scap = "0.1.0-beta.1"
+webp = { version = "0.3.1", default-features = false }
+xcap = "0.7.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# scap-vc fixes upstream scap's cross-process window-size lookup, which otherwise
+# dereferences a nil NSWindow when the selected window belongs to another app.
+cocoa = "0.25"
+objc = "0.2.7"
+scap-vc = "0.1.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
 [features]
 embedded-web = ["dep:mime_guess", "dep:rust-embed"]
+# The legacy Objective-C macros used by Cocoa probe this cfg internally.
+cargo-clippy = []
 
 [dev-dependencies]
 tempfile = "3"

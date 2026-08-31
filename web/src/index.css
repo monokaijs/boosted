@@ -4,6 +4,7 @@
 
 :root {
   --radius: 0.5rem;
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
   --canvas: #0e0e0e;
   --surface: #121212;
   --surface-sunken: #0f0f0f;
@@ -93,12 +94,28 @@ body {
   font-family: var(--font-sans);
   font-size: 13px;
   text-rendering: geometricPrecision;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+:where(
+  input,
+  textarea,
+  select,
+  [contenteditable]:not([contenteditable="false"]),
+  .selectable-text,
+  .aui-markdown,
+  pre,
+  .monaco-editor.enable-user-select
+) {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .pwa-notices {
   position: fixed;
   right: max(16px, env(safe-area-inset-right));
-  bottom: max(16px, env(safe-area-inset-bottom));
+  bottom: max(16px, var(--safe-area-bottom));
   z-index: 40;
   display: grid;
   width: min(420px, calc(100vw - 32px));
@@ -344,6 +361,46 @@ select {
   min-height: 0;
   flex-direction: column;
   background: var(--surface);
+}
+
+.remote-viewer-panel { position: relative; overflow: hidden; }
+.remote-viewer-toolbar { display: flex; min-height: 38px; align-items: center; gap: 4px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 84%, var(--background)); padding: 3px 6px; }
+.remote-viewer-toolbar > button:first-child { min-width: 0; max-width: min(42%, 340px); justify-content: flex-start; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-viewer-body { display: flex; min-height: 0; flex: 1; }
+.remote-viewer-source-dialog { height: min(620px, calc(100dvh - 2rem)); grid-template-rows: auto minmax(0, 1fr); }
+.remote-viewer-source-picker { display: flex; min-height: 0; flex-direction: column; gap: 10px; padding: 12px; }
+.remote-viewer-source-kinds { display: grid; grid-template-columns: 1fr 1fr; border-radius: 7px; background: var(--secondary); padding: 2px; }
+.remote-viewer-source-kinds button { border-radius: 5px; padding: 5px 8px; color: var(--muted-foreground); font-size: 11px; }
+.remote-viewer-source-kinds button.active { background: var(--background); color: var(--foreground); box-shadow: 0 1px 3px rgb(0 0 0 / 12%); }
+.remote-viewer-source-list { min-height: 0; flex: 1; overflow-y: auto; border: 1px solid var(--border); border-radius: 9px; background: color-mix(in srgb, var(--background) 68%, var(--surface)); padding: 5px; }
+.remote-viewer-source { display: grid; width: 100%; grid-template-columns: 64px minmax(0, 1fr); align-items: center; gap: 9px; border: 1px solid transparent; border-radius: 8px; padding: 6px; text-align: left; }
+.remote-viewer-source:hover { background: var(--accent); }
+.remote-viewer-source.selected { border-color: color-mix(in srgb, var(--primary) 55%, var(--border)); background: color-mix(in srgb, var(--primary) 9%, transparent); }
+.remote-viewer-source strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 500; }
+.remote-viewer-source small { display: block; margin-top: 3px; overflow: hidden; color: var(--muted-foreground); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.remote-viewer-thumbnail { display: grid; width: 64px; aspect-ratio: 16 / 10; place-items: center; overflow: hidden; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-input); color: var(--muted-foreground); }
+.remote-viewer-thumbnail img { width: 100%; height: 100%; object-fit: contain; }
+.remote-viewer-thumbnail svg { width: 18px; }
+.remote-viewer-source-footer { display: flex; min-height: 28px; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted-foreground); font-size: 10px; }
+.remote-viewer-stage { position: relative; display: grid; min-width: 0; min-height: 0; flex: 1; place-items: center; overflow: hidden; background: var(--surface); }
+.remote-viewer-canvas { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; outline: none; background: #000; touch-action: none; }
+.remote-viewer-canvas.controlling { cursor: crosshair; box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--primary) 75%, transparent); }
+.remote-viewer-placeholder { display: grid; max-width: 360px; justify-items: center; gap: 12px; padding: 28px; color: var(--muted-foreground); text-align: center; font-size: 12px; }
+.remote-viewer-placeholder > svg { width: 42px; height: 42px; opacity: 0.45; }
+.remote-viewer-placeholder small { max-width: 310px; font-size: 10px; line-height: 1.5; }
+.remote-viewer-hud { position: absolute; bottom: 7px; left: 7px; display: flex; max-width: calc(100% - 14px); flex-wrap: wrap; align-items: center; gap: 7px; border: 1px solid rgb(255 255 255 / 10%); border-radius: 6px; background: rgb(6 8 13 / 78%); padding: 4px 7px; color: #aeb6c7; font-size: 9px; backdrop-filter: blur(10px); }
+.remote-viewer-live-dot { width: 6px; height: 6px; border-radius: 999px; background: #e5a94a; }
+.remote-viewer-live-dot.online { background: #3bc97a; box-shadow: 0 0 7px rgb(59 201 122 / 55%); }
+.remote-viewer-expand { position: absolute; top: 8px; right: 8px; opacity: 0; transition: opacity 120ms ease; }
+.remote-viewer-stage:hover .remote-viewer-expand { opacity: 1; }
+.remote-viewer-error { position: absolute; right: 10px; bottom: 32px; left: 10px; display: flex; align-items: center; gap: 8px; border: 1px solid color-mix(in srgb, var(--destructive) 40%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--destructive) 13%, var(--background)); padding: 8px 10px; color: var(--destructive); font-size: 11px; box-shadow: 0 8px 30px rgb(0 0 0 / 25%); }
+.remote-viewer-error > svg { width: 14px; flex: 0 0 auto; }
+.remote-viewer-error span { min-width: 0; flex: 1; }
+.remote-viewer-error button svg { width: 13px; }
+
+@media (max-width: 720px) {
+  .remote-viewer-toolbar { flex-wrap: wrap; }
+  .remote-viewer-toolbar > button:first-child { max-width: 100%; }
 }
 
 .aui-markdown {
@@ -946,6 +1003,69 @@ select {
   border-color: var(--ring);
 }
 
+.macos-permission-helper {
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--background) 97%, black);
+  box-shadow: 0 18px 55px rgb(0 0 0 / 38%);
+}
+
+.macos-permission-helper-title {
+  display: flex;
+  height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 8px 3px 14px;
+  user-select: none;
+}
+
+.macos-permission-helper-title strong { font-size: 11px; font-weight: 600; }
+.macos-permission-helper-title button { display: grid; width: 26px; height: 26px; place-items: center; border-radius: 7px; color: var(--muted-foreground); }
+.macos-permission-helper-title button:hover { background: var(--accent); color: var(--foreground); }
+.macos-permission-helper-title svg { width: 13px; }
+
+.macos-permission-helper-body { display: grid; gap: 8px; padding: 3px 13px 11px; }
+.macos-permission-helper-body > p:first-child {
+  height: 15px;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.macos-permission-helper-body > p.is-error { color: var(--destructive); }
+
+.macos-permission-app-drag {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 88%, white);
+  padding: 7px 9px;
+  text-align: left;
+  cursor: grab;
+  transition: border-color 120ms ease, background-color 120ms ease, transform 120ms ease;
+}
+
+.macos-permission-app-drag:hover { border-color: color-mix(in srgb, var(--foreground) 28%, var(--border)); background: color-mix(in srgb, var(--surface) 80%, white); }
+.macos-permission-app-drag:active { transform: scale(0.995); cursor: grabbing; }
+.macos-permission-app-drag:disabled { cursor: wait; opacity: 0.7; }
+.macos-permission-app-drag img { width: 40px; height: 40px; object-fit: contain; pointer-events: none; }
+.macos-permission-app-drag span { display: grid; min-width: 0; gap: 3px; }
+.macos-permission-app-drag strong { overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.macos-permission-app-drag small { color: var(--muted-foreground); font-size: 10px; }
+.macos-permission-app-drag > svg { width: 14px; color: var(--muted-foreground); }
+.macos-permission-helper-body footer { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 10px; }
+.macos-permission-helper-body footer button { display: inline-flex; flex: none; align-items: center; gap: 5px; color: var(--muted-foreground); font-size: 9px; }
+.macos-permission-helper-body footer button:hover { color: var(--foreground); }
+.macos-permission-helper-body footer button svg { width: 11px; }
+.macos-permission-helper-body footer span { overflow: hidden; color: color-mix(in srgb, var(--muted-foreground) 72%, transparent); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+
 .integration-plugin-card {
   display: flex;
   min-height: 92px;
@@ -999,25 +1119,37 @@ select {
 }
 
 @media (max-width: 900px) {
+  :root {
+    --safe-area-bottom: min(env(safe-area-inset-bottom, 0px), 34px);
+  }
+
   .pwa-notices {
     right: max(8px, env(safe-area-inset-right));
-    bottom: calc(56px + env(safe-area-inset-bottom));
+    bottom: calc(56px + var(--safe-area-bottom));
     width: min(420px, calc(100vw - 16px - env(safe-area-inset-left) - env(safe-area-inset-right)));
   }
 
   .app-shell,
   .app-shell[data-drawer="closed"] {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: calc(42px + env(safe-area-inset-top)) minmax(0, 1fr) calc(48px + env(safe-area-inset-bottom));
+    grid-template-rows: calc(42px + env(safe-area-inset-top)) minmax(0, 1fr) calc(48px + var(--safe-area-bottom));
   }
 
   .app-topbar {
     min-width: 0;
     height: calc(42px + env(safe-area-inset-top));
-    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: hidden;
     padding-top: env(safe-area-inset-top);
     padding-right: max(4px, env(safe-area-inset-right));
     padding-left: max(4px, env(safe-area-inset-left));
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .app-topbar::-webkit-scrollbar {
+    display: none;
   }
 
   input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
@@ -1053,9 +1185,10 @@ select {
   }
 
   .app-workspace-tabs {
-    min-width: 0;
+    min-width: max-content;
     max-width: none;
-    flex: 1 1 auto;
+    flex: none;
+    overflow: visible;
   }
 
   .app-workspace-tab {
@@ -1073,7 +1206,7 @@ select {
     flex-direction: row;
     justify-content: space-evenly;
     gap: 0;
-    padding: 4px max(8px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(8px, env(safe-area-inset-left));
+    padding: 4px max(8px, env(safe-area-inset-right)) var(--safe-area-bottom) max(8px, env(safe-area-inset-left));
     border-top: 1px solid var(--border);
   }
 
@@ -1096,7 +1229,7 @@ select {
 
   .app-drawer-scrim {
     position: fixed;
-    inset: calc(42px + env(safe-area-inset-top)) 0 calc(48px + env(safe-area-inset-bottom));
+    inset: calc(42px + env(safe-area-inset-top)) 0 calc(48px + var(--safe-area-bottom));
     z-index: 8;
     display: block;
     border: 0;
@@ -1108,7 +1241,7 @@ select {
     position: fixed;
     top: calc(50px + env(safe-area-inset-top));
     right: max(8px, env(safe-area-inset-right));
-    bottom: calc(56px + env(safe-area-inset-bottom));
+    bottom: calc(56px + var(--safe-area-bottom));
     left: max(8px, env(safe-area-inset-left));
     width: auto;
     max-width: 420px;
@@ -1280,9 +1413,9 @@ select {
 
   .dialog-content {
     top: auto;
-    bottom: max(8px, env(safe-area-inset-bottom));
+    bottom: max(8px, var(--safe-area-bottom));
     width: calc(100% - 16px);
-    max-height: calc(100dvh - max(8px, env(safe-area-inset-top)) - max(8px, env(safe-area-inset-bottom)));
+    max-height: calc(100dvh - max(8px, env(safe-area-inset-top)) - max(8px, var(--safe-area-bottom)));
     --tw-translate-y: 0px;
     transform: none;
     gap: 12px;
@@ -1313,7 +1446,7 @@ select {
   }
 
   .settings-dialog {
-    height: calc(100dvh - max(8px, env(safe-area-inset-top)) - max(8px, env(safe-area-inset-bottom)));
+    height: calc(100dvh - max(8px, env(safe-area-inset-top)) - max(8px, var(--safe-area-bottom)));
   }
 
   .settings-layout {

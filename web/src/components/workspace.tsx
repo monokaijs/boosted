@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { Bot, FileCode2, Files, GitBranch, GitCommitHorizontal, KanbanSquare, ListChecks, ListTodo, MessageSquarePlus, Plus, TerminalSquare, X } from "lucide-react";
+import { Bot, FileCode2, Files, GitBranch, GitCommitHorizontal, KanbanSquare, ListChecks, ListTodo, MessageSquarePlus, MonitorPlay, Plus, TerminalSquare, X } from "lucide-react";
 import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewHeaderActionsProps, type IDockviewPanel, type IDockviewPanelHeaderProps, type IDockviewPanelProps } from "dockview-react";
 import {
   ContextMenu,
@@ -17,7 +17,9 @@ import { HistoryPanel } from "@/components/panels/history-panel";
 import { PlanPanel } from "@/components/panels/plan-panel";
 import { TaskboardPanel } from "@/components/panels/taskboard-panel";
 import { newTerminalEvent, TerminalPanel } from "@/components/panels/terminal-panel";
+import { RemoteViewerPanel } from "@/components/panels/remote-viewer-panel";
 import { Button } from "@/components/ui/button";
+import { isTauriRuntime } from "@/lib/runtime";
 import { machinePreferenceKey } from "@/lib/store";
 
 const CodexChatPanel = lazy(() => import("@/components/panels/codex-chat-panel").then((module) => ({ default: module.CodexChatPanel })));
@@ -29,6 +31,8 @@ type WorkspaceLayoutMode = "desktop" | "compact";
 const compactWorkspaceQuery = "(max-width: 900px)";
 const desktopLayoutKey = "boosted.layout.v4";
 const compactLayoutKey = "boosted.layout.compact.v1";
+const newRemoteViewerEvent = "boosted:remote-viewer:new";
+const activeRemoteViewerEvent = "boosted:active-viewer";
 
 function workspaceLayoutMode(): WorkspaceLayoutMode {
   return window.matchMedia(compactWorkspaceQuery).matches ? "compact" : "desktop";
@@ -57,6 +61,7 @@ const components = {
   git: (_props: IDockviewPanelProps) => <GitPanel />,
   history: (_props: IDockviewPanelProps) => <HistoryPanel />,
   terminal: (_props: IDockviewPanelProps) => <TerminalPanel />,
+  remoteViewer: (props: IDockviewPanelProps) => <RemoteViewerPanel {...props} />,
 };
 
 const titles: Record<keyof typeof components, string> = {
@@ -70,6 +75,7 @@ const titles: Record<keyof typeof components, string> = {
   git: "Git changes",
   history: "Git history",
   terminal: "Terminal",
+  remoteViewer: "Remote Viewer",
 };
 
 const tabIcons: Record<keyof typeof components, typeof MessageSquarePlus> = {
@@ -83,6 +89,7 @@ const tabIcons: Record<keyof typeof components, typeof MessageSquarePlus> = {
   git: GitBranch,
   history: GitCommitHorizontal,
   terminal: TerminalSquare,
+  remoteViewer: MonitorPlay,
 };
 
 type ClosedPanel = {
@@ -106,7 +113,7 @@ function panelSnapshot(panel: IDockviewPanel): ClosedPanel {
   const state = panel.toJSON();
   return {
     id: panel.id,
-    component: state.contentComponent ?? (isCodexChatPanelId(panel.id) ? "codexChat" : panel.id),
+    component: state.contentComponent ?? (isCodexChatPanelId(panel.id) ? "codexChat" : isRemoteViewerPanelId(panel.id) ? "remoteViewer" : panel.id),
     title: panel.title,
     params: panel.params ? { ...panel.params } : undefined,
     groupId: panel.group.id,
@@ -130,6 +137,18 @@ function closePanels(panels: IDockviewPanel[], lastClosedId?: string) {
   for (const panel of openPanels) panel.api.close();
 }
 
+function isolateRemoteViewerPanels(api: DockviewApi) {
+  const viewers = api.panels.filter((panel) => isRemoteViewerPanelId(panel.id));
+  const first = viewers[0];
+  if (!first) return;
+  if (first.group.panels.some((panel) => !isRemoteViewerPanelId(panel.id))) {
+    first.api.moveTo({ group: first.group, position: "right" });
+  }
+  for (const viewer of viewers.slice(1)) {
+    if (viewer.group.id !== first.group.id) viewer.api.moveTo({ group: first.group, position: "center" });
+  }
+}
+
 function reopenClosedPanel(containerApi: DockviewApi) {
   const snapshot = closedPanels.pop();
   if (!snapshot) return;
@@ -141,7 +160,7 @@ function reopenClosedPanel(containerApi: DockviewApi) {
   }
   const originalGroup = containerApi.getGroup(snapshot.groupId);
   const reference = containerApi.activePanel ?? mainReference(containerApi);
-  containerApi.addPanel({
+  const reopened = containerApi.addPanel({
     id: snapshot.id,
     component: snapshot.component,
     title: snapshot.title,
@@ -149,7 +168,12 @@ function reopenClosedPanel(containerApi: DockviewApi) {
     position: originalGroup
       ? { referenceGroup: originalGroup.id, direction: "within", index: snapshot.index }
       : reference ? { referencePanel: reference.id, direction: "within" } : undefined,
-  }).api.setActive();
+  });
+  if (isRemoteViewerPanelId(reopened.id)) {
+    isolateRemoteViewerPanels(containerApi);
+    reopened.api.maximize();
+  }
+  reopened.api.setActive();
 }
 
 function duplicateCodexChatPanel(containerApi: DockviewApi, panel: IDockviewPanel) {
@@ -175,7 +199,7 @@ function splitPanel(panel: IDockviewPanel, position: "right" | "bottom") {
 }
 
 function WorkspaceTab({ api, containerApi }: IDockviewPanelHeaderProps) {
-  const panelId = (api.id.startsWith("codex-chat:") ? "codexChat" : api.id) as keyof typeof components;
+  const panelId = (api.id.startsWith("codex-chat:") ? "codexChat" : api.id.startsWith("remote-viewer:") ? "remoteViewer" : api.id) as keyof typeof components;
   const [title, setTitle] = useState(api.title ?? titles[panelId] ?? api.id);
   const [, setClosedPanelHistoryVersion] = useState(0);
   const [compact, setCompact] = useState(() => workspaceLayoutMode() === "compact");
@@ -298,15 +322,16 @@ function WorkspaceTab({ api, containerApi }: IDockviewPanelHeaderProps) {
 }
 
 function WorkspaceHeaderActions({ activePanel }: IDockviewHeaderActionsProps) {
-  if (activePanel?.id !== "terminal") return null;
+  const viewer = activePanel?.id.startsWith("remote-viewer:");
+  if (activePanel?.id !== "terminal" && !viewer) return null;
   return (
     <Button
       className="mr-1"
       variant="ghost"
       size="icon-sm"
-      aria-label="New terminal"
-      title="New terminal"
-      onClick={() => window.dispatchEvent(new Event(newTerminalEvent))}
+      aria-label={viewer ? "New Remote Viewer" : "New terminal"}
+      title={viewer ? "New Remote Viewer" : "New terminal"}
+      onClick={() => window.dispatchEvent(new Event(viewer ? newRemoteViewerEvent : newTerminalEvent))}
     >
       <Plus />
     </Button>
@@ -315,6 +340,10 @@ function WorkspaceHeaderActions({ activePanel }: IDockviewHeaderActionsProps) {
 
 function isCodexChatPanelId(id: string) {
   return id.startsWith("codex-chat:");
+}
+
+function isRemoteViewerPanelId(id: string) {
+  return id.startsWith("remote-viewer:");
 }
 
 function mainReference(api: DockviewApi, excludeId?: string) {
@@ -334,7 +363,7 @@ function closeCodexChatPanels(api: DockviewApi) {
 }
 
 function addPanel(api: DockviewApi, id: keyof typeof components) {
-  if (id === "codexChat") return;
+  if (id === "codexChat" || id === "remoteViewer") return;
   const primaryIds: (keyof typeof components)[] = ["chat", "task", "taskboard"];
   const toolIds: (keyof typeof components)[] = ["files", "plan", "git", "history"];
   const closeOtherPrimaryPanels = () => {
@@ -375,6 +404,33 @@ function addPanel(api: DockviewApi, id: keyof typeof components) {
   });
   if (primaryIds.includes(id)) closeOtherPrimaryPanels();
   panel.api.setActive();
+}
+
+function openRemoteViewerPanel(api: DockviewApi, alwaysNew = false) {
+  const existing = api.panels.find((panel) => isRemoteViewerPanelId(panel.id));
+  if (existing && !alwaysNew) {
+    if (existing.group.panels.some((panel) => !isRemoteViewerPanelId(panel.id))) {
+      existing.api.moveTo({ group: existing.group, position: "right" });
+    }
+    existing.api.setActive();
+    if (!existing.api.isMaximized()) existing.api.maximize();
+    return;
+  }
+  const viewerReference = api.panels.find((panel) => isRemoteViewerPanelId(panel.id));
+  const centerReference = mainReference(api);
+  const toolReference = ["files", "plan", "git", "history"].map((id) => api.getPanel(id)).find(Boolean);
+  const panel = api.addPanel({
+    id: `remote-viewer:${crypto.randomUUID()}`,
+    component: "remoteViewer",
+    title: titles.remoteViewer,
+    position: viewerReference
+      ? { referencePanel: viewerReference.id, direction: "within" }
+      : centerReference
+        ? { referencePanel: centerReference.id, direction: "right" }
+        : toolReference ? { referencePanel: toolReference.id, direction: "left" } : undefined,
+  });
+  panel.api.setActive();
+  panel.api.maximize();
 }
 
 function openCodexChatPanel(api: DockviewApi, detail: OpenCodexChatDetail) {
@@ -430,6 +486,7 @@ export function Workspace({ workspaceId }: { workspaceId: string }) {
     if (saved) {
       try {
         api.fromJSON(JSON.parse(saved));
+        isolateRemoteViewerPanels(api);
         localStorage.setItem(layoutKey, saved);
         const activePanelId = localStorage.getItem(workspaceActivePanelKey(mode, workspaceId))
           ?? localStorage.getItem(machinePreferenceKey(`boosted.workspace.active-panel.${mode}`));
@@ -452,6 +509,7 @@ export function Workspace({ workspaceId }: { workspaceId: string }) {
       const key = workspaceActivePanelKey(layoutModeRef.current, workspaceId);
       if (panel) localStorage.setItem(key, panel.id);
       else localStorage.removeItem(key);
+      window.dispatchEvent(new CustomEvent(activeRemoteViewerEvent, { detail: panel && isRemoteViewerPanelId(panel.id) ? panel.id : undefined }));
     });
     restoreLayout(event.api, mode);
   }, [restoreLayout, workspaceId]);
@@ -474,10 +532,19 @@ export function Workspace({ workspaceId }: { workspaceId: string }) {
 
   useEffect(() => {
     const listener = (event: Event) => {
-      if (apiRef.current) addPanel(apiRef.current, (event as CustomEvent<string>).detail as keyof typeof components);
+      if (!apiRef.current) return;
+      const id = (event as CustomEvent<string>).detail;
+      if (id === "remoteViewer") openRemoteViewerPanel(apiRef.current);
+      else addPanel(apiRef.current, id as keyof typeof components);
     };
     window.addEventListener("boosted:open-panel", listener);
     return () => window.removeEventListener("boosted:open-panel", listener);
+  }, []);
+
+  useEffect(() => {
+    const listener = () => { if (apiRef.current) openRemoteViewerPanel(apiRef.current, true); };
+    window.addEventListener(newRemoteViewerEvent, listener);
+    return () => window.removeEventListener(newRemoteViewerEvent, listener);
   }, []);
 
   useEffect(() => {
@@ -561,5 +628,5 @@ export function Workspace({ workspaceId }: { workspaceId: string }) {
     return () => window.removeEventListener("keydown", listener);
   }, []);
 
-  return <DockviewReact className="dockview-theme-boosted" components={components} defaultTabComponent={WorkspaceTab} rightHeaderActionsComponent={WorkspaceHeaderActions} onReady={onReady} />;
+  return <DockviewReact className="dockview-theme-boosted" components={components} defaultTabComponent={WorkspaceTab} dndStrategy={isTauriRuntime() ? "pointer" : "auto"} rightHeaderActionsComponent={WorkspaceHeaderActions} onReady={onReady} />;
 }

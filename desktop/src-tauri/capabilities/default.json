@@ -2,9 +2,12 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capability for the main Boosted window",
-  "windows": ["main"],
+  "windows": ["main", "permission-helper-screen-recording", "permission-helper-accessibility"],
   "permissions": [
     "core:default",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "drag:default",
     "process:allow-restart",
     "updater:default"
   ]
