@@ -1,6 +1,6 @@
 import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Files, Folder, FolderOpen, GitBranch, GitCommitHorizontal, KanbanSquare, ListTodo, LogOut, MessagesSquare, MonitorPlay, Settings, TerminalSquare } from "lucide-react";
+import { Files, Folder, FolderOpen, FolderPlus, GitBranch, GitCommitHorizontal, KanbanSquare, ListTodo, LogOut, MessagesSquare, MonitorPlay, Settings, TerminalSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ForcePasswordDialog, NewTaskDialog, OpenProjectDialog } from "@/components/create-dialogs";
@@ -196,6 +196,7 @@ export function AppShell() {
         <Button className="app-open-project" variant="ghost" size="icon-sm" title="Open project folder" onClick={() => setProjectDialogOpen(true)}><FolderOpen /></Button>
         {selectedTask && <span className="app-selected-task min-w-0"><span className="mx-2 text-muted-foreground">/</span><span className="inline-block max-w-[38vw] truncate align-middle text-xs text-muted-foreground">{selectedTask.title}</span></span>}
         <div className="app-actions ml-auto flex items-center gap-1 pr-2">
+          <Button className="app-open-project-mobile" variant="ghost" size="icon-sm" title="Open workspace" aria-label="Open workspace" onClick={() => setProjectDialogOpen(true)}><FolderPlus /></Button>
           {["downloading", "installing", "restarting"].includes(appUpdate.phase) && <button type="button" className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[10px] text-muted-foreground hover:bg-accent" onClick={() => setSettingsOpen(true)}><span className="size-3 animate-spin rounded-full border-2 border-current border-r-transparent" />{appUpdate.phase === "downloading" ? `Updating${formatUpdateProgress(appUpdate) !== undefined ? ` ${formatUpdateProgress(appUpdate)}%` : ""}` : appUpdate.phase === "installing" ? "Installing update" : "Restarting"}</button>}
           <Button variant="ghost" size="icon-sm" title="Settings" onClick={() => setSettingsOpen(true)}><Settings /></Button>
           <Button variant="ghost" size="icon-sm" onClick={() => void logout()} title="Sign out of this machine"><LogOut /></Button>

@@ -269,6 +269,10 @@ select {
   font-size: 11px;
 }
 
+.app-open-project-mobile {
+  display: none;
+}
+
 .app-rail {
   grid-column: 3;
   grid-row: 2;
@@ -1120,7 +1124,8 @@ select {
 
 @media (max-width: 900px) {
   :root {
-    --safe-area-bottom: min(env(safe-area-inset-bottom, 0px), 34px);
+    /* iOS can report the browser chrome as part of this inset in standalone mode. */
+    --safe-area-bottom: 16px;
   }
 
   .pwa-notices {
@@ -1198,6 +1203,10 @@ select {
   .app-actions {
     flex: none;
     padding-right: 0;
+  }
+
+  .app-open-project-mobile {
+    display: inline-flex;
   }
 
   .app-rail {
