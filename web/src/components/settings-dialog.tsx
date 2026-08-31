@@ -14,7 +14,7 @@ import { canUseMacOSPermissionHelper, openMacOSPrivacySettings, showMacOSPermiss
 import { useMachineStore } from "@/lib/machines";
 import { useAppStore } from "@/lib/store";
 import type { CodexRateLimitWindow, Integration, IntegrationDiscoveryTarget, RemoteViewerResolution, RemoteViewerSettings } from "@/lib/types";
-import { checkAndInstallAppUpdate, formatUpdateProgress, isDesktopApp, useAppUpdateState } from "@/lib/updater";
+import { checkAndInstallAppUpdate, formatUpdateProgress, isDesktopApp, refreshAppUpdateAvailability, useAppUpdateState } from "@/lib/updater";
 import { cn, relativeTime } from "@/lib/utils";
 import { ConnectionsManager } from "@/components/machine-manager";
 
@@ -286,10 +286,19 @@ function NotificationSettings() {
 
 function ApplicationSettings() {
   const update = useAppUpdateState();
+  const user = useAppStore((state) => state.user);
+  const machineId = useMachineStore((state) => state.activeId);
+  const isAdmin = user?.role === "admin";
+  const desktopApp = isDesktopApp();
+  useEffect(() => {
+    if (!desktopApp) void refreshAppUpdateAvailability();
+  }, [machineId]);
   const progress = formatUpdateProgress(update);
   const busy = ["checking", "downloading", "installing", "restarting"].includes(update.phase);
-  const status = update.phase === "unsupported"
-    ? "Automatic updates are available in the Boosted desktop app."
+  const status = !desktopApp && !isAdmin
+    ? "Only an administrator can update this Boosted server."
+    : update.phase === "unsupported"
+      ? update.supportReason ?? "This server installation cannot update itself."
     : update.phase === "checking"
       ? "Checking GitHub Releases…"
       : update.phase === "up-to-date"
@@ -302,9 +311,18 @@ function ApplicationSettings() {
               ? "Update installed. Restarting Boosted…"
               : update.phase === "error"
                 ? "The update check failed."
-                : "Boosted checks for updates automatically.";
+                : desktopApp ? "Boosted checks for updates automatically." : "Boosted can be updated from this browser.";
 
-  return <div className="settings-content"><SettingsSection title="Application updates" description="Boosted checks GitHub Releases at startup and every six hours. New signed releases are downloaded, installed, and relaunched automatically."><div className="settings-card flex items-start gap-3"><div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><CloudDownload className="size-4" /></div><div className="min-w-0 flex-1"><p className="text-xs font-medium">{status}</p><p className="mt-1 text-[11px] text-muted-foreground">{update.currentVersion ? `Current version ${update.currentVersion}` : isDesktopApp() ? "Reading desktop version…" : "Browser session"}{update.lastCheckedAt ? ` · checked ${relativeTime(update.lastCheckedAt)} ago` : ""}</p>{update.error && <p className="mt-1 break-words text-[11px] text-destructive">{update.error}</p>}{update.phase === "downloading" && update.totalBytes && <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${progress ?? 0}%` }} /></div>}</div><Button variant="secondary" size="sm" disabled={!isDesktopApp() || busy} onClick={() => void checkAndInstallAppUpdate()}>{busy ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}{update.phase === "error" ? "Try again" : "Check now"}</Button></div></SettingsSection><SettingsSection title="Release security" description="Every downloaded updater package must match Boosted’s embedded signing key before it can be installed."><div className="settings-card flex items-center gap-3"><Shield className="size-5 text-success" /><div><p className="text-xs font-medium">Signed updates required</p><p className="mt-0.5 text-[11px] text-muted-foreground">Update metadata and packages are served from monokaijs/boosted on GitHub.</p></div></div></SettingsSection></div>;
+  const canUpdate = desktopApp || (isAdmin && (update.supported || update.phase === "error"));
+  const updateDescription = desktopApp
+    ? "Boosted checks GitHub Releases at startup and every six hours. New signed releases are downloaded, installed, and relaunched automatically."
+    : "Administrators can check GitHub Releases and update npm-managed headless servers. The server restarts automatically after installation.";
+  const securityDescription = desktopApp
+    ? "Every downloaded desktop updater package must match Boosted’s embedded signing key before it can be installed."
+    : "Headless updates are accepted only when the release binary matches its SHA-256 checksum, then activated atomically by the npm launcher.";
+  const securityLabel = desktopApp ? "Signed updates required" : "Verified managed updates";
+
+  return <div className="settings-content"><SettingsSection title="Application updates" description={updateDescription}><div className="settings-card flex items-start gap-3"><div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><CloudDownload className="size-4" /></div><div className="min-w-0 flex-1"><p className="text-xs font-medium">{status}</p><p className="mt-1 text-[11px] text-muted-foreground">{update.currentVersion ? `Current version ${update.currentVersion}` : desktopApp ? "Reading desktop version…" : "Reading server version…"}{update.lastCheckedAt ? ` · checked ${relativeTime(update.lastCheckedAt)} ago` : ""}</p>{update.error && <p className="mt-1 break-words text-[11px] text-destructive">{update.error}</p>}{update.phase === "downloading" && update.totalBytes && <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${progress ?? 0}%` }} /></div>}</div><Button variant="secondary" size="sm" disabled={!canUpdate || busy} onClick={() => void checkAndInstallAppUpdate()}>{busy ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}{update.phase === "error" ? "Try again" : "Check now"}</Button></div></SettingsSection><SettingsSection title="Release security" description={securityDescription}><div className="settings-card flex items-center gap-3"><Shield className="size-5 text-success" /><div><p className="text-xs font-medium">{securityLabel}</p><p className="mt-0.5 text-[11px] text-muted-foreground">Update metadata and packages are served from monokaijs/boosted on GitHub.</p></div></div></SettingsSection></div>;
 }
 
 const scheduleOptions = [

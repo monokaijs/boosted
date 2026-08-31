@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { formatUpdateProgress, type AppUpdateState } from "./updater";
 
 function downloading(downloadedBytes: number, totalBytes?: number): AppUpdateState {
-  return { phase: "downloading", downloadedBytes, totalBytes };
+  return { phase: "downloading", supported: true, downloadedBytes, totalBytes };
 }
 
 describe("formatUpdateProgress", () => {

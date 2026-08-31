@@ -422,6 +422,15 @@ export interface Health {
   codexAvailable: boolean;
 }
 
+export interface ServerUpdateStatus {
+  supported: boolean;
+  currentVersion: string;
+  targetVersion?: string;
+  updateAvailable: boolean;
+  restartPending: boolean;
+  reason?: string;
+}
+
 export interface LiveEvent {
   sequence: number;
   topic: string;

@@ -10,6 +10,7 @@ mod models;
 mod process;
 mod remote_viewer;
 mod terminal;
+mod updater;
 
 use axum::{
     Extension, Json, Router,
@@ -150,6 +151,7 @@ struct AppState {
     active_codex_turns: Arc<RwLock<HashMap<String, String>>>,
     uploads_dir: PathBuf,
     worktrees_dir: PathBuf,
+    updater: updater::ServerUpdater,
 }
 
 impl AppState {
@@ -248,6 +250,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         active_codex_turns: Arc::new(RwLock::new(HashMap::new())),
         uploads_dir,
         worktrees_dir: config.data_dir.join("worktrees"),
+        updater: updater::ServerUpdater::from_env(),
     };
     let scheduler_state = state.clone();
     tokio::spawn(async move {
@@ -314,6 +317,9 @@ fn router(
             "/settings/remote-viewer",
             get(read_remote_viewer_settings).put(update_remote_viewer_settings),
         )
+        .route("/updates/status", get(read_update_status))
+        .route("/updates/check", post(check_for_update))
+        .route("/updates/install", post(install_update))
         .route(
             "/remote-viewer/capabilities",
             get(remote_viewer_capabilities),
@@ -576,6 +582,33 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         version: env!("CARGO_PKG_VERSION"),
         codex_available: state.codex.info().await.available,
     })
+}
+
+async fn read_update_status(State(state): State<AppState>) -> Json<updater::UpdateStatus> {
+    Json(state.updater.status())
+}
+
+async fn check_for_update(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> AppResult<Json<updater::UpdateStatus>> {
+    ensure_admin(&user)?;
+    Ok(Json(state.updater.check().await?))
+}
+
+async fn install_update(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+) -> AppResult<Json<updater::UpdateStatus>> {
+    ensure_admin(&user)?;
+    let status = state.updater.install().await?;
+    if status.restart_pending {
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(750)).await;
+            std::process::exit(updater::restart_exit_code());
+        });
+    }
+    Ok(Json(status))
 }
 
 async fn setup_state(State(state): State<AppState>) -> AppResult<Json<Value>> {

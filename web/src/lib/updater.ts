@@ -1,6 +1,9 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { isTauri } from "@tauri-apps/api/core";
 import { useSyncExternalStore } from "react";
+import { getActiveApiClient } from "@/lib/api";
+
+export const serverUpdatedEvent = "boosted:server-updated";
 
 export type AppUpdatePhase =
   | "unsupported"
@@ -14,12 +17,14 @@ export type AppUpdatePhase =
 
 export interface AppUpdateState {
   phase: AppUpdatePhase;
+  supported: boolean;
   currentVersion?: string;
   targetVersion?: string;
   downloadedBytes: number;
   totalBytes?: number;
   lastCheckedAt?: string;
   error?: string;
+  supportReason?: string;
 }
 
 const automaticCheckDelayMs = 5_000;
@@ -29,6 +34,7 @@ const listeners = new Set<() => void>();
 
 let state: AppUpdateState = {
   phase: desktopRuntime ? "idle" : "unsupported",
+  supported: desktopRuntime,
   downloadedBytes: 0,
 };
 let currentOperation: Promise<void> | undefined;
@@ -115,6 +121,60 @@ async function runUpdateCheck() {
   }
 }
 
+async function waitForUpdatedServer(targetVersion: string) {
+  const api = getActiveApiClient();
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    try {
+      const health = await api.health();
+      if (health.version === targetVersion) return;
+    } catch {
+      // The managed launcher briefly takes the listener down while changing binaries.
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+  }
+  throw new Error(`Boosted ${targetVersion} was installed, but the server did not reconnect.`);
+}
+
+async function runServerUpdateCheck() {
+  const api = getActiveApiClient();
+  publish({
+    phase: "checking",
+    targetVersion: undefined,
+    downloadedBytes: 0,
+    totalBytes: undefined,
+    error: undefined,
+  });
+  const checked = await api.checkForUpdate();
+  const checkedAt = new Date().toISOString();
+  publish({
+    supported: checked.supported,
+    currentVersion: checked.currentVersion,
+    targetVersion: checked.targetVersion,
+    supportReason: checked.reason,
+    lastCheckedAt: checkedAt,
+  });
+  if (!checked.supported) {
+    publish({ phase: "unsupported" });
+    return;
+  }
+  if (checked.reason) throw new Error(checked.reason);
+  if (!checked.updateAvailable || !checked.targetVersion) {
+    publish({ phase: "up-to-date" });
+    return;
+  }
+
+  publish({ phase: "downloading", downloadedBytes: 0 });
+  const installed = await api.installUpdate();
+  if (!installed.restartPending || !installed.targetVersion) {
+    publish({ phase: "up-to-date", currentVersion: installed.currentVersion });
+    return;
+  }
+  publish({ phase: "restarting", targetVersion: installed.targetVersion });
+  await waitForUpdatedServer(installed.targetVersion);
+  window.dispatchEvent(new Event(serverUpdatedEvent));
+}
+
 export function isDesktopApp() {
   return desktopRuntime;
 }
@@ -124,12 +184,34 @@ export function useAppUpdateState() {
 }
 
 export function checkAndInstallAppUpdate() {
-  if (!desktopRuntime) return Promise.resolve();
   if (currentOperation) return currentOperation;
 
-  currentOperation = runUpdateCheck()
+  currentOperation = (desktopRuntime ? runUpdateCheck() : runServerUpdateCheck())
     .catch((error) => {
       publish({ phase: "error", error: errorMessage(error) });
+    })
+    .finally(() => {
+      currentOperation = undefined;
+    });
+  return currentOperation;
+}
+
+export function refreshAppUpdateAvailability() {
+  if (desktopRuntime) return refreshCurrentVersion();
+  if (currentOperation) return currentOperation;
+
+  currentOperation = getActiveApiClient().updateStatus()
+    .then((status) => {
+      publish({
+        phase: status.supported ? "idle" : "unsupported",
+        supported: status.supported,
+        currentVersion: status.currentVersion,
+        supportReason: status.reason,
+        error: undefined,
+      });
+    })
+    .catch((error) => {
+      publish({ phase: "error", supported: false, error: errorMessage(error) });
     })
     .finally(() => {
       currentOperation = undefined;

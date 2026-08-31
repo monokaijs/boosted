@@ -100,7 +100,9 @@ Run the **Release Boosted** workflow from the repository's Actions tab and choos
 
 Trusted Publishing requires an existing npm package. Bootstrap `boosted-cli` with one authenticated manual publish, then configure its npm package settings with GitHub organization/user `monokaijs`, repository `boosted`, and workflow filename `release.yml`. No npm token is needed for later releases.
 
-Desktop builds check `monokaijs/boosted` GitHub Releases shortly after startup and every six hours. When a newer signed release is available, Boosted downloads it, verifies its updater signature, installs it, and relaunches. A manual **Check now** action and update progress are available under **Settings → Application**. Browser and headless-server sessions do not run the desktop updater.
+Desktop builds check `monokaijs/boosted` GitHub Releases shortly after startup and every six hours. When a newer signed release is available, Boosted downloads it, verifies its updater signature, installs it, and relaunches. A manual **Check now** action and update progress are available under **Settings → Application**.
+
+Administrators can also use **Settings → Application → Check now** in the web UI to update a headless server launched through `boosted-cli`. The server downloads the matching native release, verifies it against `SHA256SUMS.txt`, activates it atomically in the CLI cache, and asks the npm launcher to restart it. Direct standalone executables and source builds remain manual-update installations so the web server never overwrites an unmanaged binary.
 
 Updater packages are signed with the Tauri key whose public half is embedded in `desktop/src-tauri/tauri.conf.json`. The release workflow requires its private half in the `TAURI_SIGNING_PRIVATE_KEY` repository secret; `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is optional. Keep an offline backup of the private key: losing or replacing it prevents installed copies from trusting future updates. For a local release build using an unencrypted key, set `TAURI_SIGNING_PRIVATE_KEY` to the key’s path, export `TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""`, then run `pnpm desktop:build`.
 

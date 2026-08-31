@@ -27,6 +27,7 @@ import type {
   User,
   RemoteViewerSettings,
   RemoteViewerCapabilities,
+  ServerUpdateStatus,
   CaptureSource,
   ViewerSessionRequest,
   ViewerSession,
@@ -101,6 +102,9 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   updateGlobalSettings: (settings: Pick<GlobalSettings, "webPort" | "webUiEnabled" | "allowedIps">) => request<GlobalSettings>("/settings/global", json("PUT", settings)),
   remoteViewerSettings: () => request<RemoteViewerSettings>("/settings/remote-viewer"),
   updateRemoteViewerSettings: (settings: RemoteViewerSettings) => request<RemoteViewerSettings>("/settings/remote-viewer", json("PUT", settings)),
+  updateStatus: () => request<ServerUpdateStatus>("/updates/status"),
+  checkForUpdate: () => request<ServerUpdateStatus>("/updates/check", json("POST")),
+  installUpdate: () => request<ServerUpdateStatus>("/updates/install", json("POST")),
   remoteViewerCapabilities: () => request<RemoteViewerCapabilities>("/remote-viewer/capabilities"),
   remoteViewerSources: (kind: CaptureSource["kind"]) => request<CaptureSource[]>(`/remote-viewer/sources?kind=${kind}`),
   remoteViewerThumbnail: async (id: string) => {
