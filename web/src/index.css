@@ -386,17 +386,27 @@ select {
 .remote-viewer-thumbnail img { width: 100%; height: 100%; object-fit: contain; }
 .remote-viewer-thumbnail svg { width: 18px; }
 .remote-viewer-source-footer { display: flex; min-height: 28px; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted-foreground); font-size: 10px; }
-.remote-viewer-stage { position: relative; display: grid; min-width: 0; min-height: 0; flex: 1; place-items: center; overflow: hidden; background: var(--surface); }
-.remote-viewer-canvas { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; outline: none; background: #000; touch-action: none; }
+.remote-viewer-stage { position: relative; min-width: 0; min-height: 0; flex: 1; overflow: hidden; background: var(--surface); }
+.remote-viewer-stage:fullscreen { width: 100vw; height: 100vh; background: #050609; }
+.remote-viewer-viewport { position: absolute; inset: 0; overflow: auto; overscroll-behavior: contain; scrollbar-color: rgb(255 255 255 / 22%) transparent; }
+.remote-viewer-media { display: grid; width: max-content; min-width: 100%; height: max-content; min-height: 100%; place-items: center; }
+.remote-viewer-canvas { display: block; max-width: none; max-height: none; outline: none; background: #000; touch-action: none; user-select: none; }
 .remote-viewer-canvas.controlling { cursor: crosshair; box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--primary) 75%, transparent); }
 .remote-viewer-placeholder { display: grid; max-width: 360px; justify-items: center; gap: 12px; padding: 28px; color: var(--muted-foreground); text-align: center; font-size: 12px; }
 .remote-viewer-placeholder > svg { width: 42px; height: 42px; opacity: 0.45; }
 .remote-viewer-placeholder small { max-width: 310px; font-size: 10px; line-height: 1.5; }
-.remote-viewer-hud { position: absolute; bottom: 7px; left: 7px; display: flex; max-width: calc(100% - 14px); flex-wrap: wrap; align-items: center; gap: 7px; border: 1px solid rgb(255 255 255 / 10%); border-radius: 6px; background: rgb(6 8 13 / 78%); padding: 4px 7px; color: #aeb6c7; font-size: 9px; backdrop-filter: blur(10px); }
+.remote-viewer-hud { position: absolute; z-index: 2; bottom: 7px; left: 7px; display: flex; max-width: calc(100% - 14px); flex-wrap: wrap; align-items: center; gap: 7px; border: 1px solid rgb(255 255 255 / 10%); border-radius: 6px; background: rgb(6 8 13 / 78%); padding: 4px 7px; color: #aeb6c7; font-size: 9px; backdrop-filter: blur(10px); }
 .remote-viewer-live-dot { width: 6px; height: 6px; border-radius: 999px; background: #e5a94a; }
 .remote-viewer-live-dot.online { background: #3bc97a; box-shadow: 0 0 7px rgb(59 201 122 / 55%); }
-.remote-viewer-expand { position: absolute; top: 8px; right: 8px; opacity: 0; transition: opacity 120ms ease; }
-.remote-viewer-stage:hover .remote-viewer-expand { opacity: 1; }
+.remote-viewer-media-controls { position: absolute; z-index: 3; top: 8px; right: 8px; display: flex; align-items: center; gap: 3px; opacity: 0; pointer-events: none; transition: opacity 120ms ease; }
+.remote-viewer-media-controls > button { border-color: rgb(255 255 255 / 12%); background: rgb(20 23 30 / 84%); color: #eef2fb; box-shadow: 0 3px 14px rgb(0 0 0 / 28%); backdrop-filter: blur(10px); }
+.remote-viewer-media-controls > button:hover { background: rgb(40 45 57 / 92%); }
+.remote-viewer-media-controls > button:disabled { opacity: 0.4; }
+.remote-viewer-media-controls .remote-viewer-zoom-value { width: 45px; padding-inline: 4px; font-size: 9px; font-variant-numeric: tabular-nums; }
+.remote-viewer-control-separator { width: 1px; height: 18px; margin-inline: 2px; background: rgb(255 255 255 / 16%); }
+.remote-viewer-stage:hover .remote-viewer-media-controls,
+.remote-viewer-media-controls:focus-within,
+.remote-viewer-stage[data-fullscreen="true"] .remote-viewer-media-controls { opacity: 1; pointer-events: auto; }
 .remote-viewer-error { position: absolute; right: 10px; bottom: 32px; left: 10px; display: flex; align-items: center; gap: 8px; border: 1px solid color-mix(in srgb, var(--destructive) 40%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--destructive) 13%, var(--background)); padding: 8px 10px; color: var(--destructive); font-size: 11px; box-shadow: 0 8px 30px rgb(0 0 0 / 25%); }
 .remote-viewer-error > svg { width: 14px; flex: 0 0 auto; }
 .remote-viewer-error span { min-width: 0; flex: 1; }
@@ -405,6 +415,10 @@ select {
 @media (max-width: 720px) {
   .remote-viewer-toolbar { flex-wrap: wrap; }
   .remote-viewer-toolbar > button:first-child { max-width: 100%; }
+}
+
+@media (hover: none) {
+  .remote-viewer-media-controls { opacity: 1; pointer-events: auto; }
 }
 
 .aui-markdown {

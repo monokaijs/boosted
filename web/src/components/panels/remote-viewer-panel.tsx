@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, AudioLines, CircleStop, Eye, Gamepad2, LoaderCircle, Maximize2, Monitor, RefreshCw, Search, Volume2, VolumeX, X } from "lucide-react";
+import { AlertTriangle, AudioLines, CircleStop, Eye, Fullscreen, Gamepad2, LoaderCircle, Maximize2, Minimize2, Monitor, RefreshCw, Search, Volume2, VolumeX, X, ZoomIn, ZoomOut } from "lucide-react";
 import type { IDockviewPanelProps } from "dockview-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -37,6 +37,20 @@ type EncodedAudioChunkConstructor = new (options: { type: "key"; timestamp: numb
 
 const resolutionOrder: RemoteViewerResolution[] = ["720p", "1080p", "1440p", "native"];
 const activeViewerEvent = "boosted:active-viewer";
+const minimumZoom = 0.5;
+const maximumZoom = 4;
+const zoomStep = 0.25;
+
+type TouchPoint = { x: number; y: number; startX: number; startY: number; moved: boolean };
+type ZoomAnchor = { ratioX: number; ratioY: number; viewportX: number; viewportY: number };
+
+function clampZoom(value: number) {
+  return Math.min(maximumZoom, Math.max(minimumZoom, Math.round(value * 100) / 100));
+}
+
+function touchDistance(points: TouchPoint[]) {
+  return Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+}
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Remote Viewer failed";
@@ -115,8 +129,18 @@ export function RemoteViewerPanel(props: IDockviewPanelProps) {
   const [muted, setMuted] = useState(false);
   const [active, setActive] = useState(() => props.containerApi.activePanel?.id === panelId);
   const [control, setControl] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [fitSize, setFitSize] = useState<{ width: number; height: number }>();
+  const [fullscreen, setFullscreen] = useState(false);
   const pendingControl = useRef(false);
+  const stageRef = useRef<HTMLElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const zoomRef = useRef(1);
+  const zoomAnchor = useRef<ZoomAnchor | undefined>(undefined);
+  const touchPoints = useRef(new Map<number, TouchPoint>());
+  const touchGesture = useRef({ pinched: false, remotePressed: false });
+  const pinchStart = useRef<{ distance: number; zoom: number } | undefined>(undefined);
   const mediaSocket = useRef<WebSocket | undefined>(undefined);
   const controlSocket = useRef<WebSocket | undefined>(undefined);
   const audible = useRef(false);
@@ -140,6 +164,36 @@ export function RemoteViewerPanel(props: IDockviewPanelProps) {
     window.addEventListener(activeViewerEvent, listener);
     return () => window.removeEventListener(activeViewerEvent, listener);
   }, [panelId]);
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || !session) {
+      setFitSize(undefined);
+      return;
+    }
+    const update = () => {
+      const scale = Math.min(stage.clientWidth / session.width, stage.clientHeight / session.height);
+      if (!Number.isFinite(scale) || scale <= 0) return;
+      setFitSize({
+        width: Math.max(1, Math.floor(session.width * scale)),
+        height: Math.max(1, Math.floor(session.height * scale)),
+      });
+    };
+    const observer = new ResizeObserver(update);
+    observer.observe(stage);
+    update();
+    return () => observer.disconnect();
+  }, [session?.height, session?.id, session?.width]);
+  useEffect(() => {
+    const update = () => setFullscreen(document.fullscreenElement === stageRef.current);
+    document.addEventListener("fullscreenchange", update);
+    return () => document.removeEventListener("fullscreenchange", update);
+  }, []);
+  useEffect(() => {
+    zoomRef.current = 1;
+    zoomAnchor.current = undefined;
+    setZoom(1);
+    viewportRef.current?.scrollTo({ left: 0, top: 0 });
+  }, [session?.source.id]);
 
   const sendControl = useCallback((event: Record<string, unknown>) => {
     if (controlSocket.current?.readyState === WebSocket.OPEN) controlSocket.current.send(JSON.stringify(event));
@@ -150,6 +204,39 @@ export function RemoteViewerPanel(props: IDockviewPanelProps) {
     if (pointerFrame.current !== undefined) window.cancelAnimationFrame(pointerFrame.current);
     pointerFrame.current = undefined;
   }, []);
+
+  const changeZoom = useCallback((requestedZoom: number, clientX?: number, clientY?: number) => {
+    const nextZoom = clampZoom(requestedZoom);
+    if (nextZoom === zoomRef.current) return;
+    const viewport = viewportRef.current;
+    const canvas = canvasRef.current;
+    if (viewport && canvas) {
+      const viewportBounds = viewport.getBoundingClientRect();
+      const canvasBounds = canvas.getBoundingClientRect();
+      const focalX = clientX ?? viewportBounds.left + viewportBounds.width / 2;
+      const focalY = clientY ?? viewportBounds.top + viewportBounds.height / 2;
+      zoomAnchor.current = {
+        ratioX: Math.min(1, Math.max(0, (focalX - canvasBounds.left) / canvasBounds.width)),
+        ratioY: Math.min(1, Math.max(0, (focalY - canvasBounds.top) / canvasBounds.height)),
+        viewportX: focalX - viewportBounds.left,
+        viewportY: focalY - viewportBounds.top,
+      };
+    }
+    zoomRef.current = nextZoom;
+    setZoom(nextZoom);
+  }, []);
+
+  useLayoutEffect(() => {
+    const anchor = zoomAnchor.current;
+    const viewport = viewportRef.current;
+    const canvas = canvasRef.current;
+    if (!anchor || !viewport || !canvas) return;
+    const viewportBounds = viewport.getBoundingClientRect();
+    const canvasBounds = canvas.getBoundingClientRect();
+    viewport.scrollLeft += canvasBounds.left - viewportBounds.left + anchor.ratioX * canvasBounds.width - anchor.viewportX;
+    viewport.scrollTop += canvasBounds.top - viewportBounds.top + anchor.ratioY * canvasBounds.height - anchor.viewportY;
+    zoomAnchor.current = undefined;
+  }, [zoom]);
 
   const releaseControl = useCallback(() => {
     clearQueuedPointer();
@@ -502,14 +589,29 @@ export function RemoteViewerPanel(props: IDockviewPanelProps) {
     }
   }
 
-  function normalizedPointer(event: ReactPointerEvent<HTMLCanvasElement> | ReactWheelEvent<HTMLCanvasElement>) {
-    const bounds = event.currentTarget.getBoundingClientRect();
-    return { x: (event.clientX - bounds.left) / bounds.width, y: (event.clientY - bounds.top) / bounds.height };
+  async function toggleFullscreen() {
+    const stage = stageRef.current;
+    if (!stage) return;
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await stage.requestFullscreen();
+    } catch (caught) {
+      setError(`Fullscreen: ${errorMessage(caught)}`);
+    }
   }
 
-  function queuePointer(event: ReactPointerEvent<HTMLCanvasElement>) {
-    if (!control || document.activeElement !== event.currentTarget) return;
-    pendingPointer.current = normalizedPointer(event);
+  function normalizedClientPoint(clientX: number, clientY: number) {
+    const bounds = canvasRef.current?.getBoundingClientRect();
+    if (!bounds) return;
+    return { x: (clientX - bounds.left) / bounds.width, y: (clientY - bounds.top) / bounds.height };
+  }
+
+  function normalizedPointer(event: ReactPointerEvent<HTMLCanvasElement> | ReactWheelEvent<HTMLCanvasElement>) {
+    return normalizedClientPoint(event.clientX, event.clientY) ?? { x: 0, y: 0 };
+  }
+
+  function queuePoint(point: { x: number; y: number }) {
+    pendingPointer.current = point;
     if (pointerFrame.current !== undefined) return;
     pointerFrame.current = window.requestAnimationFrame(() => {
       pointerFrame.current = undefined;
@@ -517,6 +619,11 @@ export function RemoteViewerPanel(props: IDockviewPanelProps) {
       pendingPointer.current = undefined;
       if (point) sendControl({ type: "pointer", ...point });
     });
+  }
+
+  function queuePointer(event: ReactPointerEvent<HTMLCanvasElement>) {
+    if (!control || document.activeElement !== event.currentTarget) return;
+    queuePoint(normalizedPointer(event));
   }
 
   function pointerButton(event: ReactPointerEvent<HTMLCanvasElement>, pressed: boolean) {
@@ -527,6 +634,97 @@ export function RemoteViewerPanel(props: IDockviewPanelProps) {
     }
     const point = normalizedPointer(event);
     sendControl({ type: "button", button: String(event.button), pressed, ...point });
+  }
+
+  function touchPointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
+    event.preventDefault();
+    event.currentTarget.focus();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    touchPoints.current.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+    });
+    const points = [...touchPoints.current.values()];
+    if (points.length === 1) touchGesture.current = { pinched: false, remotePressed: false };
+    if (points.length === 2) {
+      touchGesture.current.pinched = true;
+      if (touchGesture.current.remotePressed) sendControl({ type: "release-all" });
+      touchGesture.current.remotePressed = false;
+      pinchStart.current = { distance: Math.max(1, touchDistance(points)), zoom: zoomRef.current };
+    }
+  }
+
+  function touchPointerMove(event: ReactPointerEvent<HTMLCanvasElement>) {
+    event.preventDefault();
+    const point = touchPoints.current.get(event.pointerId);
+    if (!point) return;
+    const deltaX = event.clientX - point.x;
+    const deltaY = event.clientY - point.y;
+    point.x = event.clientX;
+    point.y = event.clientY;
+    if (Math.hypot(point.x - point.startX, point.y - point.startY) > 6) point.moved = true;
+    const points = [...touchPoints.current.values()];
+    if (points.length >= 2 && pinchStart.current) {
+      const distance = touchDistance(points);
+      const centerX = (points[0].x + points[1].x) / 2;
+      const centerY = (points[0].y + points[1].y) / 2;
+      changeZoom(pinchStart.current.zoom * distance / pinchStart.current.distance, centerX, centerY);
+      return;
+    }
+    if (zoomRef.current > 1) {
+      viewportRef.current?.scrollBy({ left: -deltaX, top: -deltaY });
+      return;
+    }
+    if (!control || !point.moved) return;
+    const current = normalizedClientPoint(event.clientX, event.clientY);
+    if (!current) return;
+    if (!touchGesture.current.remotePressed) {
+      const start = normalizedClientPoint(point.startX, point.startY);
+      if (start) sendControl({ type: "button", button: "0", pressed: true, ...start });
+      touchGesture.current.remotePressed = true;
+    }
+    queuePoint(current);
+  }
+
+  function touchPointerUp(event: ReactPointerEvent<HTMLCanvasElement>) {
+    event.preventDefault();
+    const point = touchPoints.current.get(event.pointerId);
+    if (!point) return;
+    const remotePoint = normalizedClientPoint(event.clientX, event.clientY);
+    const pinched = touchGesture.current.pinched;
+    touchPoints.current.delete(event.pointerId);
+    if (!pinched && control && remotePoint) {
+      if (touchGesture.current.remotePressed) {
+        sendControl({ type: "button", button: "0", pressed: false, ...remotePoint });
+      } else if (!point.moved) {
+        sendControl({ type: "button", button: "0", pressed: true, ...remotePoint });
+        sendControl({ type: "button", button: "0", pressed: false, ...remotePoint });
+      }
+    }
+    if (touchPoints.current.size < 2) pinchStart.current = undefined;
+    if (touchPoints.current.size === 0) touchGesture.current = { pinched: false, remotePressed: false };
+  }
+
+  function touchPointerCancel(event: ReactPointerEvent<HTMLCanvasElement>) {
+    touchPoints.current.delete(event.pointerId);
+    pinchStart.current = undefined;
+    if (touchGesture.current.remotePressed) sendControl({ type: "release-all" });
+    if (touchPoints.current.size === 0) touchGesture.current = { pinched: false, remotePressed: false };
+  }
+
+  function handleWheel(event: ReactWheelEvent<HTMLCanvasElement>) {
+    if (event.ctrlKey) {
+      event.preventDefault();
+      const delta = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? event.deltaY * 16 : event.deltaY;
+      changeZoom(zoomRef.current * Math.exp(-delta * 0.01), event.clientX, event.clientY);
+      return;
+    }
+    if (!control) return;
+    event.preventDefault();
+    sendControl({ type: "wheel", delta_x: event.deltaX, delta_y: event.deltaY });
   }
 
   const maxResolutionIndex = resolutionOrder.indexOf(settings.data?.maxResolution ?? "720p");
@@ -560,26 +758,38 @@ export function RemoteViewerPanel(props: IDockviewPanelProps) {
       </div>
     </header>
     <div className="remote-viewer-body">
-      <main className="remote-viewer-stage">
+      <main ref={stageRef} className="remote-viewer-stage" data-fullscreen={fullscreen || undefined}>
         {session ? <>
-          <canvas
-            ref={canvasRef}
-            className={cn("remote-viewer-canvas", control && "controlling")}
-            width={session.width}
-            height={session.height}
-            tabIndex={control ? 0 : -1}
-            onContextMenu={(event) => { if (control) event.preventDefault(); }}
-            onPointerMove={queuePointer}
-            onPointerDown={(event) => pointerButton(event, true)}
-            onPointerUp={(event) => pointerButton(event, false)}
-            onPointerCancel={() => releaseControl()}
-            onWheel={(event) => { if (!control) return; event.preventDefault(); sendControl({ type: "wheel", delta_x: event.deltaX, delta_y: event.deltaY }); }}
-            onKeyDown={(event) => { if (!control || event.repeat) return; event.preventDefault(); sendControl({ type: "keyboard", code: event.code, key: event.key, pressed: true }); }}
-            onKeyUp={(event) => { if (!control) return; event.preventDefault(); sendControl({ type: "keyboard", code: event.code, key: event.key, pressed: false }); }}
-            onBlur={() => { if (control) releaseControl(); }}
-          />
+          <div ref={viewportRef} className="remote-viewer-viewport">
+            <div className="remote-viewer-media">
+              <canvas
+                ref={canvasRef}
+                className={cn("remote-viewer-canvas", control && "controlling")}
+                style={fitSize ? { width: fitSize.width * zoom, height: fitSize.height * zoom } : undefined}
+                width={session.width}
+                height={session.height}
+                tabIndex={control ? 0 : -1}
+                onContextMenu={(event) => { if (control) event.preventDefault(); }}
+                onPointerMove={(event) => event.pointerType === "touch" ? touchPointerMove(event) : queuePointer(event)}
+                onPointerDown={(event) => event.pointerType === "touch" ? touchPointerDown(event) : pointerButton(event, true)}
+                onPointerUp={(event) => event.pointerType === "touch" ? touchPointerUp(event) : pointerButton(event, false)}
+                onPointerCancel={(event) => event.pointerType === "touch" ? touchPointerCancel(event) : releaseControl()}
+                onWheel={handleWheel}
+                onKeyDown={(event) => { if (!control || event.repeat) return; event.preventDefault(); sendControl({ type: "keyboard", code: event.code, key: event.key, pressed: true }); }}
+                onKeyUp={(event) => { if (!control) return; event.preventDefault(); sendControl({ type: "keyboard", code: event.code, key: event.key, pressed: false }); }}
+                onBlur={() => { if (control) releaseControl(); }}
+              />
+            </div>
+          </div>
           <div className="remote-viewer-hud"><span className={cn("remote-viewer-live-dot", status.toLocaleLowerCase().includes("connect") && "online")} />{status}<span>{session.effectiveCodec.toUpperCase()} · {session.width}×{session.height} · {session.effectiveFps} FPS</span>{stats.bitrateKbps !== undefined && <span>{stats.bitrateKbps} Kbps</span>}{stats.dropped ? <span>{stats.dropped} dropped</span> : null}{session.audioEnabled && <span><AudioLines className="inline size-3" /> {active && !muted ? "audio" : "audio paused"}</span>}</div>
-          <Button className="remote-viewer-expand" variant="secondary" size="icon-sm" title={props.api.isMaximized() ? "Restore workspace" : "Maximize viewer"} onClick={() => props.api.isMaximized() ? props.api.exitMaximized() : props.api.maximize()}><Maximize2 /></Button>
+          <div className="remote-viewer-media-controls">
+            <Button variant="secondary" size="icon-sm" aria-label="Zoom out" title="Zoom out" disabled={zoom <= minimumZoom} onClick={() => changeZoom(zoomRef.current - zoomStep)}><ZoomOut /></Button>
+            <Button className="remote-viewer-zoom-value" variant="secondary" size="sm" title="Reset zoom to fit" onClick={() => changeZoom(1)}>{Math.round(zoom * 100)}%</Button>
+            <Button variant="secondary" size="icon-sm" aria-label="Zoom in" title="Zoom in" disabled={zoom >= maximumZoom} onClick={() => changeZoom(zoomRef.current + zoomStep)}><ZoomIn /></Button>
+            <span className="remote-viewer-control-separator" />
+            <Button variant="secondary" size="icon-sm" aria-label={props.api.isMaximized() ? "Restore panel" : "Maximize panel"} title={props.api.isMaximized() ? "Restore panel" : "Maximize panel"} onClick={() => props.api.isMaximized() ? props.api.exitMaximized() : props.api.maximize()}><Maximize2 /></Button>
+            <Button variant="secondary" size="icon-sm" aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"} title={fullscreen ? "Exit fullscreen" : "Enter fullscreen"} onClick={() => void toggleFullscreen()}>{fullscreen ? <Minimize2 /> : <Fullscreen />}</Button>
+          </div>
         </> : <div className="remote-viewer-placeholder"><Monitor /><p>Choose a {kind}. Streaming{canControl ? " and control" : ""} will start automatically.</p><Button onClick={() => setSourceDialogOpen(true)}><Monitor />Choose source</Button><small>{controlMessage}</small></div>}
       </main>
     </div>
