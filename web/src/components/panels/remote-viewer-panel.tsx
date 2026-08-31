@@ -5,6 +5,7 @@ import type { IDockviewPanelProps } from "dockview-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { api, apiWebSocket, getToken } from "@/lib/api";
 import { useMachineStore } from "@/lib/machines";
 import type { CaptureSource, RemoteViewerResolution, ViewerSession } from "@/lib/types";
@@ -156,6 +157,16 @@ export function RemoteViewerPanel(props: IDockviewPanelProps) {
     sendControl({ type: "release-all" });
     setControl(false);
   }, [clearQueuedPointer, sendControl]);
+
+  function requestControlLease() {
+    if (!canControl) return;
+    if (controlSocket.current?.readyState === WebSocket.OPEN) {
+      pendingControl.current = false;
+      sendControl({ type: "lease" });
+    } else {
+      pendingControl.current = true;
+    }
+  }
 
   const stop = useCallback((reason = "Stopped") => {
     const current = sessionRef.current;
@@ -432,41 +443,44 @@ export function RemoteViewerPanel(props: IDockviewPanelProps) {
 
   async function selectSource(source: CaptureSource) {
     setError(undefined);
+    setSelected(source);
+    setSourceDialogOpen(false);
     if (!session) {
-      setSelected(source);
-      setSourceDialogOpen(false);
+      await start(source, canControl);
       return;
     }
     releaseControl();
     try {
+      setStatus("Switching source…");
       const updated = await api.updateRemoteViewerSession(session.id, { sourceId: source.id, fps, resolution });
-      setSelected(source);
       setSession(updated);
-      setSourceDialogOpen(false);
+      setStatus("Connected");
+      props.api.setTitle(`Viewer · ${source.name}`);
+      if (canControl) requestControlLease();
     } catch (caught) {
       setError(errorMessage(caught));
     }
   }
 
-  async function start(requestControl = false) {
-    if (!selected || !settings.data) return;
+  async function start(source: CaptureSource, requestControl: boolean) {
+    if (!settings.data) return;
     setError(undefined);
     setStatus("Checking decoder…");
     pendingControl.current = requestControl;
     try {
       if (!("VideoDecoder" in globalThis)) throw new Error("This client does not provide WebCodecs VideoDecoder support.");
       const candidates = await Promise.all([
-        VideoDecoder.isConfigSupported({ codec: "avc1.42E01F", codedWidth: selected.width, codedHeight: selected.height }).then((result) => result.supported ? "h264" as const : undefined).catch(() => undefined),
-        VideoDecoder.isConfigSupported({ codec: "vp8", codedWidth: selected.width, codedHeight: selected.height }).then((result) => result.supported ? "vp8" as const : undefined).catch(() => undefined),
+        VideoDecoder.isConfigSupported({ codec: "avc1.42E01F", codedWidth: source.width, codedHeight: source.height }).then((result) => result.supported ? "h264" as const : undefined).catch(() => undefined),
+        VideoDecoder.isConfigSupported({ codec: "vp8", codedWidth: source.width, codedHeight: source.height }).then((result) => result.supported ? "vp8" as const : undefined).catch(() => undefined),
       ]);
       const supportedCodecs = candidates.filter((codec): codec is "h264" | "vp8" => codec !== undefined);
       if (!supportedCodecs.length) throw new Error("This client supports neither H.264 nor VP8 video decoding.");
       if (settings.data.preferredCodec !== "auto" && !supportedCodecs.includes(settings.data.preferredCodec)) throw new Error(`${settings.data.preferredCodec.toUpperCase()} is required by administrator policy but unsupported by this client.`);
       if (settings.data.audioEnabled && !("AudioDecoder" in globalThis)) await import("opus-decoder");
-      const created = await api.createRemoteViewerSession({ sourceId: selected.id, fps, resolution, supportedCodecs });
+      const created = await api.createRemoteViewerSession({ sourceId: source.id, fps, resolution, supportedCodecs });
       setSession(created);
       setStatus("Connecting…");
-      props.api.setTitle(`Viewer · ${selected.name}`);
+      props.api.setTitle(`Viewer · ${source.name}`);
     } catch (caught) {
       pendingControl.current = false;
       setStatus("Stopped");
@@ -474,12 +488,15 @@ export function RemoteViewerPanel(props: IDockviewPanelProps) {
     }
   }
 
-  async function applyQuality() {
-    if (!session) return;
+  async function applyQuality(nextFps: number, nextResolution: RemoteViewerResolution) {
+    const current = sessionRef.current;
+    if (!current) return;
     releaseControl();
     try {
       setStatus("Restarting stream…");
-      setSession(await api.updateRemoteViewerSession(session.id, { fps, resolution }));
+      setSession(await api.updateRemoteViewerSession(current.id, { fps: nextFps, resolution: nextResolution }));
+      setStatus("Connected");
+      if (canControl) requestControlLease();
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -517,7 +534,7 @@ export function RemoteViewerPanel(props: IDockviewPanelProps) {
   const availableFps = [...new Set([15, 24, 30, 45, 60, settings.data?.maxFps ?? 30])].filter((value) => value <= (settings.data?.maxFps ?? 0)).sort((a, b) => a - b);
   const unavailable = settings.data && !settings.data.enabled;
   const unsupported = capabilities.data && !capabilities.data.captureAvailable;
-  const canControl = Boolean(settings.data?.controlEnabled && capabilities.data?.controlAvailable && capabilities.data.controlPermission !== "unavailable");
+  const canControl = Boolean(settings.data?.controlEnabled && capabilities.data?.controlAvailable && capabilities.data.controlPermission === "granted");
   const controlMessage = !settings.data?.controlEnabled
     ? "Remote control is disabled in Settings → Global → Remote Viewer."
     : !capabilities.data?.controlAvailable || capabilities.data.controlPermission === "unavailable"
@@ -534,11 +551,10 @@ export function RemoteViewerPanel(props: IDockviewPanelProps) {
     <header className="remote-viewer-toolbar">
       <Button variant="ghost" size="sm" onClick={() => setSourceDialogOpen(true)}><Monitor />{session?.source.name ?? selected?.name ?? "Choose source"}</Button>
       <div className="ml-auto flex items-center gap-1">
-        <select className="settings-select h-7 text-[10px]" value={fps} onChange={(event) => setFps(Number(event.target.value))}>{availableFps.map((value) => <option key={value} value={value}>{value} FPS</option>)}</select>
-        <select className="settings-select h-7 text-[10px]" value={resolution} onChange={(event) => setResolution(event.target.value as RemoteViewerResolution)}>{availableResolutions.map((value) => <option key={value} value={value}>{value === "native" ? "Native" : value}</option>)}</select>
-        {session && <Button variant="ghost" size="sm" onClick={() => void applyQuality()}><RefreshCw />Apply</Button>}
+        <Select value={String(fps)} onValueChange={(value) => { const next = Number(value); setFps(next); void applyQuality(next, resolution); }}><SelectTrigger className="h-7 w-[78px] px-2 text-[10px]"><SelectValue /></SelectTrigger><SelectContent>{availableFps.map((value) => <SelectItem key={value} value={String(value)}>{value} FPS</SelectItem>)}</SelectContent></Select>
+        <Select value={resolution} onValueChange={(value) => { const next = value as RemoteViewerResolution; setResolution(next); void applyQuality(fps, next); }}><SelectTrigger className="h-7 w-[84px] px-2 text-[10px]"><SelectValue /></SelectTrigger><SelectContent>{availableResolutions.map((value) => <SelectItem key={value} value={value}>{value === "native" ? "Native" : value}</SelectItem>)}</SelectContent></Select>
         {session?.audioEnabled && <Button variant="ghost" size="icon-sm" title={muted ? "Unmute" : "Mute"} onClick={() => setMuted((value) => !value)}>{muted || !active ? <VolumeX /> : <Volume2 />}</Button>}
-        {session && canControl && <Button variant={control ? "secondary" : "ghost"} size="sm" onClick={() => control ? releaseControl() : sendControl({ type: "lease" })}><Gamepad2 />{control ? "Controlling" : "Enable control"}</Button>}
+        {session && canControl && <Button variant={control ? "secondary" : "ghost"} size="sm" onClick={() => control ? releaseControl() : requestControlLease()}><Gamepad2 />{control ? "Control on" : "Retry control"}</Button>}
         {session && !canControl && <Button variant="ghost" size="sm" disabled title={controlMessage}><Gamepad2 />Control disabled</Button>}
         {session && <Button variant="ghost" size="icon-sm" title="Stop stream" onClick={() => stop()}><CircleStop /></Button>}
       </div>
@@ -564,7 +580,7 @@ export function RemoteViewerPanel(props: IDockviewPanelProps) {
           />
           <div className="remote-viewer-hud"><span className={cn("remote-viewer-live-dot", status.toLocaleLowerCase().includes("connect") && "online")} />{status}<span>{session.effectiveCodec.toUpperCase()} · {session.width}×{session.height} · {session.effectiveFps} FPS</span>{stats.bitrateKbps !== undefined && <span>{stats.bitrateKbps} Kbps</span>}{stats.dropped ? <span>{stats.dropped} dropped</span> : null}{session.audioEnabled && <span><AudioLines className="inline size-3" /> {active && !muted ? "audio" : "audio paused"}</span>}</div>
           <Button className="remote-viewer-expand" variant="secondary" size="icon-sm" title={props.api.isMaximized() ? "Restore workspace" : "Maximize viewer"} onClick={() => props.api.isMaximized() ? props.api.exitMaximized() : props.api.maximize()}><Maximize2 /></Button>
-        </> : <div className="remote-viewer-placeholder"><Monitor /><p>{selected ? `${selected.name} is ready to stream.` : `Choose a ${kind} to view and control remotely.`}</p>{selected ? <div className="flex flex-wrap justify-center gap-2"><Button variant="secondary" onClick={() => void start(false)}><Eye />View</Button>{canControl && <Button onClick={() => void start(true)}><Gamepad2 />View &amp; control</Button>}</div> : <Button onClick={() => setSourceDialogOpen(true)}><Monitor />Choose source</Button>}<small>{controlMessage}</small></div>}
+        </> : <div className="remote-viewer-placeholder"><Monitor /><p>Choose a {kind}. Streaming{canControl ? " and control" : ""} will start automatically.</p><Button onClick={() => setSourceDialogOpen(true)}><Monitor />Choose source</Button><small>{controlMessage}</small></div>}
       </main>
     </div>
     <Dialog open={sourceDialogOpen} onOpenChange={setSourceDialogOpen}>
