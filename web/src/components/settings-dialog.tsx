@@ -1,15 +1,16 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, Bell, BellRing, Bot, ChevronRight, CircleGauge, CloudDownload, Code2, Copy, ExternalLink, GitBranch, Globe2, LoaderCircle, Pencil, Plug, Plus, RefreshCw, Save, Server, Settings2, Shield, Trash2, UserPlus, Users, Workflow } from "lucide-react";
+import { Activity, Bell, BellRing, Bot, ChevronRight, CircleGauge, Clock, CloudDownload, Code2, Copy, ExternalLink, Flame, GitBranch, Globe2, LoaderCircle, Pencil, Plug, Plus, RefreshCw, Save, Server, Settings2, Shield, Trash2, UserPlus, Users, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { formatDuration, formatExactNumber, formatPercent, formatWindowDuration, rateLimitBuckets, rateLimitLabel } from "@/lib/codex-usage";
 import { defaultNotificationSettings, notificationEventDefinitions, notificationPermission, readNotificationSettings, requestNotificationPermission, showTestNotification, writeNotificationSettings, type PwaNotificationSettings } from "@/lib/notifications";
 import { useAppStore } from "@/lib/store";
-import type { Integration } from "@/lib/types";
+import type { CodexRateLimitWindow, Integration, IntegrationDiscoveryTarget } from "@/lib/types";
 import { checkAndInstallAppUpdate, formatUpdateProgress, isDesktopApp, useAppUpdateState } from "@/lib/updater";
 import { cn, relativeTime } from "@/lib/utils";
 import { ConnectionsManager } from "@/components/machine-manager";
@@ -216,6 +217,7 @@ const scheduleOptions = [
 
 type GitlabTarget = { kind: "project" | "group"; identifier: string; legacyExternalIds?: boolean };
 type HulyTarget = { workspace: string; project: string; legacyExternalIds?: boolean };
+type DiscoveredIntegrationTarget = IntegrationDiscoveryTarget;
 
 function providerIcon(provider: Integration["provider"]) {
   return provider === "gitlab" ? GitBranch : Code2;
@@ -236,7 +238,45 @@ function integrationTargetCount(integration: Integration) {
   return Math.max(configTargets(integration.config).length, configString(integration.config, "project") ? 1 : 0);
 }
 
-function IntegrationsSettings() {
+function discoveryTargetLabel(target: DiscoveredIntegrationTarget) {
+  return target.name || target.fullPath || target.identifier;
+}
+
+function discoveryTargetMatchesSearch(target: DiscoveredIntegrationTarget, search: string) {
+  const query = search.trim().toLocaleLowerCase();
+  if (!query) return true;
+  return [target.name, target.identifier, target.fullPath, target.workspace, target.workspaceName]
+    .some((value) => value?.toLocaleLowerCase().includes(query));
+}
+
+function gitlabTargetMatches(target: GitlabTarget, discovered: DiscoveredIntegrationTarget) {
+  return target.kind === discovered.kind
+    && (target.identifier === discovered.identifier || Boolean(discovered.fullPath && target.identifier === discovered.fullPath));
+}
+
+function hulyTargetMatches(target: HulyTarget, discovered: DiscoveredIntegrationTarget) {
+  return target.workspace === discovered.workspace
+    && (target.project === discovered.identifier || Boolean(discovered.fullPath && target.project === discovered.fullPath));
+}
+
+function sameGitlabTarget(left: GitlabTarget, right: GitlabTarget) {
+  return left.kind === right.kind && left.identifier === right.identifier;
+}
+
+function sameHulyTarget(left: HulyTarget, right: HulyTarget) {
+  return left.workspace === right.workspace && left.project === right.project;
+}
+
+function DiscoveryTargetOption({ target, selected, onToggle }: { target: DiscoveredIntegrationTarget; selected: boolean; onToggle: (selected: boolean) => void }) {
+  const label = discoveryTargetLabel(target);
+  const detail = target.fullPath && target.fullPath !== label ? target.fullPath : target.identifier !== label ? target.identifier : undefined;
+  return <label className="flex cursor-pointer items-start gap-2.5 rounded-md px-2 py-2 hover:bg-accent">
+    <input className="mt-0.5 size-4 accent-primary" type="checkbox" checked={selected} onChange={(event) => onToggle(event.target.checked)} />
+    <span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{label}</span>{detail && <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">{detail}</span>}</span>
+  </label>;
+}
+
+export function IntegrationsSettings() {
   const projectId = useAppStore((state) => state.selectedProjectId);
   const queryClient = useQueryClient();
   const [installing, setInstalling] = useState<Integration["provider"]>();
@@ -244,16 +284,79 @@ function IntegrationsSettings() {
   const [name, setName] = useState("");
   const [schedule, setSchedule] = useState("");
   const [config, setConfig] = useState<Record<string, unknown>>({});
-  const [gitlabTargets, setGitlabTargets] = useState<GitlabTarget[]>([{ kind: "project", identifier: "" }]);
-  const [hulyTargets, setHulyTargets] = useState<HulyTarget[]>([{ workspace: "", project: "" }]);
+  const [gitlabTargets, setGitlabTargets] = useState<GitlabTarget[]>([]);
+  const [hulyTargets, setHulyTargets] = useState<HulyTarget[]>([]);
+  const [discoveredTargets, setDiscoveredTargets] = useState<DiscoveredIntegrationTarget[]>([]);
+  const [discoverySearch, setDiscoverySearch] = useState("");
+  const [discoveryError, setDiscoveryError] = useState<string>();
+  const [discoveryLoading, setDiscoveryLoading] = useState(false);
+  const [discoveryAttempted, setDiscoveryAttempted] = useState(false);
+  const [discoveryRefresh, setDiscoveryRefresh] = useState(0);
+  const discoveryGeneration = useRef(0);
+  const immediateDiscovery = useRef(false);
+  const persistedGitlabTargets = useRef<GitlabTarget[]>([]);
+  const persistedHulyTargets = useRef<HulyTarget[]>([]);
+  const selectionConnectionKey = useRef("");
   const integrations = useQuery({ queryKey: ["integrations", projectId], queryFn: () => api.integrations(projectId!), enabled: Boolean(projectId) });
+  const baseUrl = configString(config, "baseUrl", "https://gitlab.com").trim();
+  const endpoint = configString(config, "endpoint").trim();
+  const accessToken = configString(config, "token").trim();
+  const connectionKey = installing ? `${installing}\0${installing === "gitlab" ? baseUrl : endpoint}\0${accessToken}` : "";
+  const discoveryReady = Boolean(projectId && installing && accessToken && (installing === "gitlab" ? baseUrl : endpoint));
+
+  useEffect(() => {
+    if (selectionConnectionKey.current !== connectionKey) {
+      selectionConnectionKey.current = connectionKey;
+      setGitlabTargets((current) => current.filter((target) => persistedGitlabTargets.current.some((saved) => sameGitlabTarget(target, saved))));
+      setHulyTargets((current) => current.filter((target) => persistedHulyTargets.current.some((saved) => sameHulyTarget(target, saved))));
+    }
+    const generation = ++discoveryGeneration.current;
+    setDiscoveredTargets([]);
+    setDiscoveryError(undefined);
+    setDiscoveryAttempted(false);
+    setDiscoveryLoading(false);
+    if (!projectId || !installing || !discoveryReady) return;
+
+    let cancelled = false;
+    const controller = new AbortController();
+    const delay = immediateDiscovery.current ? 0 : 600;
+    immediateDiscovery.current = false;
+    const timeout = window.setTimeout(() => {
+      setDiscoveryLoading(true);
+      const connectionConfig = installing === "gitlab"
+        ? { baseUrl, token: accessToken }
+        : { endpoint, token: accessToken };
+      void api.discoverIntegrationTargets(projectId, { provider: installing, config: connectionConfig }, controller.signal)
+        .then((result) => {
+          if (cancelled || generation !== discoveryGeneration.current) return;
+          setDiscoveredTargets(result.targets);
+          setDiscoveryAttempted(true);
+        })
+        .catch((caught: unknown) => {
+          if (cancelled || generation !== discoveryGeneration.current) return;
+          setDiscoveryError(caught instanceof Error ? caught.message : "Unable to explore integration targets.");
+          setDiscoveryAttempted(true);
+        })
+        .finally(() => {
+          if (!cancelled && generation === discoveryGeneration.current) setDiscoveryLoading(false);
+        });
+    }, delay);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      window.clearTimeout(timeout);
+    };
+  }, [accessToken, baseUrl, connectionKey, discoveryReady, discoveryRefresh, endpoint, installing, projectId]);
+
   const save = useMutation({
     mutationFn: () => {
       if (!installing) throw new Error("Choose an integration provider");
       const { targets: _targets, project: _project, workspace: _workspace, ...sharedConfig } = config;
+      const validGitlabTargets = gitlabTargets.filter((target) => target.identifier.trim());
+      const validHulyTargets = hulyTargets.filter((target) => target.workspace.trim() && target.project.trim());
       const nextConfig = installing === "gitlab"
-        ? { ...sharedConfig, targets: gitlabTargets.map((target) => ({ kind: target.kind, identifier: target.identifier.trim(), legacyExternalIds: Boolean(target.legacyExternalIds) })) }
-        : { ...sharedConfig, targets: hulyTargets.map((target) => ({ workspace: target.workspace.trim(), project: target.project.trim(), legacyExternalIds: Boolean(target.legacyExternalIds) })) };
+        ? { ...sharedConfig, baseUrl, token: accessToken, targets: validGitlabTargets.map((target) => ({ kind: target.kind, identifier: target.identifier.trim(), legacyExternalIds: Boolean(target.legacyExternalIds) })) }
+        : { ...sharedConfig, endpoint, token: accessToken, targets: validHulyTargets.map((target) => ({ workspace: target.workspace.trim(), project: target.project.trim(), legacyExternalIds: Boolean(target.legacyExternalIds) })) };
       const enabled = editingId ? integrations.data?.find((entry) => entry.id === editingId)?.enabled ?? true : true;
       const input = { name, config: nextConfig, enabled, syncIntervalMinutes: schedule ? Number(schedule) : undefined };
       return editingId
@@ -269,17 +372,33 @@ function IntegrationsSettings() {
   const remove = useMutation({ mutationFn: (id: string) => api.deleteIntegration(projectId!, id), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["integrations", projectId] }) });
   const toggle = useMutation({ mutationFn: (entry: Integration) => api.updateIntegration(projectId!, entry.id, { name: entry.name, config: entry.config, enabled: !entry.enabled, syncIntervalMinutes: entry.syncIntervalMinutes }), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["integrations", projectId] }) });
 
+  function resetDiscovery() {
+    discoveryGeneration.current += 1;
+    immediateDiscovery.current = false;
+    setDiscoveredTargets([]);
+    setDiscoverySearch("");
+    setDiscoveryError(undefined);
+    setDiscoveryLoading(false);
+    setDiscoveryAttempted(false);
+    setDiscoveryRefresh((current) => current + 1);
+  }
+
   function begin(provider: Integration["provider"]) {
+    resetDiscovery();
+    persistedGitlabTargets.current = [];
+    persistedHulyTargets.current = [];
+    selectionConnectionKey.current = "";
     setInstalling(provider);
     setEditingId(undefined);
     setName(provider === "gitlab" ? "GitLab issues" : "Huly tasks");
     setSchedule("");
     setConfig(provider === "gitlab" ? { baseUrl: "https://gitlab.com", token: "" } : { endpoint: "", token: "" });
-    setGitlabTargets([{ kind: "project", identifier: "" }]);
-    setHulyTargets([{ workspace: "", project: "" }]);
+    setGitlabTargets([]);
+    setHulyTargets([]);
   }
 
   function edit(entry: Integration) {
+    resetDiscovery();
     setInstalling(entry.provider);
     setEditingId(entry.id);
     setName(entry.name);
@@ -289,21 +408,38 @@ function IntegrationsSettings() {
     if (entry.provider === "gitlab") {
       const parsed = targets.flatMap((target): GitlabTarget[] => {
         const kind = target.kind === "group" ? "group" : "project";
-        const identifier = typeof target.identifier === "string" ? target.identifier : "";
+        const identifier = typeof target.identifier === "string" ? target.identifier.trim() : "";
         return identifier ? [{ kind, identifier, legacyExternalIds: target.legacyExternalIds === true }] : [];
       });
-      setGitlabTargets(parsed.length ? parsed : [{ kind: "project", identifier: configString(entry.config, "project"), legacyExternalIds: true }]);
+      const legacyProject = configString(entry.config, "project").trim();
+      const savedTargets = parsed.length ? parsed : legacyProject ? [{ kind: "project" as const, identifier: legacyProject, legacyExternalIds: true }] : [];
+      persistedGitlabTargets.current = savedTargets;
+      persistedHulyTargets.current = [];
+      selectionConnectionKey.current = "";
+      setGitlabTargets(savedTargets);
+      setHulyTargets([]);
     } else {
       const parsed = targets.flatMap((target): HulyTarget[] => {
-        const workspace = typeof target.workspace === "string" ? target.workspace : "";
-        const project = typeof target.project === "string" ? target.project : "";
+        const workspace = typeof target.workspace === "string" ? target.workspace.trim() : "";
+        const project = typeof target.project === "string" ? target.project.trim() : "";
         return workspace || project ? [{ workspace, project, legacyExternalIds: target.legacyExternalIds === true }] : [];
       });
-      setHulyTargets(parsed.length ? parsed : [{ workspace: configString(entry.config, "workspace"), project: configString(entry.config, "project"), legacyExternalIds: true }]);
+      const legacyWorkspace = configString(entry.config, "workspace").trim();
+      const legacyProject = configString(entry.config, "project").trim();
+      const savedTargets = parsed.length ? parsed : legacyWorkspace && legacyProject ? [{ workspace: legacyWorkspace, project: legacyProject, legacyExternalIds: true }] : [];
+      persistedGitlabTargets.current = [];
+      persistedHulyTargets.current = savedTargets;
+      selectionConnectionKey.current = "";
+      setHulyTargets(savedTargets);
+      setGitlabTargets([]);
     }
   }
 
   function closeEditor() {
+    resetDiscovery();
+    persistedGitlabTargets.current = [];
+    persistedHulyTargets.current = [];
+    selectionConnectionKey.current = "";
     setInstalling(undefined);
     setEditingId(undefined);
     setName("");
@@ -311,9 +447,59 @@ function IntegrationsSettings() {
     setConfig({});
   }
 
-  const targetsValid = installing === "gitlab"
-    ? gitlabTargets.length > 0 && gitlabTargets.every((target) => target.identifier.trim())
-    : hulyTargets.length > 0 && hulyTargets.every((target) => target.workspace.trim() && target.project.trim());
+  function refreshTargets() {
+    if (!discoveryReady || discoveryLoading) return;
+    immediateDiscovery.current = true;
+    setDiscoveryRefresh((current) => current + 1);
+  }
+
+  function toggleDiscoveredTarget(target: DiscoveredIntegrationTarget, selected: boolean) {
+    if (installing === "gitlab") {
+      setGitlabTargets((current) => {
+        const matches = current.some((entry) => gitlabTargetMatches(entry, target));
+        if (selected && !matches) return [...current, { kind: target.kind, identifier: target.identifier }];
+        if (!selected) return current.filter((entry) => !gitlabTargetMatches(entry, target));
+        return current;
+      });
+      return;
+    }
+    if (target.kind !== "project" || !target.workspace) return;
+    const workspace = target.workspace;
+    setHulyTargets((current) => {
+      const matches = current.some((entry) => hulyTargetMatches(entry, target));
+      if (selected && !matches) return [...current, { workspace, project: target.identifier }];
+      if (!selected) return current.filter((entry) => !hulyTargetMatches(entry, target));
+      return current;
+    });
+  }
+
+  const hasPartialHulyTarget = hulyTargets.some((target) => Boolean(target.workspace.trim()) !== Boolean(target.project.trim()));
+  const selectionsMatchConnection = selectionConnectionKey.current === connectionKey;
+  const targetsValid = discoveryReady && (installing === "gitlab"
+    ? selectionsMatchConnection && gitlabTargets.some((target) => target.identifier.trim())
+    : selectionsMatchConnection && !hasPartialHulyTarget && hulyTargets.some((target) => target.workspace.trim() && target.project.trim()));
+  const selectedTargetCount = installing === "gitlab"
+    ? gitlabTargets.filter((target) => target.identifier.trim()).length
+    : hulyTargets.filter((target) => target.workspace.trim() && target.project.trim()).length;
+  const visibleDiscoveredTargets = discoveredTargets.filter((target) => discoveryTargetMatchesSearch(target, discoverySearch));
+  const missingGitlabTargets = installing === "gitlab"
+    ? gitlabTargets.filter((target) => target.identifier.trim() && !discoveredTargets.some((discovered) => gitlabTargetMatches(target, discovered)))
+    : [];
+  const missingHulyTargets = installing === "huly"
+    ? hulyTargets.filter((target) => target.workspace.trim() && target.project.trim() && !discoveredTargets.some((discovered) => hulyTargetMatches(target, discovered)))
+    : [];
+  const visibleMissingGitlabTargets = missingGitlabTargets.filter((target) => `${target.kind} ${target.identifier}`.toLocaleLowerCase().includes(discoverySearch.trim().toLocaleLowerCase()));
+  const visibleMissingHulyTargets = missingHulyTargets.filter((target) => `${target.workspace} ${target.project}`.toLocaleLowerCase().includes(discoverySearch.trim().toLocaleLowerCase()));
+  const gitlabGroups = visibleDiscoveredTargets.filter((target) => target.kind === "group");
+  const gitlabProjects = visibleDiscoveredTargets.filter((target) => target.kind === "project");
+  const hulyWorkspaces = visibleDiscoveredTargets.reduce<Map<string, { name: string; targets: DiscoveredIntegrationTarget[] }>>((workspaces, target) => {
+    if (target.kind !== "project") return workspaces;
+    const workspace = target.workspace || "Unknown workspace";
+    const current = workspaces.get(workspace) ?? { name: target.workspaceName || workspace, targets: [] };
+    current.targets.push(target);
+    workspaces.set(workspace, current);
+    return workspaces;
+  }, new Map());
 
   return <div className="settings-content">
     <SettingsSection title="Installed integrations" description="Connections belong to this workspace and can import from several external projects, repositories, or groups.">
@@ -330,7 +516,7 @@ function IntegrationsSettings() {
               {entry.lastSyncError && <p className="mt-1 text-[11px] text-destructive">{entry.lastSyncError}</p>}
             </div>
             <div className="flex shrink-0 items-center gap-1">
-              <Button variant="ghost" size="icon-sm" title="Edit integration" onClick={() => edit(entry)}><Pencil /></Button>
+              <Button variant="ghost" size="icon-sm" title="Edit integration" disabled={save.isPending} onClick={() => edit(entry)}><Pencil /></Button>
               <Button variant="ghost" size="sm" onClick={() => toggle.mutate(entry)}>{entry.enabled ? "Pause" : "Enable"}</Button>
               <Button variant="secondary" size="sm" disabled={sync.isPending} onClick={() => sync.mutate(entry.id)}>{sync.isPending && sync.variables === entry.id ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}Sync now</Button>
               <Button variant="ghost" size="icon-sm" title="Remove integration" onClick={() => remove.mutate(entry.id)}><Trash2 /></Button>
@@ -342,37 +528,62 @@ function IntegrationsSettings() {
     </SettingsSection>
     <SettingsSection title="Integration plugins" description="Choose a provider to install into this workspace.">
       <div className="grid gap-2 sm:grid-cols-2">
-        <button className="integration-plugin-card" onClick={() => begin("gitlab")}><span className="grid size-10 place-items-center rounded-lg bg-[#FC6D26]/10 text-[#FC6D26]"><Gitlab className="size-5" /></span><span className="min-w-0 flex-1"><span className="block text-xs font-medium">GitLab</span><span className="mt-1 block text-[11px] leading-4 text-muted-foreground">Import open issues from multiple GitLab projects, repositories, or groups.</span></span><ChevronRight className="size-4 text-muted-foreground" /></button>
-        <button className="integration-plugin-card" onClick={() => begin("huly")}><span className="grid size-10 place-items-center rounded-lg bg-primary/10 text-primary"><Code2 className="size-5" /></span><span className="min-w-0 flex-1"><span className="block text-xs font-medium">Huly</span><span className="mt-1 block text-[11px] leading-4 text-muted-foreground">Import issues from multiple Huly workspace projects.</span></span><ChevronRight className="size-4 text-muted-foreground" /></button>
+        <button className="integration-plugin-card" disabled={save.isPending} onClick={() => begin("gitlab")}><span className="grid size-10 place-items-center rounded-lg bg-[#FC6D26]/10 text-[#FC6D26]"><Gitlab className="size-5" /></span><span className="min-w-0 flex-1"><span className="block text-xs font-medium">GitLab</span><span className="mt-1 block text-[11px] leading-4 text-muted-foreground">Import open issues from multiple GitLab projects, repositories, or groups.</span></span><ChevronRight className="size-4 text-muted-foreground" /></button>
+        <button className="integration-plugin-card" disabled={save.isPending} onClick={() => begin("huly")}><span className="grid size-10 place-items-center rounded-lg bg-primary/10 text-primary"><Code2 className="size-5" /></span><span className="min-w-0 flex-1"><span className="block text-xs font-medium">Huly</span><span className="mt-1 block text-[11px] leading-4 text-muted-foreground">Import issues from multiple Huly workspace projects.</span></span><ChevronRight className="size-4 text-muted-foreground" /></button>
       </div>
     </SettingsSection>
     {installing && <SettingsSection title={`${editingId ? "Edit" : "Install"} ${installing === "gitlab" ? "GitLab" : "Huly"}`} description={installing === "gitlab" ? "Add every project, repository, or group whose open issues should feed this workspace." : "Add every Huly workspace/project pair that should feed this workspace through the connector."}>
-      <form className="settings-card grid gap-4" onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
+      <form className="settings-card grid gap-4" onSubmit={(event) => { event.preventDefault(); if (!save.isPending && name.trim() && targetsValid) save.mutate(); }}>
         <label className="grid gap-1.5"><span className="settings-label">Connection name</span><Input value={name} onChange={(event) => setName(event.target.value)} required /></label>
-        {installing === "gitlab" ? <>
-          <label className="grid gap-1.5"><span className="settings-label">GitLab URL</span><Input value={configString(config, "baseUrl", "https://gitlab.com")} onChange={(event) => setConfig({ ...config, baseUrl: event.target.value })} placeholder="https://gitlab.com" required /></label>
-          <div className="grid gap-2">
-            <div><span className="settings-label">Projects, repositories, and groups</span><p className="mt-1 text-[10px] leading-4 text-muted-foreground">A group imports issues from all projects visible to the token.</p></div>
+        {installing === "gitlab"
+          ? <label className="grid gap-1.5"><span className="settings-label">GitLab URL</span><Input value={configString(config, "baseUrl", "https://gitlab.com")} onChange={(event) => setConfig((current) => ({ ...current, baseUrl: event.target.value }))} placeholder="https://gitlab.com" required /></label>
+          : <label className="grid gap-1.5"><span className="settings-label">Connector endpoint</span><Input value={configString(config, "endpoint")} onChange={(event) => setConfig((current) => ({ ...current, endpoint: event.target.value }))} placeholder="https://connector.example.com/huly/issues" required /></label>}
+        <label className="grid gap-1.5"><span className="settings-label">Access token</span><Input type="password" value={configString(config, "token")} onChange={(event) => setConfig((current) => ({ ...current, token: event.target.value }))} required /></label>
+        <div className="grid gap-2">
+          <div className="flex items-start justify-between gap-3">
+            <div><span className="settings-label">Explore targets</span><p className="mt-1 text-[10px] leading-4 text-muted-foreground">{installing === "gitlab" ? "Select projects or groups visible to this token. A group imports issues from its visible projects." : "Select projects from any workspace returned by the Huly connector."}</p></div>
+            <Button type="button" variant="secondary" size="sm" disabled={!discoveryReady || discoveryLoading} onClick={refreshTargets}>{discoveryLoading ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}Refresh</Button>
+          </div>
+          <Input aria-label="Search integration targets" value={discoverySearch} onChange={(event) => setDiscoverySearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") event.preventDefault(); }} placeholder={installing === "gitlab" ? "Search groups and projects…" : "Search workspaces and projects…"} disabled={!discoveryReady} />
+          <div className="max-h-80 overflow-y-auto rounded-lg border border-border bg-background/35 p-2">
+            {!discoveryReady && <p className="px-2 py-5 text-center text-[11px] text-muted-foreground">Enter the connection URL and access token to explore available targets.</p>}
+            {discoveryReady && discoveryLoading && <p className="flex items-center justify-center gap-2 px-2 py-5 text-[11px] text-muted-foreground"><LoaderCircle className="size-3.5 animate-spin" />Exploring available targets…</p>}
+            {discoveryReady && !discoveryLoading && !discoveryAttempted && !discoveryError && <p className="px-2 py-5 text-center text-[11px] text-muted-foreground">Preparing to explore available targets…</p>}
+            {discoveryError && <div className="px-2 py-4 text-center"><p className="text-[11px] text-destructive">{discoveryError}</p>{selectedTargetCount > 0 && <p className="mt-1 text-[10px] text-muted-foreground">Your {selectedTargetCount} saved {selectedTargetCount === 1 ? "selection remains" : "selections remain"} selected and can be reviewed under advanced manual entry.</p>}<Button className="mt-2" type="button" variant="secondary" size="sm" onClick={refreshTargets}>Try again</Button></div>}
+            {!discoveryLoading && !discoveryError && installing === "gitlab" && <div className="grid gap-3">
+              {gitlabGroups.length > 0 && <section><div className="flex items-center justify-between px-2 pb-1"><p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Groups</p><span className="text-[10px] text-muted-foreground">{gitlabGroups.length}</span></div>{gitlabGroups.map((target) => <DiscoveryTargetOption key={`group:${target.identifier}`} target={target} selected={gitlabTargets.some((entry) => gitlabTargetMatches(entry, target))} onToggle={(selected) => toggleDiscoveredTarget(target, selected)} />)}</section>}
+              {gitlabProjects.length > 0 && <section><div className="flex items-center justify-between px-2 pb-1"><p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Projects</p><span className="text-[10px] text-muted-foreground">{gitlabProjects.length}</span></div>{gitlabProjects.map((target) => <DiscoveryTargetOption key={`project:${target.identifier}`} target={target} selected={gitlabTargets.some((entry) => gitlabTargetMatches(entry, target))} onToggle={(selected) => toggleDiscoveredTarget(target, selected)} />)}</section>}
+            </div>}
+            {!discoveryLoading && !discoveryError && installing === "huly" && <div className="grid gap-3">
+              {Array.from(hulyWorkspaces.entries()).map(([workspace, group]) => <section key={workspace}><div className="flex items-center justify-between px-2 pb-1"><div><p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{group.name}</p>{group.name !== workspace && <p className="font-mono text-[9px] text-muted-foreground">{workspace}</p>}</div><span className="text-[10px] text-muted-foreground">{group.targets.length}</span></div>{group.targets.map((target) => <DiscoveryTargetOption key={`${workspace}:${target.identifier}`} target={target} selected={hulyTargets.some((entry) => hulyTargetMatches(entry, target))} onToggle={(selected) => toggleDiscoveredTarget(target, selected)} />)}</section>)}
+            </div>}
+            {visibleMissingGitlabTargets.length > 0 && <section className="mt-3"><p className="px-2 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Saved or manual selections</p>{visibleMissingGitlabTargets.map((target, index) => <label key={`${target.kind}:${target.identifier}:${index}`} className="flex cursor-pointer items-start gap-2.5 rounded-md px-2 py-2 hover:bg-accent"><input className="mt-0.5 size-4 accent-primary" type="checkbox" checked onChange={() => setGitlabTargets((current) => current.filter((entry) => entry !== target))} /><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{target.identifier}</span><span className="mt-0.5 block text-[10px] capitalize text-muted-foreground">{target.kind} · {discoveryAttempted ? "not returned by discovery" : "saved selection"}</span></span></label>)}</section>}
+            {visibleMissingHulyTargets.length > 0 && <section className="mt-3"><p className="px-2 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Saved or manual selections</p>{visibleMissingHulyTargets.map((target, index) => <label key={`${target.workspace}:${target.project}:${index}`} className="flex cursor-pointer items-start gap-2.5 rounded-md px-2 py-2 hover:bg-accent"><input className="mt-0.5 size-4 accent-primary" type="checkbox" checked onChange={() => setHulyTargets((current) => current.filter((entry) => entry !== target))} /><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{target.project}</span><span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">{target.workspace} · {discoveryAttempted ? "not returned by discovery" : "saved selection"}</span></span></label>)}</section>}
+            {discoveryAttempted && !discoveryLoading && !discoveryError && discoveredTargets.length === 0 && selectedTargetCount === 0 && <p className="px-2 py-5 text-center text-[11px] text-muted-foreground">No available targets were returned.</p>}
+            {discoveryAttempted && !discoveryLoading && !discoveryError && discoveredTargets.length > 0 && visibleDiscoveredTargets.length === 0 && visibleMissingGitlabTargets.length === 0 && visibleMissingHulyTargets.length === 0 && <p className="px-2 py-5 text-center text-[11px] text-muted-foreground">No targets match your search.</p>}
+          </div>
+          <p className="text-[10px] text-muted-foreground">{selectedTargetCount} {selectedTargetCount === 1 ? "target" : "targets"} selected</p>
+        </div>
+        <details className="rounded-lg border border-border bg-background/25 p-3">
+          <summary className="cursor-pointer text-xs font-medium">Advanced manual entry</summary>
+          <p className="mt-2 text-[10px] leading-4 text-muted-foreground">Add a target manually when it is not returned by discovery.</p>
+          {installing === "gitlab" ? <div className="mt-3 grid gap-2">
             {gitlabTargets.map((target, index) => <div key={index} className="grid items-end gap-2 sm:grid-cols-[120px_minmax(0,1fr)_auto]">
               <label className="grid gap-1.5"><span className="text-[10px] text-muted-foreground">Type</span><select className="settings-select" value={target.kind} onChange={(event) => setGitlabTargets((current) => current.map((entry, targetIndex) => targetIndex === index ? { ...entry, kind: event.target.value as GitlabTarget["kind"], legacyExternalIds: false } : entry))}><option value="project">Project / repo</option><option value="group">Group</option></select></label>
-              <label className="grid gap-1.5"><span className="text-[10px] text-muted-foreground">Path or ID</span><Input value={target.identifier} onChange={(event) => setGitlabTargets((current) => current.map((entry, targetIndex) => targetIndex === index ? { ...entry, identifier: event.target.value, legacyExternalIds: false } : entry))} placeholder={target.kind === "group" ? "group/subgroup" : "group/project"} required /></label>
-              <Button type="button" variant="ghost" size="icon-sm" title="Remove target" disabled={gitlabTargets.length === 1} onClick={() => setGitlabTargets((current) => current.filter((_, targetIndex) => targetIndex !== index))}><Trash2 /></Button>
+              <label className="grid gap-1.5"><span className="text-[10px] text-muted-foreground">Path or ID</span><Input value={target.identifier} onChange={(event) => setGitlabTargets((current) => current.map((entry, targetIndex) => targetIndex === index ? { ...entry, identifier: event.target.value, legacyExternalIds: false } : entry))} placeholder={target.kind === "group" ? "group/subgroup" : "group/project"} /></label>
+              <Button type="button" variant="ghost" size="icon-sm" title="Remove target" onClick={() => setGitlabTargets((current) => current.filter((_, targetIndex) => targetIndex !== index))}><Trash2 /></Button>
             </div>)}
             <Button className="justify-self-start" type="button" variant="secondary" size="sm" onClick={() => setGitlabTargets((current) => [...current, { kind: "project", identifier: "" }])}><Plus />Add GitLab target</Button>
-          </div>
-        </> : <>
-          <label className="grid gap-1.5"><span className="settings-label">Connector endpoint</span><Input value={configString(config, "endpoint")} onChange={(event) => setConfig({ ...config, endpoint: event.target.value })} placeholder="https://connector.example.com/huly/issues" required /></label>
-          <div className="grid gap-2">
-            <div><span className="settings-label">Huly projects</span><p className="mt-1 text-[10px] leading-4 text-muted-foreground">Each target may use a different Huly workspace.</p></div>
+          </div> : <div className="mt-3 grid gap-2">
             {hulyTargets.map((target, index) => <div key={index} className="grid items-end gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
-              <label className="grid gap-1.5"><span className="text-[10px] text-muted-foreground">Workspace</span><Input value={target.workspace} onChange={(event) => setHulyTargets((current) => current.map((entry, targetIndex) => targetIndex === index ? { ...entry, workspace: event.target.value, legacyExternalIds: false } : entry))} placeholder="acme" required /></label>
-              <label className="grid gap-1.5"><span className="text-[10px] text-muted-foreground">Project identifier</span><Input value={target.project} onChange={(event) => setHulyTargets((current) => current.map((entry, targetIndex) => targetIndex === index ? { ...entry, project: event.target.value, legacyExternalIds: false } : entry))} placeholder="BOOST" required /></label>
-              <Button type="button" variant="ghost" size="icon-sm" title="Remove target" disabled={hulyTargets.length === 1} onClick={() => setHulyTargets((current) => current.filter((_, targetIndex) => targetIndex !== index))}><Trash2 /></Button>
+              <label className="grid gap-1.5"><span className="text-[10px] text-muted-foreground">Workspace</span><Input value={target.workspace} onChange={(event) => setHulyTargets((current) => current.map((entry, targetIndex) => targetIndex === index ? { ...entry, workspace: event.target.value, legacyExternalIds: false } : entry))} placeholder="acme" /></label>
+              <label className="grid gap-1.5"><span className="text-[10px] text-muted-foreground">Project identifier</span><Input value={target.project} onChange={(event) => setHulyTargets((current) => current.map((entry, targetIndex) => targetIndex === index ? { ...entry, project: event.target.value, legacyExternalIds: false } : entry))} placeholder="BOOST" /></label>
+              <Button type="button" variant="ghost" size="icon-sm" title="Remove target" onClick={() => setHulyTargets((current) => current.filter((_, targetIndex) => targetIndex !== index))}><Trash2 /></Button>
             </div>)}
             <Button className="justify-self-start" type="button" variant="secondary" size="sm" onClick={() => setHulyTargets((current) => [...current, { workspace: "", project: "" }])}><Plus />Add Huly project</Button>
-          </div>
-        </>}
-        <label className="grid gap-1.5"><span className="settings-label">Access token</span><Input type="password" value={configString(config, "token")} onChange={(event) => setConfig({ ...config, token: event.target.value })} required /></label>
+          </div>}
+        </details>
+        {hasPartialHulyTarget && <p className="text-xs text-destructive">Complete or remove each manual Huly workspace/project row before saving.</p>}
         <label className="grid gap-1.5"><span className="settings-label">Automatic import</span><select className="settings-select" value={schedule} onChange={(event) => setSchedule(event.target.value)}>{scheduleOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
         {save.error && <p className="text-xs text-destructive">{save.error.message}</p>}
         <div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={closeEditor}>Cancel</Button><Button disabled={save.isPending || !name.trim() || !targetsValid}>{save.isPending && <LoaderCircle className="animate-spin" />}{editingId ? "Save integration" : "Install plugin"}</Button></div>
@@ -390,9 +601,24 @@ function collectObjects(value: unknown): Record<string, any>[] {
   return [];
 }
 
-function JsonPanel({ value, empty }: { value: unknown; empty: string }) {
-  if (!value) return <p className="text-[11px] text-muted-foreground">{empty}</p>;
-  return <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-md bg-background p-3 font-mono text-[10px] leading-5 text-muted-foreground">{JSON.stringify(value, null, 2)}</pre>;
+function formatDayCount(value?: number | null) {
+  if (value === undefined || value === null) return "Unavailable";
+  return `${formatExactNumber(value)} ${value === 1 ? "day" : "days"}`;
+}
+
+function formatUnixTimestamp(value?: number | null) {
+  if (value === undefined || value === null) return "Not provided";
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(new Date(value * 1_000));
+}
+
+function QuotaWindow({ name, window }: { name: string; window: CodexRateLimitWindow }) {
+  const percentage = window.usedPercent;
+  const width = percentage === undefined || percentage === null ? 0 : Math.min(100, Math.max(0, percentage));
+  return <div className="rounded-md border border-border/70 bg-background/40 p-3">
+    <div className="flex items-center justify-between gap-3"><span className="text-[11px] font-medium">{window.windowDurationMins === undefined || window.windowDurationMins === null ? name : formatWindowDuration(window.windowDurationMins)}</span><strong className="text-xs">{percentage === undefined || percentage === null ? "Usage unavailable" : `${formatPercent(percentage)} used`}</strong></div>
+    <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${width}%` }} /></div>
+    <p className="mt-2 text-[10px] text-muted-foreground">{window.resetsAt === undefined || window.resetsAt === null ? "Reset time unavailable" : `Resets ${formatUnixTimestamp(window.resetsAt)}`}</p>
+  </div>;
 }
 
 function CodexSettings() {
@@ -413,7 +639,40 @@ function CodexSettings() {
   const login = useMutation({ mutationFn: api.startCodexLogin, onSuccess: () => void setup.refetch() });
   const mcps = useMemo(() => collectObjects(settings.data?.mcps), [settings.data?.mcps]);
   const codex = setup.data?.codex;
-  return <div className="settings-content"><SettingsSection title="Status" description="Connection, account, usage, and limits reported by the Codex app-server."><div className="grid gap-2 sm:grid-cols-3"><div className="settings-metric"><Activity /><span><span className="settings-label">CLI status</span><strong className={codex?.authenticated ? "text-success" : "text-warning"}>{codex?.authenticated ? "Ready" : codex?.available ? "Login required" : "Unavailable"}</strong><small>{codex?.version ?? "Not detected"}</small></span></div><div className="settings-metric"><CircleGauge /><span><span className="settings-label">Usage</span><strong>{settings.data?.usage ? "Available" : "No data"}</strong><small>Account token activity</small></span></div><div className="settings-metric"><Shield /><span><span className="settings-label">Limits</span><strong>{settings.data?.rateLimits ? "Current" : "No data"}</strong><small>Rolling account limits</small></span></div></div>{settings.error && <p className="mt-2 text-xs text-destructive">{settings.error.message}</p>}{!codex?.authenticated && codex?.available && user?.role === "admin" && !login.data && <Button className="mt-3" onClick={() => login.mutate()} disabled={login.isPending}>{login.isPending && <LoaderCircle className="animate-spin" />}Connect with ChatGPT</Button>}{login.data && !codex?.authenticated && <div className="mt-3 rounded-lg border border-primary/25 bg-primary/5 p-3"><p className="text-xs">Open <a className="text-primary hover:underline" href={login.data.verificationUrl} target="_blank" rel="noreferrer">the verification page <ExternalLink className="inline size-3" /></a>, then enter:</p><button className="mt-2 flex items-center gap-2 rounded-md border border-border bg-background px-3 py-2 font-mono tracking-[0.2em]" onClick={() => { void navigator.clipboard.writeText(login.data!.userCode); setCopied(true); }}>{login.data.userCode}<Copy className="size-3.5" /></button>{copied && <p className="mt-1 text-[10px] text-success">Copied</p>}</div>}<details className="mt-3"><summary className="cursor-pointer text-[11px] text-muted-foreground">Raw usage and limits</summary><div className="mt-2 grid gap-2 sm:grid-cols-2"><JsonPanel value={settings.data?.usage} empty="Usage is unavailable." /><JsonPanel value={settings.data?.rateLimits} empty="Limits are unavailable." /></div></details></SettingsSection>
+  const usage = settings.data?.usage;
+  const summary = usage?.summary;
+  const dailyUsage = usage?.dailyUsageBuckets;
+  const limits = rateLimitBuckets(settings.data?.rateLimits);
+  const resetCredits = settings.data?.rateLimits?.rateLimitResetCredits;
+  return <div className="settings-content"><SettingsSection title="Status" description="Connection and account status reported by the Codex app-server."><div className="settings-metric"><Activity /><span><span className="settings-label">CLI status</span><strong className={codex?.authenticated ? "text-success" : "text-warning"}>{codex?.authenticated ? "Ready" : codex?.available ? "Login required" : "Unavailable"}</strong><small>{codex?.version ?? "Not detected"}</small></span></div>{settings.error && <p className="mt-2 text-xs text-destructive">{settings.error.message}</p>}{!codex?.authenticated && codex?.available && user?.role === "admin" && !login.data && <Button className="mt-3" onClick={() => login.mutate()} disabled={login.isPending}>{login.isPending && <LoaderCircle className="animate-spin" />}Connect with ChatGPT</Button>}{login.data && !codex?.authenticated && <div className="mt-3 rounded-lg border border-primary/25 bg-primary/5 p-3"><p className="text-xs">Open <a className="text-primary hover:underline" href={login.data.verificationUrl} target="_blank" rel="noreferrer">the verification page <ExternalLink className="inline size-3" /></a>, then enter:</p><button className="mt-2 flex items-center gap-2 rounded-md border border-border bg-background px-3 py-2 font-mono tracking-[0.2em]" onClick={() => { void navigator.clipboard.writeText(login.data!.userCode); setCopied(true); }}>{login.data.userCode}<Copy className="size-3.5" /></button>{copied && <p className="mt-1 text-[10px] text-success">Copied</p>}</div>}</SettingsSection>
+    <SettingsSection title="Usage" description="Exact ChatGPT token activity and rolling quota windows reported for this Codex account.">
+      {summary ? <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="settings-metric"><CircleGauge /><span><span className="settings-label">Lifetime tokens</span><strong>{formatExactNumber(summary.lifetimeTokens)}</strong><small>All reported activity</small></span></div>
+        <div className="settings-metric"><Activity /><span><span className="settings-label">Peak daily tokens</span><strong>{formatExactNumber(summary.peakDailyTokens)}</strong><small>Highest reported day</small></span></div>
+        <div className="settings-metric"><Clock /><span><span className="settings-label">Longest turn</span><strong>{formatDuration(summary.longestRunningTurnSec)}</strong><small>Continuous running time</small></span></div>
+        <div className="settings-metric"><Flame /><span><span className="settings-label">Current streak</span><strong>{formatDayCount(summary.currentStreakDays)}</strong><small>Consecutive active days</small></span></div>
+        <div className="settings-metric"><Shield /><span><span className="settings-label">Longest streak</span><strong>{formatDayCount(summary.longestStreakDays)}</strong><small>Personal best</small></span></div>
+      </div> : <p className="text-[11px] text-muted-foreground">Token activity is unavailable for this account.</p>}
+      {dailyUsage && dailyUsage.length > 0 && <div className="settings-card mt-3">
+        <div className="mb-2 flex items-center justify-between gap-3"><p className="text-xs font-medium">Daily token activity</p><span className="text-[10px] text-muted-foreground">{dailyUsage.length} {dailyUsage.length === 1 ? "day" : "days"}</span></div>
+        <div className="max-h-48 divide-y divide-border overflow-y-auto">{dailyUsage.map((bucket) => <div key={bucket.startDate} className="flex items-center justify-between gap-4 py-2 text-[11px]"><time className="font-mono text-muted-foreground" dateTime={bucket.startDate}>{bucket.startDate}</time><strong>{formatExactNumber(bucket.tokens)} tokens</strong></div>)}</div>
+      </div>}
+      <div className="mb-2 mt-5"><p className="text-xs font-medium">Quota windows</p><p className="mt-1 text-[10px] text-muted-foreground">Usage percentages and exact local reset times.</p></div>
+      {limits.length > 0 ? <div className="grid gap-2">{limits.map((limit) => <div key={limit.limitId} className="settings-card">
+        <div className="mb-3 flex items-start justify-between gap-3"><div><p className="text-xs font-medium">{rateLimitLabel(limit)}</p><p className="mt-0.5 font-mono text-[9px] text-muted-foreground">{limit.limitId}</p></div><div className="text-right">{limit.planType && <span className="rounded-full bg-secondary px-2 py-1 text-[9px] uppercase tracking-wide text-muted-foreground">{limit.planType}</span>}{limit.rateLimitReachedType && <p className="mt-1 text-[10px] text-destructive">{limit.rateLimitReachedType}</p>}</div></div>
+        <div className="grid gap-2 sm:grid-cols-2">{limit.primary && <QuotaWindow name="Primary window" window={limit.primary} />}{limit.secondary && <QuotaWindow name="Secondary window" window={limit.secondary} />}</div>
+      </div>)}</div> : <p className="text-[11px] text-muted-foreground">Quota-window usage is unavailable for this account.</p>}
+    </SettingsSection>
+    <SettingsSection title="Banked resets" description="Earned rate-limit resets currently available on this Codex account.">
+      <div className="settings-card flex items-center gap-3"><RefreshCw className="size-5 text-primary" /><div><p className="text-xl font-semibold">{resetCredits ? formatExactNumber(resetCredits.availableCount) : "Unavailable"}</p><p className="text-[11px] text-muted-foreground">{resetCredits ? `${resetCredits.availableCount === 1 ? "reset" : "resets"} available · the total is authoritative` : "The service did not return a banked-reset count."}</p></div></div>
+      {resetCredits?.credits && resetCredits.credits.length > 0 && <div className="mt-2 grid gap-2">{resetCredits.credits.map((credit) => <div key={credit.id} className="settings-card">
+        <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-medium">{credit.title ?? "Rate-limit reset"}</p>{credit.description && <p className="mt-1 text-[11px] leading-4 text-muted-foreground">{credit.description}</p>}</div><span className="rounded-full bg-success/10 px-2 py-1 text-[9px] uppercase tracking-wide text-success">{credit.status}</span></div>
+        <dl className="mt-3 grid gap-2 text-[10px] sm:grid-cols-3"><div><dt className="settings-label">Type</dt><dd className="mt-1">{credit.resetType}</dd></div><div><dt className="settings-label">Granted</dt><dd className="mt-1">{formatUnixTimestamp(credit.grantedAt)}</dd></div><div><dt className="settings-label">Expires</dt><dd className="mt-1">{credit.expiresAt ? formatUnixTimestamp(credit.expiresAt) : "Does not expire"}</dd></div></dl>
+      </div>)}</div>}
+      {resetCredits && resetCredits.availableCount === 0 && <p className="mt-2 text-[11px] text-muted-foreground">No earned resets are currently banked.</p>}
+      {resetCredits && resetCredits.availableCount > 0 && (!resetCredits.credits || resetCredits.credits.length === 0) && <p className="mt-2 text-[11px] text-muted-foreground">The account reported the count but did not provide individual reset details.</p>}
+      {resetCredits?.credits && resetCredits.availableCount > resetCredits.credits.length && <p className="mt-2 text-[11px] text-muted-foreground">Showing {resetCredits.credits.length} of {resetCredits.availableCount} reset details returned by the service.</p>}
+    </SettingsSection>
     <SettingsSection title="Workspace instructions" description="These instructions are added to every planning and execution run created from this workspace."><Textarea className="min-h-36 font-mono text-xs leading-5" value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="Repository conventions, required checks, architecture boundaries…" /><div className="mt-2 flex items-center justify-between"><span className="text-[10px] text-muted-foreground">Stored in Boosted and applied at run time.</span><Button size="sm" onClick={() => save.mutate()} disabled={save.isPending}>{save.isPending ? <LoaderCircle className="animate-spin" /> : <Save />}Save instructions</Button></div>{save.error && <p className="mt-2 text-xs text-destructive">{save.error.message}</p>}</SettingsSection>
     <SettingsSection title="MCP servers" description="Inspect active Codex MCPs and add workspace-local servers to .codex/config.toml."><div className="grid gap-1.5">{mcps.map((mcp, index) => <div key={String(mcp.name ?? mcp.id ?? index)} className="settings-card flex items-center gap-3 py-2.5"><Plug className="size-4 text-muted-foreground" /><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium">{String(mcp.name ?? mcp.id ?? "MCP server")}</p><p className="mt-0.5 truncate text-[10px] text-muted-foreground">{String(mcp.status ?? mcp.authStatus ?? "Configured")}</p></div>{mcp.tools && <span className="text-[10px] text-muted-foreground">{Array.isArray(mcp.tools) ? mcp.tools.length : ""} tools</span>}</div>)}{mcps.length === 0 && <p className="text-[11px] text-muted-foreground">No MCP servers reported for this workspace.</p>}</div><form className="mt-3 grid gap-2 rounded-lg border border-border bg-background/25 p-3" onSubmit={(event) => { event.preventDefault(); addMcp.mutate(); }}><p className="text-xs font-medium">Add MCP server</p><div className="grid gap-2 sm:grid-cols-[1fr_120px]"><Input placeholder="Server name" value={mcpName} onChange={(event) => setMcpName(event.target.value)} required /><select className="settings-select" value={mcpType} onChange={(event) => setMcpType(event.target.value as "url" | "command")}><option value="url">HTTP URL</option><option value="command">Command</option></select></div><Input placeholder={mcpType === "url" ? "https://mcp.example.com" : "npx"} value={mcpValue} onChange={(event) => setMcpValue(event.target.value)} required />{mcpType === "command" && <Input placeholder="Arguments, separated by spaces" value={mcpArgs} onChange={(event) => setMcpArgs(event.target.value)} />}<div className="flex justify-end"><Button size="sm" disabled={addMcp.isPending || !mcpName || !mcpValue}>{addMcp.isPending ? <LoaderCircle className="animate-spin" /> : <Plus />}Add server</Button></div>{addMcp.error && <p className="text-xs text-destructive">{addMcp.error.message}</p>}</form></SettingsSection></div>;
 }

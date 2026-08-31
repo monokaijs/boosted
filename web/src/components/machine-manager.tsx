@@ -126,7 +126,7 @@ export function MachineSwitcher({ children, onManage }: { children?: ReactNode; 
   const active = useMemo(() => profiles.find((profile) => profile.id === activeId), [activeId, profiles]);
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>{children ?? <Button variant="ghost" size="sm" className="max-w-48"><Server /><span className="truncate">{active?.name ?? "Machines"}</span><ChevronDown /></Button>}</DropdownMenuTrigger>
+      <DropdownMenuTrigger asChild>{children ?? <Button variant="ghost" size="sm" className="machine-switcher max-w-48" aria-label={active?.name ?? "Machines"} title={active?.name ?? "Machines"}><Server /><span className="machine-switcher-label truncate">{active?.name ?? "Machines"}</span><ChevronDown className="machine-switcher-chevron" /></Button>}</DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-72">
         <DropdownMenuLabel>Boosted machine</DropdownMenuLabel>
         {profiles.map((profile) => <DropdownMenuItem key={profile.id} onClick={() => void setActive(profile.id)}><Server /><span className="min-w-0 flex-1"><span className="block truncate">{profile.name}</span><span className="block truncate font-mono text-[9px] text-muted-foreground">{profile.baseUrl}</span></span>{profile.id === activeId && <Check />}</DropdownMenuItem>)}

@@ -14,6 +14,7 @@ import { getActiveApiClient } from "@/lib/api";
 import { ApiClientProvider, useBoostedApiClient } from "@/lib/api-context";
 import { isMixedContentConnection, useMachineStore, type MachineProfile } from "@/lib/machines";
 import { isTauriRuntime } from "@/lib/runtime";
+import { setupRetryDelay, shouldRetrySetup } from "@/lib/startup";
 import { useAppStore } from "@/lib/store";
 import type { SetupState, User } from "@/lib/types";
 import { startAutomaticAppUpdates } from "@/lib/updater";
@@ -47,7 +48,12 @@ function SessionRoot({ profile }: { profile: MachineProfile }) {
   const token = useMachineStore((state) => state.tokens[profile.id]);
   const setUser = useAppStore((state) => state.setUser);
   const queryClient = useQueryClient();
-  const setup = useQuery({ queryKey: ["setup"], queryFn: api.setupState, retry: false });
+  const setup = useQuery({
+    queryKey: ["setup"],
+    queryFn: api.setupState,
+    retry: (failureCount, error) => shouldRetrySetup(profile, failureCount, error),
+    retryDelay: setupRetryDelay,
+  });
   const me = useQuery({ queryKey: ["me"], queryFn: api.me, enabled: Boolean(token) && setup.data?.needsSetup === false, retry: false });
 
   useEffect(() => {
@@ -60,7 +66,7 @@ function SessionRoot({ profile }: { profile: MachineProfile }) {
     queryClient.setQueryData<SetupState>(["setup"], (current) => current ? { ...current, needsSetup: false } : current);
   }
 
-  if (setup.isLoading || (token && me.isLoading)) return <div className="grid h-full place-items-center text-sm text-muted-foreground"><LoaderCircle className="mr-2 inline size-4 animate-spin" />Connecting to {profile.name}…</div>;
+  if (setup.isPending || (token && me.isLoading)) return <div className="grid h-full place-items-center text-sm text-muted-foreground"><LoaderCircle className="mr-2 inline size-4 animate-spin" />Connecting to {profile.name}…</div>;
 
   if (setup.isError || !setup.data) {
     const message = isMixedContentConnection(profile.baseUrl)

@@ -44,6 +44,25 @@ describe("Boosted API client", () => {
     expect(tokens).toEqual({ a: undefined, b: "token-b" });
   });
 
+  it("posts draft integration credentials to the workspace discovery endpoint", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ targets: [] }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = client("https://boosted.example", { token: "machine-token" });
+
+    await api.discoverIntegrationTargets("workspace-a", {
+      provider: "gitlab",
+      config: { baseUrl: "https://gitlab.example", token: "gitlab-token" },
+    });
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://boosted.example/api/v1/projects/workspace-a/integrations/discover");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      provider: "gitlab",
+      config: { baseUrl: "https://gitlab.example", token: "gitlab-token" },
+    });
+  });
+
   it("aborts this client's outstanding requests when its workspace is disposed", async () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_input, init) => new Promise((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });

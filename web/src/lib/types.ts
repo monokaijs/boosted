@@ -220,12 +220,80 @@ export interface IntegrationSyncResult {
   message: string;
 }
 
+export interface IntegrationDiscoveryTarget {
+  kind: "project" | "group";
+  identifier: string;
+  name: string;
+  fullPath?: string;
+  workspace?: string;
+  workspaceName?: string;
+  webUrl?: string;
+}
+
+export interface IntegrationDiscoveryResult {
+  targets: IntegrationDiscoveryTarget[];
+}
+
+export interface CodexUsageSummary {
+  lifetimeTokens?: number | null;
+  peakDailyTokens?: number | null;
+  longestRunningTurnSec?: number | null;
+  currentStreakDays?: number | null;
+  longestStreakDays?: number | null;
+}
+
+export interface CodexDailyUsageBucket {
+  startDate: string;
+  tokens: number;
+}
+
+export interface CodexUsage {
+  summary?: CodexUsageSummary | null;
+  dailyUsageBuckets?: CodexDailyUsageBucket[] | null;
+}
+
+export interface CodexRateLimitWindow {
+  usedPercent?: number | null;
+  windowDurationMins?: number | null;
+  resetsAt?: number | null;
+}
+
+export interface CodexRateLimitBucket {
+  limitId: string;
+  limitName?: string | null;
+  primary?: CodexRateLimitWindow | null;
+  secondary?: CodexRateLimitWindow | null;
+  rateLimitReachedType?: string | null;
+  planType?: string | null;
+}
+
+export interface CodexRateLimitResetCredit {
+  id: string;
+  resetType: string;
+  status: string;
+  grantedAt: number;
+  expiresAt?: number | null;
+  title?: string | null;
+  description?: string | null;
+}
+
+export interface CodexRateLimitResetCredits {
+  availableCount: number;
+  credits?: CodexRateLimitResetCredit[] | null;
+}
+
+export interface CodexRateLimits {
+  rateLimits?: CodexRateLimitBucket | null;
+  rateLimitsByLimitId?: Record<string, CodexRateLimitBucket> | null;
+  rateLimitResetCredits?: CodexRateLimitResetCredits | null;
+}
+
 export interface WorkspaceCodexSettings {
   info: SetupState["codex"];
   instructions: string;
   account?: Record<string, unknown>;
-  rateLimits?: Record<string, unknown>;
-  usage?: Record<string, unknown>;
+  rateLimits?: CodexRateLimits | null;
+  usage?: CodexUsage | null;
   mcps?: Record<string, unknown>;
   config?: Record<string, unknown>;
 }

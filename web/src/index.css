@@ -1028,7 +1028,17 @@ select {
   }
 
   .app-brand {
-    width: 34px;
+    display: none;
+  }
+
+  .app-topbar .machine-switcher {
+    width: 28px;
+    padding-inline: 0;
+  }
+
+  .app-topbar .machine-switcher-label,
+  .app-topbar .machine-switcher-chevron {
+    display: none;
   }
 
   .app-drawer-switchers {

@@ -28,6 +28,28 @@ Boosted connects directly to the URL you provide. It does not provide TLS, serve
 
 Existing installations migrate automatically. Browser clients retain the current origin, desktop clients retain `http://127.0.0.1:4782`, and development builds continue to honor `VITE_BOOSTED_API_URL`. The existing session and selected workspace move into that generated connection.
 
+## Issue integrations
+
+Install GitLab or Huly under **Settings → Integrations**. After connection details are entered, Boosted discovers the projects, groups, and workspaces visible to the supplied token and presents them as a searchable multi-select. GitLab discovery uses the instance's REST API and follows pagination, so paths or numeric IDs do not need to be copied from GitLab manually.
+
+Huly remains connector-based so cloud and self-hosted deployments can use the same adapter. In addition to the existing issue request (`GET` with `workspace`, `project`, and `state=open`), a connector should support a bearer-authenticated `GET` with `action=discover` and return its accessible workspaces and projects:
+
+```json
+{
+  "workspaces": [
+    {
+      "id": "acme",
+      "name": "Acme",
+      "projects": [
+        { "id": "BOOST", "name": "Boosted" }
+      ]
+    }
+  ]
+}
+```
+
+Boosted also accepts a flat `targets` array and a `data` wrapper for connector implementations that already expose a normalized catalog. Older saved targets keep working, and manual target entry remains available as an advanced fallback for issue-only connectors.
+
 ## Progressive Web App
 
 Production builds include a web app manifest, install icons, and a service worker. Open Boosted over HTTPS (or on localhost), then use the browser’s install action. Chromium browsers also show an in-app installation prompt when installation is available.

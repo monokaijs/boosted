@@ -340,6 +340,13 @@ pub struct IntegrationUpdate {
     pub sync_interval_minutes: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrationDiscoveryRequest {
+    pub provider: String,
+    pub config: Value,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IntegrationSyncResult {

@@ -212,6 +212,18 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
             .map(|value| value.parse::<IpAddr>())
             .collect::<Result<Vec<_>, _>>()?,
     };
+    // Reserve the HTTP ports before the slower Codex discovery starts. Desktop
+    // webviews can begin requesting /setup as soon as their shell loads; an
+    // already-listening socket lets that request wait for initialization instead
+    // of failing immediately with a connection-refused error.
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    let local_listener = match config
+        .local_bind
+        .filter(|local_bind| !bind_covers(bind, *local_bind))
+    {
+        Some(local_bind) => Some((local_bind, tokio::net::TcpListener::bind(local_bind).await?)),
+        None => None,
+    };
     let codex = CodexManager::new().await;
     let uploads_dir = config.data_dir.join("uploads");
     tokio::fs::create_dir_all(&uploads_dir).await?;
@@ -232,14 +244,6 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         integration_scheduler(scheduler_state).await;
     });
     let app = router(state, &config.web_dir, web_ui_enabled, allowed_ips);
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    let local_listener = match config
-        .local_bind
-        .filter(|local_bind| !bind_covers(bind, *local_bind))
-    {
-        Some(local_bind) => Some((local_bind, tokio::net::TcpListener::bind(local_bind).await?)),
-        None => None,
-    };
     if let Some((local_bind, local_listener)) = local_listener {
         let local_app = app.clone();
         tokio::spawn(async move {
@@ -321,6 +325,10 @@ fn router(
         .route(
             "/projects/{id}/integrations",
             get(list_integrations).post(create_integration),
+        )
+        .route(
+            "/projects/{id}/integrations/discover",
+            post(discover_integration_targets),
         )
         .route(
             "/projects/{project_id}/integrations/{id}",
@@ -1782,6 +1790,17 @@ async fn list_integrations(
 ) -> AppResult<Json<Vec<Integration>>> {
     state.db.project(&id).await?;
     Ok(Json(state.db.integrations(&id).await?))
+}
+
+async fn discover_integration_targets(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<IntegrationDiscoveryRequest>,
+) -> AppResult<Json<integrations::IntegrationDiscoveryResult>> {
+    state.db.project(&id).await?;
+    Ok(Json(
+        integrations::discover(&input.provider, &input.config).await?,
+    ))
 }
 
 fn validate_integration(input: &IntegrationCreate) -> AppResult<()> {

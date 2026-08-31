@@ -21,6 +21,7 @@ import type {
   TaskStatus,
   TaskAttachment,
   Integration,
+  IntegrationDiscoveryResult,
   IntegrationSyncResult,
   WorkspaceCodexSettings,
   User,
@@ -151,6 +152,7 @@ export function createBoostedApiClient(options: ApiClientOptions) {
     window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
   },
   integrations: (projectId: string) => request<Integration[]>(`/projects/${projectId}/integrations`),
+  discoverIntegrationTargets: (projectId: string, input: { provider: Integration["provider"]; config: Record<string, unknown> }, signal?: AbortSignal) => request<IntegrationDiscoveryResult>(`/projects/${projectId}/integrations/discover`, { ...json("POST", input), signal }),
   createIntegration: (projectId: string, input: { provider: Integration["provider"]; name: string; config: Record<string, unknown>; enabled: boolean; syncIntervalMinutes?: number }) => request<Integration>(`/projects/${projectId}/integrations`, json("POST", input)),
   updateIntegration: (projectId: string, id: string, input: { name: string; config: Record<string, unknown>; enabled: boolean; syncIntervalMinutes?: number }) => request<Integration>(`/projects/${projectId}/integrations/${id}`, json("PUT", input)),
   deleteIntegration: (projectId: string, id: string) => request<void>(`/projects/${projectId}/integrations/${id}`, { method: "DELETE" }),
