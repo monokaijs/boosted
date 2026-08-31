@@ -1,6 +1,6 @@
 {
   "name": "boosted-cli",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Run the Boosted local-first coding workspace from the command line",
   "license": "MIT",
   "repository": {
