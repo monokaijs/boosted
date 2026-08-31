@@ -99,7 +99,7 @@ body {
   position: fixed;
   right: max(16px, env(safe-area-inset-right));
   bottom: max(16px, env(safe-area-inset-bottom));
-  z-index: 100;
+  z-index: 40;
   display: grid;
   width: min(420px, calc(100vw - 32px));
   gap: 8px;
@@ -158,7 +158,8 @@ body {
 
 button,
 input,
-textarea {
+textarea,
+select {
   font: inherit;
 }
 
@@ -810,7 +811,28 @@ textarea {
 }
 
 .task-create-dialog {
+  display: flex;
   width: min(760px, calc(100% - 2rem));
+  flex-direction: column;
+}
+
+.task-create-header,
+.task-create-dialog [data-slot="dialog-footer"] {
+  flex: none;
+}
+
+.task-create-form {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.task-create-body {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .settings-dialog {
@@ -881,6 +903,10 @@ textarea {
   width: min(100%, 720px);
   margin: 0 auto;
   padding: 30px 34px 56px;
+}
+
+.settings-main {
+  overscroll-behavior: contain;
 }
 
 .settings-section + .settings-section {
@@ -973,17 +999,32 @@ textarea {
 }
 
 @media (max-width: 900px) {
+  .pwa-notices {
+    right: max(8px, env(safe-area-inset-right));
+    bottom: calc(56px + env(safe-area-inset-bottom));
+    width: min(420px, calc(100vw - 16px - env(safe-area-inset-left) - env(safe-area-inset-right)));
+  }
+
   .app-shell,
   .app-shell[data-drawer="closed"] {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: 42px minmax(0, 1fr) calc(48px + env(safe-area-inset-bottom));
+    grid-template-rows: calc(42px + env(safe-area-inset-top)) minmax(0, 1fr) calc(48px + env(safe-area-inset-bottom));
   }
 
   .app-topbar {
     min-width: 0;
-    height: 42px;
+    height: calc(42px + env(safe-area-inset-top));
     overflow: hidden;
-    padding-inline: 4px;
+    padding-top: env(safe-area-inset-top);
+    padding-right: max(4px, env(safe-area-inset-right));
+    padding-left: max(4px, env(safe-area-inset-left));
+  }
+
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  textarea,
+  select,
+  [contenteditable="true"] {
+    font-size: 16px !important;
   }
 
   .app-brand {
@@ -1038,14 +1079,14 @@ textarea {
   .workspace {
     grid-column: 1;
     grid-row: 2;
-    padding: 4px;
+    padding: 4px max(4px, env(safe-area-inset-right)) 4px max(4px, env(safe-area-inset-left));
   }
 
   .drawer-resize-handle { display: none; }
 
   .app-drawer-scrim {
     position: fixed;
-    inset: 42px 0 calc(48px + env(safe-area-inset-bottom));
+    inset: calc(42px + env(safe-area-inset-top)) 0 calc(48px + env(safe-area-inset-bottom));
     z-index: 8;
     display: block;
     border: 0;
@@ -1055,10 +1096,10 @@ textarea {
 
   .task-drawer {
     position: fixed;
-    top: 50px;
-    right: 8px;
+    top: calc(50px + env(safe-area-inset-top));
+    right: max(8px, env(safe-area-inset-right));
     bottom: calc(56px + env(safe-area-inset-bottom));
-    left: 8px;
+    left: max(8px, env(safe-area-inset-left));
     width: auto;
     max-width: 420px;
     margin: 0;
@@ -1231,14 +1272,38 @@ textarea {
     top: auto;
     bottom: max(8px, env(safe-area-inset-bottom));
     width: calc(100% - 16px);
-    max-height: calc(100dvh - 16px - env(safe-area-inset-bottom));
-    transform: translateX(-50%);
+    max-height: calc(100dvh - max(8px, env(safe-area-inset-top)) - max(8px, env(safe-area-inset-bottom)));
+    --tw-translate-y: 0px;
+    transform: none;
     gap: 12px;
+    overscroll-behavior: contain;
+  }
+
+  .dialog-content:not(.settings-dialog):not(.task-create-dialog) {
     padding: 16px;
   }
 
+  .dialog-close {
+    top: 10px;
+    right: 10px;
+    width: 36px;
+    height: 36px;
+  }
+
+  .task-create-header {
+    padding: 16px 52px 14px 16px;
+  }
+
+  .task-create-body {
+    padding: 16px;
+  }
+
+  .task-create-dialog [data-slot="dialog-footer"] {
+    padding: 12px 16px;
+  }
+
   .settings-dialog {
-    height: calc(100dvh - 16px - env(safe-area-inset-bottom));
+    height: calc(100dvh - max(8px, env(safe-area-inset-top)) - max(8px, env(safe-area-inset-bottom)));
   }
 
   .settings-layout {
@@ -1249,7 +1314,7 @@ textarea {
   .settings-sidebar {
     border-right: 0;
     border-bottom: 1px solid var(--border);
-    padding: 12px;
+    padding: 12px 48px 10px 12px;
   }
 
   .settings-sidebar nav {
@@ -1283,6 +1348,14 @@ textarea {
 
   .settings-content {
     padding: 20px 14px 40px;
+  }
+
+  .connections-dialog .settings-card {
+    flex-wrap: wrap;
+  }
+
+  .connections-dialog .settings-card > span:nth-child(2) {
+    min-width: calc(100% - 52px);
   }
 
   .dialog-footer {

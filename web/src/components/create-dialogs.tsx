@@ -113,9 +113,9 @@ export function NewTaskDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   return (
     <Dialog open={open} onOpenChange={close}>
       <DialogContent className="task-create-dialog max-w-3xl gap-0 overflow-hidden p-0">
-        <DialogHeader className="border-b border-border px-6 py-5 pr-12"><DialogTitle>Create task</DialogTitle></DialogHeader>
-        <form onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
-          <div className="grid gap-4 px-6 py-5">
+        <DialogHeader className="task-create-header border-b border-border px-6 py-5 pr-12"><DialogTitle>Create task</DialogTitle></DialogHeader>
+        <form className="task-create-form" onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
+          <div className="task-create-body grid gap-4 px-6 py-5">
             <label className="grid gap-1.5"><span className="text-xs font-medium">Title</span><Input autoFocus className="h-10 text-sm" value={title} onChange={(event) => setTitle(event.target.value)} required /></label>
             <div className="grid gap-1.5">
               <div className="flex items-end justify-between"><p className="text-xs font-medium">Description</p><div className="flex rounded-md bg-background p-0.5"><Button type="button" size="sm" variant="ghost" className={mode === "write" ? "h-6 bg-accent px-2" : "h-6 px-2"} onClick={() => setMode("write")}><Pencil />Write</Button><Button type="button" size="sm" variant="ghost" className={mode === "preview" ? "h-6 bg-accent px-2" : "h-6 px-2"} onClick={() => setMode("preview")}><Eye />Preview</Button></div></div>
@@ -172,7 +172,7 @@ export function OpenProjectDialog({ open, onOpenChange }: { open: boolean; onOpe
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="project-open-dialog max-w-2xl">
         <DialogHeader><div className="mb-2 flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary"><FolderOpen className="size-4" /></div><DialogTitle>Open project</DialogTitle></DialogHeader>
         <div className="overflow-hidden rounded-lg border border-border bg-background/35">
           <form className="flex items-center gap-1.5 p-2" onSubmit={(event) => { event.preventDefault(); if (location.trim()) navigate(location.trim()); }}>
@@ -228,7 +228,7 @@ export function UsersDialog({ open, onOpenChange }: { open: boolean; onOpenChang
   const create = useMutation({ mutationFn: () => api.createUser(username, password), onSuccess: () => { setUsername(""); setPassword(""); void queryClient.invalidateQueries({ queryKey: ["users"] }); } });
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="users-dialog">
         <DialogHeader><div className="mb-2 flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary"><UserPlus className="size-4" /></div><DialogTitle>Manage users</DialogTitle></DialogHeader>
         <div className="grid max-h-52 gap-1 overflow-auto">
           {users.data?.map((user) => <div key={user.id} className="flex items-center justify-between rounded-md px-2 py-2 hover:bg-accent"><div><p className="text-sm font-medium">{user.username}</p><p className="text-[11px] capitalize text-muted-foreground">{user.role}{user.mustChangePassword ? " · password change required" : ""}</p></div>{user.disabled && <span className="text-xs text-destructive">Disabled</span>}</div>)}
@@ -253,7 +253,7 @@ export function ForcePasswordDialog() {
   useEffect(() => { if (!user?.mustChangePassword) { setCurrentPassword(""); setNextPassword(""); } }, [user?.mustChangePassword]);
   return (
     <Dialog open={Boolean(user?.mustChangePassword)}>
-      <DialogContent onEscapeKeyDown={(event) => event.preventDefault()} onPointerDownOutside={(event) => event.preventDefault()}>
+      <DialogContent className="password-dialog" onEscapeKeyDown={(event) => event.preventDefault()} onPointerDownOutside={(event) => event.preventDefault()}>
         <DialogHeader><DialogTitle>Choose a new password</DialogTitle><DialogDescription>Your administrator created this account with a temporary password.</DialogDescription></DialogHeader>
         <form className="grid gap-3" onSubmit={(event: FormEvent) => { event.preventDefault(); change.mutate(); }}>
           <Input type="password" placeholder="Temporary password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required />

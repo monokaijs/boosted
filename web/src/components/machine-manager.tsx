@@ -116,7 +116,7 @@ export function ConnectionsManager({ embedded = false, onClose }: { embedded?: b
 }
 
 export function ConnectionsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-w-xl"><DialogHeader><DialogTitle>Boosted machines</DialogTitle><DialogDescription>Each connection has its own account, projects, tasks, and session.</DialogDescription></DialogHeader><ConnectionsManager onClose={() => onOpenChange(false)} /></DialogContent></Dialog>;
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="connections-dialog max-w-xl"><DialogHeader><DialogTitle>Boosted machines</DialogTitle><DialogDescription>Each connection has its own account, projects, tasks, and session.</DialogDescription></DialogHeader><ConnectionsManager onClose={() => onOpenChange(false)} /></DialogContent></Dialog>;
 }
 
 export function MachineSwitcher({ children, onManage }: { children?: ReactNode; onManage?: () => void }) {
