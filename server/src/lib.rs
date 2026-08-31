@@ -1536,6 +1536,15 @@ fn codex_live_item_message(item: &Value, client_message_id: &str) -> Option<Code
     })
 }
 
+fn is_codex_thread_writer_conflict(error: &AppError) -> bool {
+    let message = match error {
+        AppError::Internal(message) | AppError::Conflict(message) => message,
+        _ => return false,
+    };
+    message.contains("already has an active writer")
+        || message.contains("already has a live local writer")
+}
+
 async fn read_codex_chat(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -1560,7 +1569,7 @@ async fn read_codex_chat(
 
 async fn send_codex_message(
     State(state): State<AppState>,
-    AxumPath(thread_id): AxumPath<String>,
+    AxumPath(requested_thread_id): AxumPath<String>,
     Json(input): Json<CodexMessageCreate>,
 ) -> AppResult<(StatusCode, Json<CodexTurnStart>)> {
     let message = input.message.trim().to_string();
@@ -1578,7 +1587,7 @@ async fn send_codex_message(
         .active_codex_turns
         .read()
         .await
-        .contains_key(&thread_id)
+        .contains_key(&requested_thread_id)
     {
         return Err(AppError::Conflict(
             "This Codex chat already has a running turn".into(),
@@ -1587,9 +1596,31 @@ async fn send_codex_message(
 
     let client = state.codex.client().await?;
     let mut notifications = client.subscribe();
-    let resumed = client
-        .request("thread/resume", json!({ "threadId": thread_id }))
-        .await?;
+    let (thread_id, resumed, forked_from_thread_id) = match client
+        .request("thread/resume", json!({ "threadId": requested_thread_id }))
+        .await
+    {
+        Ok(resumed) => (requested_thread_id, resumed, None),
+        Err(error) if is_codex_thread_writer_conflict(&error) => {
+            let forked = client
+                .request(
+                    "thread/fork",
+                    json!({
+                        "threadId": requested_thread_id,
+                        "threadSource": "boosted",
+                        "excludeTurns": true
+                    }),
+                )
+                .await?;
+            let forked_thread_id = forked
+                .pointer("/thread/id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AppError::Internal("Codex returned no forked thread id".into()))?
+                .to_string();
+            (forked_thread_id, forked, Some(requested_thread_id))
+        }
+        Err(error) => return Err(error),
+    };
     let codex_options = load_codex_options(&client).await?;
     let requested_model = input
         .model
@@ -1763,7 +1794,14 @@ async fn send_codex_message(
         }
     });
 
-    Ok((StatusCode::ACCEPTED, Json(CodexTurnStart { turn_id })))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(CodexTurnStart {
+            turn_id,
+            thread_id,
+            forked_from_thread_id,
+        }),
+    ))
 }
 
 async fn stop_codex_turn(
@@ -3397,6 +3435,18 @@ mod tests {
         let message = codex_live_item_message(&item, "client-message").expect("user message");
         assert_eq!(message.id, "client-message");
         assert_eq!(message.content, "Hello");
+    }
+    #[test]
+    fn recognizes_codex_thread_writer_conflicts() {
+        assert!(is_codex_thread_writer_conflict(&AppError::Internal(
+            "Codex: thread thread-a already has an active writer".into()
+        )));
+        assert!(is_codex_thread_writer_conflict(&AppError::Internal(
+            "Codex: thread thread-a already has a live local writer".into()
+        )));
+        assert!(!is_codex_thread_writer_conflict(&AppError::Internal(
+            "Codex app-server disconnected".into()
+        )));
     }
     #[test]
     fn codex_images_only_accept_supported_mime_types() {

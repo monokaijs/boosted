@@ -241,6 +241,9 @@ pub struct CodexAttachment {
 #[serde(rename_all = "camelCase")]
 pub struct CodexTurnStart {
     pub turn_id: String,
+    pub thread_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forked_from_thread_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

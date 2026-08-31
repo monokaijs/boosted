@@ -25,7 +25,7 @@ import { machinePreferenceKey } from "@/lib/store";
 const CodexChatPanel = lazy(() => import("@/components/panels/codex-chat-panel").then((module) => ({ default: module.CodexChatPanel })));
 
 type CodexChatPanelParams = { threadId: string };
-type OpenCodexChatDetail = CodexChatPanelParams & { title: string; split?: boolean };
+type OpenCodexChatDetail = CodexChatPanelParams & { title: string; split?: boolean; replaceThreadId?: string };
 type WorkspaceLayoutMode = "desktop" | "compact";
 
 const compactWorkspaceQuery = "(max-width: 900px)";
@@ -435,6 +435,7 @@ function openRemoteViewerPanel(api: DockviewApi, alwaysNew = false) {
 
 function openCodexChatPanel(api: DockviewApi, detail: OpenCodexChatDetail) {
   const panelId = `codex-chat:${detail.threadId}`;
+  const replacedPanel = detail.replaceThreadId ? api.getPanel(`codex-chat:${detail.replaceThreadId}`) : undefined;
   const existing = api.getPanel(panelId);
   if (existing) {
     existing.api.setTitle(detail.title);
@@ -443,10 +444,11 @@ function openCodexChatPanel(api: DockviewApi, detail: OpenCodexChatDetail) {
       if (reference && reference.api.group === existing.api.group) existing.api.moveTo({ group: reference.api.group, position: "right" });
     }
     existing.api.setActive();
+    if (replacedPanel && replacedPanel.id !== existing.id) replacedPanel.api.close();
     return;
   }
 
-  const reference = mainReference(api);
+  const reference = replacedPanel ?? mainReference(api);
   const toolReference = ["files", "plan", "git", "history"].map((id) => api.getPanel(id)).find(Boolean);
   const panel = api.addPanel<CodexChatPanelParams>({
     id: panelId,
@@ -461,6 +463,7 @@ function openCodexChatPanel(api: DockviewApi, detail: OpenCodexChatDetail) {
   api.getPanel("task")?.api.close();
   api.getPanel("taskboard")?.api.close();
   panel.api.setActive();
+  if (replacedPanel) replacedPanel.api.close();
 }
 
 export function Workspace({ workspaceId }: { workspaceId: string }) {

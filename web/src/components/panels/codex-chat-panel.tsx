@@ -17,7 +17,7 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { api } from "@/lib/api";
 import { appendCodexDelta, upsertCodexMessage } from "@/lib/codex-chat-state";
-import { machinePreferenceKey } from "@/lib/store";
+import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import type { CodexAccessOption, CodexAttachment, CodexChatMessage, CodexChatThread, CodexLiveEvent } from "@/lib/types";
 
 function UserMessage() {
@@ -95,6 +95,7 @@ function createClientMessageId() {
 
 function CodexTranscript({ thread }: { thread: CodexChatThread }) {
   const queryClient = useQueryClient();
+  const selectCodexChat = useAppStore((state) => state.selectCodexChat);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [messages, setMessages] = useState<CodexChatMessage[]>(thread.messages);
   const [isRunning, setIsRunning] = useState(thread.chat.status === "active");
@@ -172,15 +173,26 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
     setIsRunning(true);
     setError(undefined);
     try {
-      await api.sendCodexMessage(thread.chat.id, text, clientMessageId, { model, reasoningEffort, accessMode, attachmentIds: attachments.map((attachment) => attachment.id) });
+      const started = await api.sendCodexMessage(thread.chat.id, text, clientMessageId, { model, reasoningEffort, accessMode, attachmentIds: attachments.map((attachment) => attachment.id) });
       setAttachments([]);
+      if (started.threadId !== thread.chat.id) {
+        selectCodexChat(started.threadId);
+        void queryClient.invalidateQueries({ queryKey: ["codex-chats"] });
+        window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", {
+          detail: {
+            threadId: started.threadId,
+            title: thread.chat.title,
+            replaceThreadId: thread.chat.id,
+          },
+        }));
+      }
     } catch (cause) {
       setMessages((current) => current.filter((item) => item.id !== clientMessageId));
       setIsRunning(false);
       setError(cause instanceof Error ? cause.message : "Unable to send message.");
       throw cause;
     }
-  }, [accessMode, attachments, model, reasoningEffort, thread.chat.id]);
+  }, [accessMode, attachments, model, queryClient, reasoningEffort, selectCodexChat, thread.chat.id, thread.chat.title]);
 
   const uploadFiles = useCallback(async (incoming: File[]) => {
     const availableSlots = Math.max(0, 4 - attachments.length);

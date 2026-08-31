@@ -117,6 +117,8 @@ export interface CodexChatThread {
 
 export interface CodexTurnStart {
   turnId: string;
+  threadId: string;
+  forkedFromThreadId?: string;
 }
 
 export interface CodexAttachment {
