@@ -149,6 +149,8 @@ struct AppState {
     sequence: Arc<AtomicU64>,
     pending_inputs: Arc<RwLock<HashMap<String, PendingInput>>>,
     active_codex_turns: Arc<RwLock<HashMap<String, String>>>,
+    // A fresh thread is already live; resuming it before its rollout is persisted races app-server.
+    started_codex_threads: Arc<RwLock<HashMap<String, Value>>>,
     uploads_dir: PathBuf,
     worktrees_dir: PathBuf,
     updater: updater::ServerUpdater,
@@ -248,6 +250,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         sequence: Arc::new(AtomicU64::new(1)),
         pending_inputs: Arc::new(RwLock::new(HashMap::new())),
         active_codex_turns: Arc::new(RwLock::new(HashMap::new())),
+        started_codex_threads: Arc::new(RwLock::new(HashMap::new())),
         uploads_dir,
         worktrees_dir: config.data_dir.join("worktrees"),
         updater: updater::ServerUpdater::from_env(),
@@ -1350,7 +1353,13 @@ async fn create_codex_chat(
     let thread = result
         .get("thread")
         .ok_or_else(|| AppError::Internal("Codex returned no thread".into()))?;
-    Ok((StatusCode::CREATED, Json(codex_chat(thread))))
+    let chat = codex_chat(thread);
+    state
+        .started_codex_threads
+        .write()
+        .await
+        .insert(chat.id.clone(), result);
+    Ok((StatusCode::CREATED, Json(chat)))
 }
 
 fn codex_input_text(content: &[Value]) -> String {
@@ -1578,6 +1587,20 @@ fn is_codex_thread_writer_conflict(error: &AppError) -> bool {
         || message.contains("already has a live local writer")
 }
 
+async fn open_codex_thread_for_message<F, Fut>(
+    started: Option<Value>,
+    resume: F,
+) -> AppResult<Value>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = AppResult<Value>>,
+{
+    match started {
+        Some(started) => Ok(started),
+        None => resume().await,
+    }
+}
+
 async fn read_codex_chat(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -1629,31 +1652,40 @@ async fn send_codex_message(
 
     let client = state.codex.client().await?;
     let mut notifications = client.subscribe();
-    let (thread_id, resumed, forked_from_thread_id) = match client
-        .request("thread/resume", json!({ "threadId": requested_thread_id }))
+    let started = state
+        .started_codex_threads
+        .read()
         .await
-    {
-        Ok(resumed) => (requested_thread_id, resumed, None),
-        Err(error) if is_codex_thread_writer_conflict(&error) => {
-            let forked = client
-                .request(
-                    "thread/fork",
-                    json!({
-                        "threadId": requested_thread_id,
-                        "threadSource": "boosted",
-                        "excludeTurns": true
-                    }),
-                )
-                .await?;
-            let forked_thread_id = forked
-                .pointer("/thread/id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| AppError::Internal("Codex returned no forked thread id".into()))?
-                .to_string();
-            (forked_thread_id, forked, Some(requested_thread_id))
-        }
-        Err(error) => return Err(error),
-    };
+        .get(&requested_thread_id)
+        .cloned();
+    let resume_thread_id = requested_thread_id.clone();
+    let (thread_id, resumed, forked_from_thread_id) =
+        match open_codex_thread_for_message(started, || {
+            client.request("thread/resume", json!({ "threadId": resume_thread_id }))
+        })
+        .await
+        {
+            Ok(resumed) => (requested_thread_id.clone(), resumed, None),
+            Err(error) if is_codex_thread_writer_conflict(&error) => {
+                let forked = client
+                    .request(
+                        "thread/fork",
+                        json!({
+                            "threadId": requested_thread_id,
+                            "threadSource": "boosted",
+                            "excludeTurns": true
+                        }),
+                    )
+                    .await?;
+                let forked_thread_id = forked
+                    .pointer("/thread/id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| AppError::Internal("Codex returned no forked thread id".into()))?
+                    .to_string();
+                (forked_thread_id, forked, Some(requested_thread_id.clone()))
+            }
+            Err(error) => return Err(error),
+        };
     let codex_options = load_codex_options(&client).await?;
     let requested_model = input
         .model
@@ -1757,6 +1789,11 @@ async fn send_codex_message(
         .write()
         .await
         .insert(thread_id.clone(), turn_id.clone());
+    state
+        .started_codex_threads
+        .write()
+        .await
+        .remove(&requested_thread_id);
     state.emit(
         "codex.event",
         json!({ "threadId": thread_id, "turnId": turn_id, "method": "turn/started" }),
@@ -3480,6 +3517,45 @@ mod tests {
         assert!(!is_codex_thread_writer_conflict(&AppError::Internal(
             "Codex app-server disconnected".into()
         )));
+    }
+    #[tokio::test]
+    async fn newly_started_codex_thread_skips_resume() {
+        let started = json!({
+            "thread": {
+                "id": "thread-a",
+                "cwd": "/tmp/project",
+                "model": "gpt-5.6-sol"
+            }
+        });
+        let resume_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resume_called_in_request = resume_called.clone();
+
+        let opened = open_codex_thread_for_message(Some(started.clone()), move || async move {
+            resume_called_in_request.store(true, Ordering::Relaxed);
+            Err(AppError::Internal("resume should not be called".into()))
+        })
+        .await
+        .expect("started thread");
+
+        assert_eq!(opened, started);
+        assert!(!resume_called.load(Ordering::Relaxed));
+    }
+    #[tokio::test]
+    async fn stored_codex_thread_is_resumed() {
+        let resumed = json!({"thread": {"id": "thread-a"}});
+        let expected = resumed.clone();
+        let resume_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resume_called_in_request = resume_called.clone();
+
+        let opened = open_codex_thread_for_message(None, move || async move {
+            resume_called_in_request.store(true, Ordering::Relaxed);
+            Ok(resumed)
+        })
+        .await
+        .expect("resumed thread");
+
+        assert_eq!(opened, expected);
+        assert!(resume_called.load(Ordering::Relaxed));
     }
     #[test]
     fn codex_images_only_accept_supported_mime_types() {
