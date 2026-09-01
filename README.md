@@ -34,9 +34,9 @@ On macOS and Windows, administrators can enable **Settings → Global → Remote
 
 ## Issue integrations
 
-Install GitLab or Huly under **Settings → Integrations**. After connection details are entered, Boosted discovers the projects, groups, and workspaces visible to the supplied token and presents them as a searchable multi-select. GitLab discovery uses the instance's REST API and follows pagination, so paths or numeric IDs do not need to be copied from GitLab manually.
+Install GitLab or Huly under **Settings → Integrations**. After connection details are entered, Boosted discovers the accessible projects, groups, and workspaces and presents them as a searchable multi-select. GitLab discovery uses the supplied access token and the instance's REST API, following pagination so paths or numeric IDs do not need to be copied from GitLab manually.
 
-Huly remains connector-based so cloud and self-hosted deployments can use the same adapter. In addition to the existing issue request (`GET` with `workspace`, `project`, and `state=open`), a connector should support a bearer-authenticated `GET` with `action=discover` and return its accessible workspaces and projects:
+Huly remains connector-based so cloud and self-hosted deployments can use the same adapter. Boosted authenticates to the connector with the configured username and password using HTTP Basic authentication. In addition to the existing issue request (`GET` with `workspace`, `project`, and `state=open`), a connector should support a Basic-authenticated `GET` with `action=discover` and return its accessible workspaces and projects:
 
 ```json
 {

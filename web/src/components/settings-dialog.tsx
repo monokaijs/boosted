@@ -417,8 +417,16 @@ export function IntegrationsSettings() {
   const baseUrl = configString(config, "baseUrl", "https://gitlab.com").trim();
   const endpoint = configString(config, "endpoint").trim();
   const accessToken = configString(config, "token").trim();
-  const connectionKey = installing ? `${installing}\0${installing === "gitlab" ? baseUrl : endpoint}\0${accessToken}` : "";
-  const discoveryReady = Boolean(projectId && installing && accessToken && (installing === "gitlab" ? baseUrl : endpoint));
+  const hulyUsername = configString(config, "username").trim();
+  const hulyPassword = configString(config, "password");
+  const connectionKey = installing === "gitlab"
+    ? `${installing}\0${baseUrl}\0${accessToken}`
+    : installing === "huly"
+      ? `${installing}\0${endpoint}\0${hulyUsername}\0${hulyPassword}`
+      : "";
+  const discoveryReady = Boolean(projectId && installing && (installing === "gitlab"
+    ? baseUrl && accessToken
+    : endpoint && hulyUsername && hulyPassword.trim()));
 
   useEffect(() => {
     if (selectionConnectionKey.current !== connectionKey) {
@@ -441,7 +449,7 @@ export function IntegrationsSettings() {
       setDiscoveryLoading(true);
       const connectionConfig = installing === "gitlab"
         ? { baseUrl, token: accessToken }
-        : { endpoint, token: accessToken };
+        : { endpoint, username: hulyUsername, password: hulyPassword };
       void api.discoverIntegrationTargets(projectId, { provider: installing, config: connectionConfig }, controller.signal)
         .then((result) => {
           if (cancelled || generation !== discoveryGeneration.current) return;
@@ -462,17 +470,25 @@ export function IntegrationsSettings() {
       controller.abort();
       window.clearTimeout(timeout);
     };
-  }, [accessToken, baseUrl, connectionKey, discoveryReady, discoveryRefresh, endpoint, installing, projectId]);
+  }, [accessToken, baseUrl, connectionKey, discoveryReady, discoveryRefresh, endpoint, hulyPassword, hulyUsername, installing, projectId]);
 
   const save = useMutation({
     mutationFn: () => {
       if (!installing) throw new Error("Choose an integration provider");
-      const { targets: _targets, project: _project, workspace: _workspace, ...sharedConfig } = config;
+      const {
+        targets: _targets,
+        project: _project,
+        workspace: _workspace,
+        token: _token,
+        username: _username,
+        password: _password,
+        ...sharedConfig
+      } = config;
       const validGitlabTargets = gitlabTargets.filter((target) => target.identifier.trim());
       const validHulyTargets = hulyTargets.filter((target) => target.workspace.trim() && target.project.trim());
       const nextConfig = installing === "gitlab"
         ? { ...sharedConfig, baseUrl, token: accessToken, targets: validGitlabTargets.map((target) => ({ kind: target.kind, identifier: target.identifier.trim(), legacyExternalIds: Boolean(target.legacyExternalIds) })) }
-        : { ...sharedConfig, endpoint, token: accessToken, targets: validHulyTargets.map((target) => ({ workspace: target.workspace.trim(), project: target.project.trim(), legacyExternalIds: Boolean(target.legacyExternalIds) })) };
+        : { ...sharedConfig, endpoint, username: hulyUsername, password: hulyPassword, targets: validHulyTargets.map((target) => ({ workspace: target.workspace.trim(), project: target.project.trim(), legacyExternalIds: Boolean(target.legacyExternalIds) })) };
       const enabled = editingId ? integrations.data?.find((entry) => entry.id === editingId)?.enabled ?? true : true;
       const input = { name, config: nextConfig, enabled, syncIntervalMinutes: schedule ? Number(schedule) : undefined };
       return editingId
@@ -508,7 +524,9 @@ export function IntegrationsSettings() {
     setEditingId(undefined);
     setName(provider === "gitlab" ? "GitLab issues" : "Huly tasks");
     setSchedule("");
-    setConfig(provider === "gitlab" ? { baseUrl: "https://gitlab.com", token: "" } : { endpoint: "", token: "" });
+    setConfig(provider === "gitlab"
+      ? { baseUrl: "https://gitlab.com", token: "" }
+      : { endpoint: "", username: "", password: "" });
     setGitlabTargets([]);
     setHulyTargets([]);
   }
@@ -654,7 +672,12 @@ export function IntegrationsSettings() {
         {installing === "gitlab"
           ? <label className="grid gap-1.5"><span className="settings-label">GitLab URL</span><Input value={configString(config, "baseUrl", "https://gitlab.com")} onChange={(event) => setConfig((current) => ({ ...current, baseUrl: event.target.value }))} placeholder="https://gitlab.com" required /></label>
           : <label className="grid gap-1.5"><span className="settings-label">Connector endpoint</span><Input value={configString(config, "endpoint")} onChange={(event) => setConfig((current) => ({ ...current, endpoint: event.target.value }))} placeholder="https://connector.example.com/huly/issues" required /></label>}
-        <label className="grid gap-1.5"><span className="settings-label">Access token</span><Input type="password" value={configString(config, "token")} onChange={(event) => setConfig((current) => ({ ...current, token: event.target.value }))} required /></label>
+        {installing === "gitlab"
+          ? <label className="grid gap-1.5"><span className="settings-label">Access token</span><Input type="password" value={configString(config, "token")} onChange={(event) => setConfig((current) => ({ ...current, token: event.target.value }))} required /></label>
+          : <div className="grid gap-4 sm:grid-cols-2">
+            <label className="grid gap-1.5"><span className="settings-label">Username</span><Input value={configString(config, "username")} onChange={(event) => setConfig((current) => ({ ...current, username: event.target.value }))} autoComplete="username" required /></label>
+            <label className="grid gap-1.5"><span className="settings-label">Password</span><Input type="password" value={configString(config, "password")} onChange={(event) => setConfig((current) => ({ ...current, password: event.target.value }))} autoComplete="current-password" required /></label>
+          </div>}
         <div className="grid gap-2">
           <div className="flex items-start justify-between gap-3">
             <div><span className="settings-label">Explore targets</span><p className="mt-1 text-[10px] leading-4 text-muted-foreground">{installing === "gitlab" ? "Select projects or groups visible to this token. A group imports issues from its visible projects." : "Select projects from any workspace returned by the Huly connector."}</p></div>
@@ -662,7 +685,7 @@ export function IntegrationsSettings() {
           </div>
           <Input aria-label="Search integration targets" value={discoverySearch} onChange={(event) => setDiscoverySearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") event.preventDefault(); }} placeholder={installing === "gitlab" ? "Search groups and projects…" : "Search workspaces and projects…"} disabled={!discoveryReady} />
           <div className="max-h-80 overflow-y-auto rounded-lg border border-border bg-background/35 p-2">
-            {!discoveryReady && <p className="px-2 py-5 text-center text-[11px] text-muted-foreground">Enter the connection URL and access token to explore available targets.</p>}
+            {!discoveryReady && <p className="px-2 py-5 text-center text-[11px] text-muted-foreground">{installing === "gitlab" ? "Enter the connection URL and access token to explore available targets." : "Enter the connector endpoint, username, and password to explore available targets."}</p>}
             {discoveryReady && discoveryLoading && <p className="flex items-center justify-center gap-2 px-2 py-5 text-[11px] text-muted-foreground"><LoaderCircle className="size-3.5 animate-spin" />Exploring available targets…</p>}
             {discoveryReady && !discoveryLoading && !discoveryAttempted && !discoveryError && <p className="px-2 py-5 text-center text-[11px] text-muted-foreground">Preparing to explore available targets…</p>}
             {discoveryError && <div className="px-2 py-4 text-center"><p className="text-[11px] text-destructive">{discoveryError}</p>{selectedTargetCount > 0 && <p className="mt-1 text-[10px] text-muted-foreground">Your {selectedTargetCount} saved {selectedTargetCount === 1 ? "selection remains" : "selections remain"} selected and can be reviewed under advanced manual entry.</p>}<Button className="mt-2" type="button" variant="secondary" size="sm" onClick={refreshTargets}>Try again</Button></div>}

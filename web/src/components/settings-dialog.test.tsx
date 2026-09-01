@@ -147,9 +147,18 @@ describe("integration target discovery", () => {
     await screen.findByText("No integrations installed");
     fireEvent.click(screen.getByRole("button", { name: /^Huly/ }));
     fireEvent.change(screen.getByLabelText("Connector endpoint"), { target: { value: "https://huly.example/issues" } });
-    fireEvent.change(screen.getByLabelText("Access token"), { target: { value: "huly-token" } });
+    fireEvent.change(screen.getByLabelText("Username"), { target: { value: "huly-user" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "huly-password" } });
 
     expect(await screen.findByText("Acme workspace", {}, { timeout: 2_000 })).toBeInTheDocument();
+    expect(mocks.discoverIntegrationTargets).toHaveBeenLastCalledWith("workspace-a", {
+      provider: "huly",
+      config: {
+        endpoint: "https://huly.example/issues",
+        username: "huly-user",
+        password: "huly-password",
+      },
+    }, expect.any(AbortSignal));
     fireEvent.click(screen.getByRole("checkbox", { name: /Boosted/ }));
     fireEvent.click(screen.getByText("Advanced manual entry"));
     fireEvent.click(screen.getByRole("button", { name: "Add Huly project" }));
@@ -163,6 +172,12 @@ describe("integration target discovery", () => {
     fireEvent.click(install);
 
     await waitFor(() => expect(mocks.createIntegration).toHaveBeenCalledTimes(1));
+    expect(mocks.createIntegration.mock.calls[0][1].config).toMatchObject({
+      endpoint: "https://huly.example/issues",
+      username: "huly-user",
+      password: "huly-password",
+    });
+    expect(mocks.createIntegration.mock.calls[0][1].config).not.toHaveProperty("token");
     expect(mocks.createIntegration.mock.calls[0][1].config.targets).toEqual([
       { workspace: "acme", project: "BOOST", legacyExternalIds: false },
       { workspace: "other-workspace", project: "OTHER", legacyExternalIds: false },

@@ -167,11 +167,15 @@ fn gitlab_connection<'a>(config: &'a Value) -> AppResult<(Url, &'a str)> {
     Ok((url, config_string(config, "token")?))
 }
 
-fn huly_connection<'a>(config: &'a Value) -> AppResult<(Url, &'a str)> {
+fn huly_connection<'a>(config: &'a Value) -> AppResult<(Url, &'a str, &'a str)> {
     let endpoint = config_string(config, "endpoint")?;
     let url = Url::parse(endpoint)
         .map_err(|_| AppError::BadRequest("Huly connector endpoint is invalid".into()))?;
-    Ok((url, config_string(config, "token")?))
+    Ok((
+        url,
+        config_string(config, "username")?,
+        config_string(config, "password")?,
+    ))
 }
 
 fn target_string<'a>(target: &'a Value, key: &str) -> AppResult<&'a str> {
@@ -711,10 +715,10 @@ fn parse_huly_discovery_targets(value: &Value) -> AppResult<Vec<DiscoveredIntegr
 }
 
 async fn discover_huly(config: &Value) -> AppResult<IntegrationDiscoveryResult> {
-    let (endpoint, token) = huly_connection(config)?;
+    let (endpoint, username, password) = huly_connection(config)?;
     let response = integration_client()?
         .get(endpoint)
-        .bearer_auth(token)
+        .basic_auth(username, Some(password))
         .query(&[("action", "discover")])
         .send()
         .await
@@ -887,16 +891,15 @@ async fn fetch_gitlab(integration: &Integration) -> AppResult<Vec<ImportedIssue>
 async fn fetch_huly(integration: &Integration) -> AppResult<Vec<ImportedIssue>> {
     // Huly exposes issues through its official SDK. This provider calls a small Huly
     // connector endpoint so self-hosted and cloud deployments can use the same adapter.
-    let endpoint = config_string(&integration.config, "endpoint")?;
-    let token = config_string(&integration.config, "token")?;
+    let (endpoint, username, password) = huly_connection(&integration.config)?;
     let targets = huly_targets(&integration.config)?;
     let client = integration_client()?;
     let mut imported = Vec::new();
 
     for target in targets {
         let response = client
-            .get(endpoint)
-            .bearer_auth(token)
+            .get(endpoint.clone())
+            .basic_auth(username, Some(password))
             .query(&[
                 ("workspace", target.workspace.as_str()),
                 ("project", target.project.as_str()),
@@ -1039,10 +1042,24 @@ mod tests {
         if headers
             .get(AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
-            != Some("Bearer huly-token")
-            || query.get("action").map(String::as_str) != Some("discover")
+            != Some("Basic aHVseS11c2VyOmh1bHktcGFzc3dvcmQ=")
         {
             return StatusCode::UNAUTHORIZED.into_response();
+        }
+        if query.get("action").map(String::as_str) != Some("discover") {
+            if query.get("workspace").map(String::as_str) == Some("acme")
+                && query.get("project").map(String::as_str) == Some("BOOST")
+                && query.get("state").map(String::as_str) == Some("open")
+            {
+                return Json(json!([{
+                    "id": "issue-1",
+                    "identifier": "BOOST-1",
+                    "title": "Huly issue",
+                    "description": "Imported with basic auth"
+                }]))
+                .into_response();
+            }
+            return StatusCode::BAD_REQUEST.into_response();
         }
         Json(json!({
             "workspaces": [{
@@ -1103,6 +1120,32 @@ mod tests {
                 project: "BOOST".into(),
                 legacy_external_ids: true,
             }]
+        );
+    }
+
+    #[test]
+    fn huly_requires_username_and_password_credentials() {
+        assert!(
+            huly_connection(&json!({
+                "endpoint": "https://connector.example/huly",
+                "username": "huly-user",
+                "password": "huly-password"
+            }))
+            .is_ok()
+        );
+        assert!(
+            huly_connection(&json!({
+                "endpoint": "https://connector.example/huly",
+                "token": "legacy-token"
+            }))
+            .is_err()
+        );
+        assert!(
+            huly_connection(&json!({
+                "endpoint": "https://connector.example/huly",
+                "username": "huly-user"
+            }))
+            .is_err()
         );
     }
 
@@ -1215,7 +1258,11 @@ mod tests {
 
         let huly = discover(
             "huly",
-            &json!({"endpoint":format!("http://{address}/huly"),"token":"huly-token"}),
+            &json!({
+                "endpoint":format!("http://{address}/huly"),
+                "username":"huly-user",
+                "password":"huly-password"
+            }),
         )
         .await
         .unwrap();
@@ -1245,6 +1292,32 @@ mod tests {
         assert_eq!(issues.len(), 2);
         assert_eq!(issues[0].external_id, "issue:101");
         assert_eq!(issues[1].external_id, "issue:102");
+
+        let huly_integration = Integration {
+            id: "huly-integration".into(),
+            project_id: "project".into(),
+            provider: "huly".into(),
+            name: "Huly".into(),
+            config: json!({
+                "endpoint":format!("http://{address}/huly"),
+                "username":"huly-user",
+                "password":"huly-password",
+                "targets":[{"workspace":"acme","project":"BOOST"}]
+            }),
+            enabled: true,
+            sync_interval_minutes: None,
+            last_synced_at: None,
+            last_sync_status: None,
+            last_sync_error: None,
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        };
+        let huly_issues = fetch_issues(&huly_integration).await.unwrap();
+        assert_eq!(huly_issues.len(), 1);
+        assert_eq!(
+            huly_issues[0].external_id,
+            "workspace:acme:project:BOOST:BOOST-1"
+        );
 
         server.abort();
     }
