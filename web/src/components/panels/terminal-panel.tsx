@@ -14,11 +14,6 @@ export function TerminalPanel() {
   const [terminalId, setTerminalId] = useState<string>();
   const [error, setError] = useState<string>();
   useEffect(() => { setTerminalId(undefined); setError(undefined); }, [projectId]);
-  useEffect(() => {
-    const restart = () => { setTerminalId(undefined); setError(undefined); };
-    window.addEventListener(newTerminalEvent, restart);
-    return () => window.removeEventListener(newTerminalEvent, restart);
-  }, []);
 
   useEffect(() => {
     if (!projectId || terminalId) return;

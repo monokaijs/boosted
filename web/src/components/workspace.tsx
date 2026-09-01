@@ -113,7 +113,7 @@ function panelSnapshot(panel: IDockviewPanel): ClosedPanel {
   const state = panel.toJSON();
   return {
     id: panel.id,
-    component: state.contentComponent ?? (isCodexChatPanelId(panel.id) ? "codexChat" : isRemoteViewerPanelId(panel.id) ? "remoteViewer" : panel.id),
+    component: state.contentComponent ?? (isCodexChatPanelId(panel.id) ? "codexChat" : isRemoteViewerPanelId(panel.id) ? "remoteViewer" : isTerminalPanelId(panel.id) ? "terminal" : panel.id),
     title: panel.title,
     params: panel.params ? { ...panel.params } : undefined,
     groupId: panel.group.id,
@@ -199,7 +199,7 @@ function splitPanel(panel: IDockviewPanel, position: "right" | "bottom") {
 }
 
 function WorkspaceTab({ api, containerApi }: IDockviewPanelHeaderProps) {
-  const panelId = (api.id.startsWith("codex-chat:") ? "codexChat" : api.id.startsWith("remote-viewer:") ? "remoteViewer" : api.id) as keyof typeof components;
+  const panelId = (isCodexChatPanelId(api.id) ? "codexChat" : isRemoteViewerPanelId(api.id) ? "remoteViewer" : isTerminalPanelId(api.id) ? "terminal" : api.id) as keyof typeof components;
   const [title, setTitle] = useState(api.title ?? titles[panelId] ?? api.id);
   const [, setClosedPanelHistoryVersion] = useState(0);
   const [compact, setCompact] = useState(() => workspaceLayoutMode() === "compact");
@@ -323,7 +323,7 @@ function WorkspaceTab({ api, containerApi }: IDockviewPanelHeaderProps) {
 
 function WorkspaceHeaderActions({ activePanel }: IDockviewHeaderActionsProps) {
   const viewer = activePanel?.id.startsWith("remote-viewer:");
-  if (activePanel?.id !== "terminal" && !viewer) return null;
+  if (!activePanel || (!isTerminalPanelId(activePanel.id) && !viewer)) return null;
   return (
     <Button
       className="mr-1"
@@ -344,6 +344,10 @@ function isCodexChatPanelId(id: string) {
 
 function isRemoteViewerPanelId(id: string) {
   return id.startsWith("remote-viewer:");
+}
+
+function isTerminalPanelId(id: string) {
+  return id === "terminal" || id.startsWith("terminal:");
 }
 
 function mainReference(api: DockviewApi, excludeId?: string) {
@@ -372,7 +376,7 @@ function addPanel(api: DockviewApi, id: keyof typeof components) {
     }
     closeCodexChatPanels(api);
   };
-  const existing = api.getPanel(id);
+  const existing = id === "terminal" ? api.panels.find((panel) => isTerminalPanelId(panel.id)) : api.getPanel(id);
   if (existing) {
     if (primaryIds.includes(id)) closeOtherPrimaryPanels();
     existing.api.setActive();
@@ -404,6 +408,25 @@ function addPanel(api: DockviewApi, id: keyof typeof components) {
   });
   if (primaryIds.includes(id)) closeOtherPrimaryPanels();
   panel.api.setActive();
+}
+
+function openNewTerminalPanel(api: DockviewApi) {
+  const terminalReference = api.activePanel && isTerminalPanelId(api.activePanel.id)
+    ? api.activePanel
+    : api.panels.find((panel) => isTerminalPanelId(panel.id));
+  const centerReference = mainReference(api);
+  const toolReference = ["files", "plan", "git", "history"].map((id) => api.getPanel(id)).find(Boolean);
+  api.addPanel({
+    id: `terminal:${crypto.randomUUID()}`,
+    component: "terminal",
+    title: titles.terminal,
+    position: terminalReference
+      ? { referencePanel: terminalReference.id, direction: "within" }
+      : workspaceLayoutMode() === "compact"
+        ? (api.activePanel ?? centerReference ?? toolReference) ? { referencePanel: (api.activePanel ?? centerReference ?? toolReference)!.id, direction: "within" } : undefined
+        : (centerReference ?? toolReference) ? { referencePanel: (centerReference ?? toolReference)!.id, direction: "below" } : undefined,
+    ...(!terminalReference && workspaceLayoutMode() === "desktop" ? { initialHeight: 220 } : {}),
+  }).api.setActive();
 }
 
 function openRemoteViewerPanel(api: DockviewApi, alwaysNew = false) {
@@ -548,6 +571,12 @@ export function Workspace({ workspaceId }: { workspaceId: string }) {
     const listener = () => { if (apiRef.current) openRemoteViewerPanel(apiRef.current, true); };
     window.addEventListener(newRemoteViewerEvent, listener);
     return () => window.removeEventListener(newRemoteViewerEvent, listener);
+  }, []);
+
+  useEffect(() => {
+    const listener = () => { if (apiRef.current) openNewTerminalPanel(apiRef.current); };
+    window.addEventListener(newTerminalEvent, listener);
+    return () => window.removeEventListener(newTerminalEvent, listener);
   }, []);
 
   useEffect(() => {

@@ -1,6 +1,6 @@
-import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
+import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Files, Folder, FolderOpen, FolderPlus, GitBranch, GitCommitHorizontal, KanbanSquare, ListTodo, LogOut, MessagesSquare, MonitorPlay, Settings, TerminalSquare } from "lucide-react";
+import { Files, Folder, FolderOpen, FolderPlus, GitBranch, GitCommitHorizontal, KanbanSquare, ListTodo, LogOut, MessagesSquare, MonitorPlay, Settings, TerminalSquare, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ForcePasswordDialog, NewTaskDialog, OpenProjectDialog } from "@/components/create-dialogs";
@@ -12,7 +12,7 @@ import { Workspace } from "@/components/workspace";
 import { api, setToken } from "@/lib/api";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import { useNotificationNavigation } from "@/hooks/use-notification-navigation";
-import { useAppStore } from "@/lib/store";
+import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import { formatUpdateProgress, useAppUpdateState } from "@/lib/updater";
 import { cn } from "@/lib/utils";
 
@@ -29,6 +29,20 @@ const defaultDrawerWidth = 292;
 const minimumDrawerWidth = 220;
 const maximumDrawerWidth = 520;
 const drawerWidthKey = "boosted.drawer.width";
+const closedWorkspacesKey = "boosted.workspaces.closed.v1";
+
+function readClosedWorkspaceIds() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(machinePreferenceKey(closedWorkspacesKey)) ?? "[]");
+    return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistClosedWorkspaceIds(ids: string[]) {
+  localStorage.setItem(machinePreferenceKey(closedWorkspacesKey), JSON.stringify(ids));
+}
 
 function clampDrawerWidth(width: number) {
   const viewportLimit = typeof window === "undefined" ? maximumDrawerWidth : Math.floor(window.innerWidth * 0.48);
@@ -61,6 +75,7 @@ export function AppShell() {
   const [newTaskDialogOpen, setNewTaskDialogOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectionsOpen, setConnectionsOpen] = useState(false);
+  const [closedWorkspaceIds, setClosedWorkspaceIds] = useState(readClosedWorkspaceIds);
   const selectedProjectId = useAppStore((state) => state.selectedProjectId);
   const selectedTaskId = useAppStore((state) => state.selectedTaskId);
   const drawerOpen = useAppStore((state) => state.taskDrawerOpen);
@@ -68,13 +83,23 @@ export function AppShell() {
   const selectProject = useAppStore((state) => state.selectProject);
   const selectTask = useAppStore((state) => state.selectTask);
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
+  const openProjects = useMemo(() => projects.data?.filter((project) => !closedWorkspaceIds.includes(project.id)) ?? [], [closedWorkspaceIds, projects.data]);
   const tasks = useQuery({ queryKey: ["tasks", selectedProjectId], queryFn: () => api.tasks(selectedProjectId), enabled: Boolean(selectedProjectId) });
   const selectedTask = tasks.data?.find((task) => task.id === selectedTaskId);
 
   useEffect(() => {
-    if (!selectedProjectId && projects.data?.[0]) selectProject(projects.data[0]);
-    else if (selectedProjectId && projects.data && !projects.data.some((project) => project.id === selectedProjectId)) selectProject(projects.data[0]);
-  }, [projects.data, selectProject, selectedProjectId]);
+    if (!selectedProjectId && openProjects[0]) selectProject(openProjects[0]);
+    else if (selectedProjectId && projects.data && !projects.data.some((project) => project.id === selectedProjectId)) selectProject(openProjects[0]);
+  }, [openProjects, projects.data, selectProject, selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProjectId || !closedWorkspaceIds.includes(selectedProjectId)) return;
+    setClosedWorkspaceIds((current) => {
+      const next = current.filter((id) => id !== selectedProjectId);
+      persistClosedWorkspaceIds(next);
+      return next;
+    });
+  }, [closedWorkspaceIds, selectedProjectId]);
 
   useEffect(() => {
     if (selectedTaskId && tasks.data && !tasks.data.some((task) => task.id === selectedTaskId)) selectTask(undefined);
@@ -106,6 +131,17 @@ export function AppShell() {
 
   function startNewTask() {
     setNewTaskDialogOpen(true);
+  }
+
+  function closeWorkspace(projectId: string) {
+    const currentIndex = openProjects.findIndex((project) => project.id === projectId);
+    const nextProject = openProjects[currentIndex + 1] ?? openProjects[currentIndex - 1];
+    if (selectedProjectId === projectId) selectProject(nextProject);
+    setClosedWorkspaceIds((current) => {
+      const next = current.includes(projectId) ? current : [...current, projectId];
+      persistClosedWorkspaceIds(next);
+      return next;
+    });
   }
 
   function toggleDrawer(view: "tasks" | "chats") {
@@ -177,20 +213,20 @@ export function AppShell() {
         </div>
         <div className="app-project-divider mx-2 h-4 w-px bg-border" />
         <div className="app-workspace-tabs" role="tablist" aria-label="Open workspaces">
-          {!projects.data?.length && <span className="app-no-workspace">No workspace</span>}
-          {projects.data?.map((project) => (
-            <button
-              type="button"
+          {!openProjects.length && <span className="app-no-workspace">No workspace</span>}
+          {openProjects.map((project) => (
+            <div
               key={project.id}
+              role="presentation"
               className={cn("app-workspace-tab", selectedProjectId === project.id && "app-workspace-tab-active")}
-              role="tab"
-              aria-selected={selectedProjectId === project.id}
               title={project.repoPath}
-              onClick={() => selectProject(project)}
             >
-              <Folder />
-              <span>{project.name}</span>
-            </button>
+              <button type="button" className="app-workspace-tab-select" role="tab" aria-selected={selectedProjectId === project.id} onClick={() => selectProject(project)}>
+                <Folder />
+                <span>{project.name}</span>
+              </button>
+              <button type="button" className="app-workspace-tab-close" aria-label={`Close ${project.name} workspace`} title={`Close ${project.name} workspace`} onClick={() => closeWorkspace(project.id)}><X /></button>
+            </div>
           ))}
         </div>
         <Button className="app-open-project" variant="ghost" size="icon-sm" title="Open project folder" onClick={() => setProjectDialogOpen(true)}><FolderOpen /></Button>

@@ -9,7 +9,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadio
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import { useAppStore } from "@/lib/store";
+import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import { taskStatusMeta } from "@/lib/status";
 import type { CodexAccessOption, TaskEvent } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -77,9 +77,12 @@ function chatTitle(prompt: string) {
 
 export function NewChatPanel() {
   const [prompt, setPrompt] = useState("");
-  const [model, setModel] = useState("");
-  const [reasoningEffort, setReasoningEffort] = useState("");
-  const [accessMode, setAccessMode] = useState<CodexAccessOption["id"]>("fullAccess");
+  const [model, setModel] = useState(() => localStorage.getItem(machinePreferenceKey("boosted.codex.model")) ?? "");
+  const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem(machinePreferenceKey("boosted.codex.effort")) ?? "");
+  const [accessMode, setAccessMode] = useState<CodexAccessOption["id"]>(() => {
+    const stored = localStorage.getItem(machinePreferenceKey("boosted.codex.access"));
+    return stored === "workspaceWrite" || stored === "readOnly" ? stored : "fullAccess";
+  });
   const projectId = useAppStore((state) => state.selectedProjectId);
   const selectProject = useAppStore((state) => state.selectProject);
   const selectCodexChat = useAppStore((state) => state.selectCodexChat);
@@ -98,11 +101,38 @@ export function NewChatPanel() {
     if (nextModel && nextModel.model !== model) {
       setModel(nextModel.model);
       setReasoningEffort(nextModel.defaultReasoningEffort);
+      localStorage.setItem(machinePreferenceKey("boosted.codex.model"), nextModel.model);
+      localStorage.setItem(machinePreferenceKey("boosted.codex.effort"), nextModel.defaultReasoningEffort);
     } else if (nextModel && !nextModel.supportedReasoningEfforts.some((effort) => effort.id === reasoningEffort)) {
       setReasoningEffort(nextModel.defaultReasoningEffort);
+      localStorage.setItem(machinePreferenceKey("boosted.codex.effort"), nextModel.defaultReasoningEffort);
     }
-    if (!codexOptions.data.accessModes.some((entry) => entry.id === accessMode)) setAccessMode(codexOptions.data.defaultAccessMode);
+    if (!codexOptions.data.accessModes.some((entry) => entry.id === accessMode)) {
+      setAccessMode(codexOptions.data.defaultAccessMode);
+      localStorage.setItem(machinePreferenceKey("boosted.codex.access"), codexOptions.data.defaultAccessMode);
+    }
   }, [accessMode, codexOptions.data, model, reasoningEffort]);
+
+  function selectModel(value: string) {
+    const next = codexOptions.data?.models.find((entry) => entry.model === value);
+    setModel(value);
+    localStorage.setItem(machinePreferenceKey("boosted.codex.model"), value);
+    if (next) {
+      setReasoningEffort(next.defaultReasoningEffort);
+      localStorage.setItem(machinePreferenceKey("boosted.codex.effort"), next.defaultReasoningEffort);
+    }
+  }
+
+  function selectReasoningEffort(value: string) {
+    setReasoningEffort(value);
+    localStorage.setItem(machinePreferenceKey("boosted.codex.effort"), value);
+  }
+
+  function selectAccessMode(value: string) {
+    const next = value as CodexAccessOption["id"];
+    setAccessMode(next);
+    localStorage.setItem(machinePreferenceKey("boosted.codex.access"), next);
+  }
 
   const create = useMutation({
     mutationFn: async () => {
@@ -160,17 +190,17 @@ export function NewChatPanel() {
                   <DropdownMenuTrigger asChild><button type="button" className="new-task-option new-task-model-option"><Bot className="size-3.5" /><span className="max-w-40 truncate">{selectedModel?.displayName ?? (codexOptions.isLoading ? "Loading Codex…" : "Codex")}</span><ChevronDown /></button></DropdownMenuTrigger>
                   <DropdownMenuContent align="start" className="w-80 max-w-[calc(100vw-1rem)]">
                     <DropdownMenuLabel>Model</DropdownMenuLabel>
-                    <DropdownMenuRadioGroup value={model} onValueChange={(value) => { const next = codexOptions.data?.models.find((entry) => entry.model === value); setModel(value); if (next) setReasoningEffort(next.defaultReasoningEffort); }}>
+                    <DropdownMenuRadioGroup value={model} onValueChange={selectModel}>
                       {codexOptions.data?.models.map((entry) => <DropdownMenuRadioItem key={entry.id} value={entry.model}><span className="min-w-0"><span className="block font-medium text-foreground">{entry.displayName}</span>{entry.description && <span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">{entry.description}</span>}</span></DropdownMenuRadioItem>)}
                     </DropdownMenuRadioGroup>
-                    {selectedModel && <><DropdownMenuSeparator /><DropdownMenuLabel>Reasoning effort</DropdownMenuLabel><DropdownMenuRadioGroup value={reasoningEffort} onValueChange={setReasoningEffort}>{selectedModel.supportedReasoningEfforts.map((effort) => <DropdownMenuRadioItem key={effort.id} value={effort.id}><span><span className="block capitalize text-foreground">{effort.id}</span>{effort.description && <span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">{effort.description}</span>}</span></DropdownMenuRadioItem>)}</DropdownMenuRadioGroup></>}
+                    {selectedModel && <><DropdownMenuSeparator /><DropdownMenuLabel>Reasoning effort</DropdownMenuLabel><DropdownMenuRadioGroup value={reasoningEffort} onValueChange={selectReasoningEffort}>{selectedModel.supportedReasoningEfforts.map((effort) => <DropdownMenuRadioItem key={effort.id} value={effort.id}><span><span className="block capitalize text-foreground">{effort.id}</span>{effort.description && <span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">{effort.description}</span>}</span></DropdownMenuRadioItem>)}</DropdownMenuRadioGroup></>}
                   </DropdownMenuContent>
                 </DropdownMenu>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild><button type="button" className="new-task-option new-task-access-option ml-auto"><span>{selectedAccess?.label ?? "Full access"}</span><ChevronDown /></button></DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-72 max-w-[calc(100vw-1rem)]">
                     <DropdownMenuLabel>Codex access</DropdownMenuLabel>
-                    <DropdownMenuRadioGroup value={accessMode} onValueChange={(value) => setAccessMode(value as CodexAccessOption["id"])}>
+                    <DropdownMenuRadioGroup value={accessMode} onValueChange={selectAccessMode}>
                       {codexOptions.data?.accessModes.map((entry) => <DropdownMenuRadioItem key={entry.id} value={entry.id}><span><span className="block font-medium text-foreground">{entry.label}</span><span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">{entry.description}</span></span></DropdownMenuRadioItem>)}
                     </DropdownMenuRadioGroup>
                   </DropdownMenuContent>

@@ -145,7 +145,12 @@ export function OpenProjectDialog({ open, onOpenChange }: { open: boolean; onOpe
   const folders = useQuery({ queryKey: ["folder-browser", folderPath], queryFn: () => api.browseFolders(folderPath), enabled: open, retry: false });
   const openPath = selected?.isGitRepository ? selected.path : folders.data?.isGitRepository ? folders.data.path : undefined;
   const openProject = useMutation({
-    mutationFn: () => api.openProject(openPath!),
+    mutationFn: async () => {
+      const registered = await queryClient.fetchQuery({ queryKey: ["projects"], queryFn: api.projects });
+      const normalizedPath = openPath!.replace(/[\\/]+$/, "");
+      return registered.find((project) => project.repoPath.replace(/[\\/]+$/, "") === normalizedPath)
+        ?? api.openProject(openPath!);
+    },
     onSuccess: (project) => { selectProject(project); void queryClient.invalidateQueries({ queryKey: ["projects"] }); onOpenChange(false); },
   });
 
