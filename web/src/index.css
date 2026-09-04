@@ -1491,6 +1491,14 @@ select {
   }
 }
 
+@media (max-width: 900px) and (display-mode: standalone) {
+  #root {
+    /* iOS standalone can leave its browser-chrome allowance below 100dvh. */
+    height: 100vh;
+    height: 100lvh;
+  }
+}
+
 @media (max-width: 640px) {
   .workspace {
     padding: 0;
