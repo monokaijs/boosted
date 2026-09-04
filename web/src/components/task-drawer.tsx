@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Filter, GitBranch, Plus, Search } from "lucide-react";
+import { Filter, GitBranch, Plus, Search, X } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,7 +10,7 @@ import { taskStatusMeta } from "@/lib/status";
 import type { Task } from "@/lib/types";
 import { cn, relativeTime } from "@/lib/utils";
 
-type Props = { onNewTask: () => void };
+type Props = { onNewTask: () => void; onClose: () => void };
 
 function TaskRow({ task }: { task: Task }) {
   const selectedTaskId = useAppStore((state) => state.selectedTaskId);
@@ -41,7 +41,7 @@ function TaskRow({ task }: { task: Task }) {
   );
 }
 
-export function TaskDrawer({ onNewTask }: Props) {
+export function TaskDrawer({ onNewTask, onClose }: Props) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "active" | "done">("all");
   const projectId = useAppStore((state) => state.selectedProjectId);
@@ -60,15 +60,19 @@ export function TaskDrawer({ onNewTask }: Props) {
   const done = filtered.filter((task) => task.status === "done");
 
   return (
-    <aside className="task-drawer">
+    <aside className="task-drawer" aria-label="Tasks">
       <div className="flex h-full min-w-0 flex-col">
-        <div className="flex items-center gap-1.5 p-2">
+        <div className="drawer-mobile-header">
+          <span><strong>Tasks</strong><small>{filtered.length} {filtered.length === 1 ? "task" : "tasks"}</small></span>
+          <div><Button size="sm" onClick={onNewTask} disabled={!project}><Plus />New</Button><Button variant="ghost" size="icon" aria-label="Close tasks" onClick={onClose}><X /></Button></div>
+        </div>
+        <div className="task-drawer-search flex items-center gap-1.5 p-2">
           <div className="relative flex-1"><Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input className="bg-background/35 pl-7" placeholder="Search tasks" value={search} onChange={(event) => setSearch(event.target.value)} /></div>
           <Button variant={filter === "all" ? "ghost" : "secondary"} size="icon" title={`Showing ${filter} tasks`} onClick={() => setFilter(filter === "all" ? "active" : filter === "active" ? "done" : "all")}><Filter /></Button>
         </div>
-        <div className="flex items-center justify-between px-3 py-2">
+        <div className="task-drawer-project flex items-center justify-between px-3 py-2">
           <div className="min-w-0"><p className="truncate text-xs font-medium">{project?.name ?? "No project"}</p>{project && <p className="mt-0.5 flex items-center gap-1 truncate text-[10px] text-muted-foreground"><GitBranch className="size-3" />{project.defaultBranch}</p>}</div>
-          <Button size="sm" variant="ghost" onClick={onNewTask} disabled={!project}><Plus /> Task</Button>
+          <Button className="task-drawer-desktop-action" size="sm" variant="ghost" onClick={onNewTask} disabled={!project}><Plus /> Task</Button>
         </div>
         <ScrollArea className="min-h-0 flex-1 px-2 pb-3">
           {!project && <div className="px-3 py-12 text-center text-xs text-muted-foreground">Open a Git repository folder to create tasks.</div>}

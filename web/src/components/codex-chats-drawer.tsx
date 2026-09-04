@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Columns2, LoaderCircle, MessageSquare, Pin, Plus, RefreshCw, Search } from "lucide-react";
+import { Columns2, LoaderCircle, MessageSquare, Pin, Plus, RefreshCw, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -33,7 +33,7 @@ function ChatRow({ chat }: { chat: CodexChat }) {
   );
 }
 
-export function CodexChatsDrawer() {
+export function CodexChatsDrawer({ onClose }: { onClose: () => void }) {
   const [search, setSearch] = useState("");
   const projectId = useAppStore((state) => state.selectedProjectId);
   const selectedChatId = useAppStore((state) => state.selectedCodexChatId);
@@ -54,9 +54,13 @@ export function CodexChatsDrawer() {
   }, [chats.data, search]);
 
   return (
-    <aside className="task-drawer">
+    <aside className="task-drawer" aria-label="Codex chats">
       <div className="flex h-full min-w-0 flex-col">
-        <div className="flex h-11 items-center justify-between px-3">
+        <div className="drawer-mobile-header">
+          <span><strong>Codex chats</strong><small>{chats.data?.length ?? 0} {(chats.data?.length ?? 0) === 1 ? "chat" : "chats"}</small></span>
+          <div><Button size="sm" disabled={!project} onClick={() => { onClose(); window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: "chat" })); }}><Plus />New</Button><Button variant="ghost" size="icon" aria-label="Close Codex chats" onClick={onClose}><X /></Button></div>
+        </div>
+        <div className="drawer-desktop-header flex h-11 items-center justify-between px-3">
           <p className="min-w-0 truncate text-xs font-semibold">Codex chats</p>
           <div className="flex items-center gap-1"><Button variant="ghost" size="sm" disabled={!project} onClick={() => window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: "chat" }))}><Plus />Chat</Button><Button variant="ghost" size="icon-sm" title="Refresh chats" disabled={!project} onClick={() => void chats.refetch()}><RefreshCw className={chats.isFetching ? "animate-spin" : ""} /></Button></div>
         </div>

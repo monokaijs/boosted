@@ -1,7 +1,8 @@
 import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Files, Folder, FolderOpen, FolderPlus, GitBranch, GitCommitHorizontal, KanbanSquare, ListTodo, LogOut, MessagesSquare, MonitorPlay, Settings, TerminalSquare, X } from "lucide-react";
+import { Check, ChevronDown, Ellipsis, Files, Folder, FolderOpen, FolderPlus, GitBranch, GitCommitHorizontal, KanbanSquare, ListTodo, LogOut, MessagesSquare, MonitorPlay, Server, Settings, TerminalSquare, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ForcePasswordDialog, NewTaskDialog, OpenProjectDialog } from "@/components/create-dialogs";
 import { SettingsDialog } from "@/components/settings-dialog";
@@ -75,6 +76,7 @@ export function AppShell() {
   const [newTaskDialogOpen, setNewTaskDialogOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectionsOpen, setConnectionsOpen] = useState(false);
+  const [activePanelId, setActivePanelId] = useState("chat");
   const [closedWorkspaceIds, setClosedWorkspaceIds] = useState(readClosedWorkspaceIds);
   const selectedProjectId = useAppStore((state) => state.selectedProjectId);
   const selectedTaskId = useAppStore((state) => state.selectedTaskId);
@@ -86,6 +88,8 @@ export function AppShell() {
   const openProjects = useMemo(() => projects.data?.filter((project) => !closedWorkspaceIds.includes(project.id)) ?? [], [closedWorkspaceIds, projects.data]);
   const tasks = useQuery({ queryKey: ["tasks", selectedProjectId], queryFn: () => api.tasks(selectedProjectId), enabled: Boolean(selectedProjectId) });
   const selectedTask = tasks.data?.find((task) => task.id === selectedTaskId);
+  const mobileTasksActive = drawerOpen ? drawerView === "tasks" : activePanelId === "task";
+  const mobileChatsActive = drawerOpen ? drawerView === "chats" : activePanelId === "chat" || activePanelId === "codexChat";
 
   useEffect(() => {
     if (!selectedProjectId && openProjects[0]) selectProject(openProjects[0]);
@@ -126,6 +130,15 @@ export function AppShell() {
   }, [setDrawerOpen]);
 
   useEffect(() => {
+    const updateActivePanel = (event: Event) => {
+      const panelId = (event as CustomEvent<string | undefined>).detail;
+      if (panelId) setActivePanelId(panelId);
+    };
+    window.addEventListener("boosted:active-panel", updateActivePanel);
+    return () => window.removeEventListener("boosted:active-panel", updateActivePanel);
+  }, []);
+
+  useEffect(() => {
     localStorage.setItem(drawerWidthKey, String(drawerWidth));
   }, [drawerWidth]);
 
@@ -151,6 +164,11 @@ export function AppShell() {
     }
     setDrawerView(view);
     setDrawerOpen(true);
+  }
+
+  function showPanel(id: string) {
+    setDrawerOpen(false);
+    openPanel(id);
   }
 
   async function logout() {
@@ -203,7 +221,7 @@ export function AppShell() {
       data-drawer-resizing={drawerResizing ? "true" : "false"}
       style={{ "--drawer-width": `${drawerWidth}px` } as CSSProperties}
     >
-      <header className="app-topbar">
+      <header className="app-topbar app-desktop-topbar">
         <div className="app-brand flex h-full w-12 items-center justify-center"><img src="/favicon.svg" alt="Boosted" className="size-6" /></div>
         <MachineSwitcher onManage={() => setConnectionsOpen(true)} />
         <div className="app-machine-divider mx-1 h-4 w-px bg-border" />
@@ -239,6 +257,29 @@ export function AppShell() {
         </div>
       </header>
 
+      <header className="app-mobile-topbar">
+        <MachineSwitcher onManage={() => setConnectionsOpen(true)}>
+          <Button className="mobile-machine-button" variant="ghost" size="icon" aria-label="Switch machine" title="Switch machine"><Server /></Button>
+        </MachineSwitcher>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button type="button" className="mobile-workspace-switcher" aria-label={`Switch workspace${selectedProjectId ? `, current workspace ${openProjects.find((project) => project.id === selectedProjectId)?.name ?? ""}` : ""}`}>
+              <span className="mobile-workspace-icon"><Folder /></span>
+              <span className="mobile-workspace-copy"><span>Workspace</span><strong>{openProjects.find((project) => project.id === selectedProjectId)?.name ?? "No workspace"}</strong></span>
+              <ChevronDown />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-72 max-w-[calc(100vw-1rem)]">
+            <DropdownMenuLabel>Open workspaces</DropdownMenuLabel>
+            {openProjects.map((project) => <DropdownMenuItem key={project.id} onClick={() => selectProject(project)}><Folder /><span className="min-w-0 flex-1 truncate">{project.name}</span>{selectedProjectId === project.id && <Check />}</DropdownMenuItem>)}
+            {!openProjects.length && <DropdownMenuItem disabled>No workspaces open</DropdownMenuItem>}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => setProjectDialogOpen(true)}><FolderPlus />Open workspace</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <Button className="mobile-settings-button" variant="ghost" size="icon" aria-label="Settings" title="Settings" onClick={() => setSettingsOpen(true)}><Settings /></Button>
+      </header>
+
       <nav className="app-rail" aria-label="Workspace panels">
         {railPanels.map(({ id, label, icon: Icon }) => (
           <Tooltip key={id}><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label={label} onClick={() => openPanel(id)}><Icon /></Button></TooltipTrigger><TooltipContent side="left">{label}</TooltipContent></Tooltip>
@@ -248,8 +289,31 @@ export function AppShell() {
         </div>
       </nav>
 
+      <nav className="mobile-bottom-nav" aria-label="Primary navigation">
+        <button type="button" className="mobile-nav-item" data-active={mobileTasksActive} aria-current={mobileTasksActive ? "page" : undefined} onClick={() => toggleDrawer("tasks")}><ListTodo /><span>Tasks</span></button>
+        <button type="button" className="mobile-nav-item" data-active={mobileChatsActive} aria-current={mobileChatsActive ? "page" : undefined} onClick={() => toggleDrawer("chats")}><MessagesSquare /><span>Chats</span></button>
+        <button type="button" className="mobile-nav-item" data-active={!drawerOpen && activePanelId === "taskboard"} aria-current={!drawerOpen && activePanelId === "taskboard" ? "page" : undefined} onClick={() => showPanel("taskboard")}><KanbanSquare /><span>Board</span></button>
+        <button type="button" className="mobile-nav-item" data-active={!drawerOpen && (activePanelId === "files" || activePanelId === "editor")} aria-current={!drawerOpen && (activePanelId === "files" || activePanelId === "editor") ? "page" : undefined} onClick={() => showPanel("files")}><Files /><span>Files</span></button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button type="button" className="mobile-nav-item" data-active={!drawerOpen && ["git", "history", "terminal", "remoteViewer"].includes(activePanelId)} aria-label="More workspace tools"><Ellipsis /><span>More</span></button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" side="top" sideOffset={8} className="w-64 max-w-[calc(100vw-1rem)]">
+            <DropdownMenuLabel>Workspace tools</DropdownMenuLabel>
+            <DropdownMenuItem onClick={() => showPanel("git")}><GitBranch />Git changes{activePanelId === "git" && <Check className="ml-auto" />}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => showPanel("history")}><GitCommitHorizontal />Git history{activePanelId === "history" && <Check className="ml-auto" />}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => showPanel("terminal")}><TerminalSquare />Terminal{activePanelId === "terminal" && <Check className="ml-auto" />}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => showPanel("remoteViewer")}><MonitorPlay />Remote Viewer{activePanelId === "remoteViewer" && <Check className="ml-auto" />}</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => setProjectDialogOpen(true)}><FolderPlus />Open workspace</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setSettingsOpen(true)}><Settings />Settings</DropdownMenuItem>
+            <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => void logout()}><LogOut />Sign out</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </nav>
+
       {drawerOpen && <button type="button" className="app-drawer-scrim" aria-label="Close tasks and chats panel" onClick={() => setDrawerOpen(false)} />}
-      {drawerView === "tasks" ? <TaskDrawer onNewTask={startNewTask} /> : <CodexChatsDrawer />}
+      {drawerView === "tasks" ? <TaskDrawer onNewTask={startNewTask} onClose={() => setDrawerOpen(false)} /> : <CodexChatsDrawer onClose={() => setDrawerOpen(false)} />}
       {drawerOpen && (
         <div
           className="drawer-resize-handle"

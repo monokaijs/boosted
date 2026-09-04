@@ -536,6 +536,10 @@ export function Workspace({ workspaceId }: { workspaceId: string }) {
       if (panel) localStorage.setItem(key, panel.id);
       else localStorage.removeItem(key);
       window.dispatchEvent(new CustomEvent(activeRemoteViewerEvent, { detail: panel && isRemoteViewerPanelId(panel.id) ? panel.id : undefined }));
+      const panelId = panel
+        ? isCodexChatPanelId(panel.id) ? "codexChat" : isRemoteViewerPanelId(panel.id) ? "remoteViewer" : isTerminalPanelId(panel.id) ? "terminal" : panel.id
+        : undefined;
+      window.dispatchEvent(new CustomEvent("boosted:active-panel", { detail: panelId }));
     });
     restoreLayout(event.api, mode);
   }, [restoreLayout, workspaceId]);
