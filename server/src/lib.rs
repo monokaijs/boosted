@@ -20,7 +20,7 @@ use axum::{
         WebSocketUpgrade,
         ws::{Message as WsMessage, WebSocket},
     },
-    http::{HeaderMap, Method, StatusCode},
+    http::{HeaderMap, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
@@ -49,7 +49,7 @@ use tower_http::{
 use uuid::Uuid;
 
 #[cfg(feature = "embedded-web")]
-use axum::http::{Uri, header};
+use axum::http::Uri;
 #[cfg(feature = "embedded-web")]
 use rust_embed::Embed;
 
@@ -362,6 +362,7 @@ fn router(
             get(list_codex_chats).post(create_codex_chat),
         )
         .route("/codex/chats/{id}", get(read_codex_chat))
+        .route("/codex/chats/{id}/file", get(download_codex_file))
         .route("/codex/chats/{id}/messages", post(send_codex_message))
         .route("/codex/chats/{id}/stop", post(stop_codex_turn))
         .route("/folders", get(browse_folders))
@@ -409,6 +410,7 @@ fn router(
         .route("/tasks/{id}/status", put(update_task_status))
         .route("/tasks/{id}/files", get(list_files))
         .route("/tasks/{id}/file", get(read_file).put(write_file))
+        .route("/tasks/{id}/artifact", get(download_task_artifact))
         .route("/tasks/{id}/git/status", get(git_status))
         .route("/tasks/{id}/git/diff", get(git_diff))
         .route("/tasks/{id}/git/stage", post(git_stage))
@@ -428,6 +430,7 @@ fn router(
             CorsLayer::new()
                 .allow_origin(Any)
                 .allow_headers(Any)
+                .expose_headers([header::CONTENT_DISPOSITION, header::CONTENT_TYPE])
                 .allow_methods([
                     Method::GET,
                     Method::POST,
@@ -1623,6 +1626,28 @@ async fn read_codex_chat(
     }))
 }
 
+async fn download_codex_file(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<FileQuery>,
+) -> AppResult<Response> {
+    let result = state
+        .codex
+        .client()
+        .await?
+        .request(
+            "thread/read",
+            json!({ "threadId": id, "includeTurns": false }),
+        )
+        .await?;
+    let cwd = result
+        .pointer("/thread/cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+        .ok_or_else(|| AppError::NotFound("chat working directory not found".into()))?;
+    download_workspace_file(Path::new(cwd), &query.path).await
+}
+
 async fn send_codex_message(
     State(state): State<AppState>,
     AxumPath(requested_thread_id): AxumPath<String>,
@@ -2673,6 +2698,115 @@ async fn read_file(
         files::read(Path::new(&task.worktree_path), &query.path).await?,
     ))
 }
+async fn download_task_artifact(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<FileQuery>,
+) -> AppResult<Response> {
+    let task = state.db.task(&id).await?;
+    download_workspace_file(Path::new(&task.worktree_path), &query.path).await
+}
+
+async fn download_workspace_file(root: &Path, reference: &str) -> AppResult<Response> {
+    let path = workspace_file_path(root, reference)?;
+    let bytes = tokio::fs::read(&path).await?;
+    let content_type = mime_guess::from_path(&path).first_or_octet_stream();
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artifact");
+    let safe_name = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii()
+                && !character.is_ascii_control()
+                && !matches!(character, '"' | '\\')
+            {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type.as_ref())
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("inline; filename=\"{safe_name}\""),
+        )
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .body(Body::from(bytes))
+        .map_err(|error| AppError::Internal(error.to_string()))
+}
+
+fn workspace_file_path(root: &Path, reference: &str) -> AppResult<PathBuf> {
+    let root = root.canonicalize()?;
+    let reference = reference.trim();
+    if reference.is_empty() || reference.contains('\0') {
+        return Err(AppError::BadRequest("file path is required".into()));
+    }
+
+    match resolve_workspace_file(&root, reference) {
+        Err(AppError::NotFound(_)) => {
+            if let Some(without_location) = strip_source_location(reference) {
+                resolve_workspace_file(&root, without_location)
+            } else {
+                Err(AppError::NotFound("file not found".into()))
+            }
+        }
+        result => result,
+    }
+}
+
+fn resolve_workspace_file(root: &Path, reference: &str) -> AppResult<PathBuf> {
+    let reference = reference.strip_prefix("file://").unwrap_or(reference);
+    #[cfg(target_os = "windows")]
+    let reference = if reference.starts_with('/')
+        && reference
+            .as_bytes()
+            .get(2)
+            .is_some_and(|character| *character == b':')
+    {
+        &reference[1..]
+    } else {
+        reference
+    };
+    let requested = Path::new(reference);
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        root.join(requested)
+    };
+    let path = candidate
+        .canonicalize()
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => AppError::NotFound("file not found".into()),
+            _ => AppError::Internal(error.to_string()),
+        })?;
+    if !path.starts_with(root) {
+        return Err(AppError::Forbidden);
+    }
+    if !path.is_file() {
+        return Err(AppError::BadRequest("path is not a file".into()));
+    }
+    Ok(path)
+}
+
+fn strip_source_location(reference: &str) -> Option<&str> {
+    if let Some((path, fragment)) = reference.rsplit_once('#') {
+        let lines = fragment.strip_prefix('L').unwrap_or(fragment);
+        if !lines.is_empty()
+            && lines.split("-L").all(|line| {
+                !line.is_empty() && line.chars().all(|character| character.is_ascii_digit())
+            })
+        {
+            return Some(path);
+        }
+    }
+    let (path, line) = reference.rsplit_once(':')?;
+    (!line.is_empty() && line.chars().all(|character| character.is_ascii_digit())).then_some(path)
+}
 async fn write_file(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
@@ -3575,6 +3709,56 @@ mod tests {
         );
         assert!(codex_attachment_path(root.path(), "../attachment.png").is_err());
         assert!(codex_attachment_path(root.path(), "not-a-uuid.png").is_err());
+    }
+    #[test]
+    fn workspace_file_references_are_confined_and_accept_source_locations() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let outside = tempfile::tempdir().expect("outside directory");
+        let artifact = workspace.path().join("report.pdf");
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&artifact, b"report").expect("artifact fixture");
+        std::fs::write(&secret, b"secret").expect("outside fixture");
+        let canonical_artifact = artifact.canonicalize().expect("canonical artifact");
+
+        assert_eq!(
+            workspace_file_path(workspace.path(), "report.pdf").expect("relative artifact"),
+            canonical_artifact
+        );
+        assert_eq!(
+            workspace_file_path(workspace.path(), &format!("{}:12", artifact.display()))
+                .expect("absolute artifact with line"),
+            canonical_artifact
+        );
+        assert_eq!(
+            workspace_file_path(workspace.path(), &format!("{}#L4-L8", artifact.display()))
+                .expect("absolute artifact with line range"),
+            canonical_artifact
+        );
+        assert!(matches!(
+            workspace_file_path(workspace.path(), secret.to_str().expect("UTF-8 path")),
+            Err(AppError::Forbidden)
+        ));
+        let traversal = format!(
+            "../{}/secret.txt",
+            outside
+                .path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("outside directory name")
+        );
+        assert!(matches!(
+            workspace_file_path(workspace.path(), &traversal),
+            Err(AppError::Forbidden)
+        ));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&secret, workspace.path().join("linked-secret.txt"))
+                .expect("outside symlink fixture");
+            assert!(matches!(
+                workspace_file_path(workspace.path(), "linked-secret.txt"),
+                Err(AppError::Forbidden)
+            ));
+        }
     }
     #[test]
     fn ip_allowlist_is_public_when_empty_and_always_accepts_localhost() {

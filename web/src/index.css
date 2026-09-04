@@ -492,6 +492,8 @@ select {
 .aui-markdown code { border-radius: 4px; background: var(--surface-input); padding: 0.12rem 0.3rem; font-family: var(--font-mono); font-size: 0.9em; }
 .aui-markdown pre { max-width: 100%; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-input); padding: 0.75rem; }
 .aui-markdown pre code { background: transparent; padding: 0; }
+.aui-markdown img { display: block; max-width: 100%; max-height: 32rem; border: 1px solid var(--border); border-radius: 8px; object-fit: contain; }
+.workspace-file-image-status { display: inline-flex; min-height: 2rem; max-width: 100%; align-items: center; border: 1px dashed var(--border); border-radius: 6px; background: var(--surface-input); padding: 0.4rem 0.6rem; font-size: 0.75rem; }
 .aui-markdown table { display: block; max-width: 100%; overflow: auto; border-collapse: collapse; }
 .aui-markdown th,
 .aui-markdown td { border: 1px solid var(--border); padding: 0.35rem 0.55rem; text-align: left; }

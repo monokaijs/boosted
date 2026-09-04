@@ -40,6 +40,24 @@ export class ApiError extends Error {
   }
 }
 
+export type WorkspaceFileScope =
+  | { kind: "codex"; id: string }
+  | { kind: "task"; id: string };
+
+function responseFilename(header: string | null) {
+  const match = header?.match(/filename="?([^";]+)"?/i);
+  return match?.[1];
+}
+
+function saveBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
 function json(method: string, body?: unknown): RequestInit {
   return { method, body: body === undefined ? undefined : JSON.stringify(body) };
 }
@@ -84,6 +102,39 @@ export function createBoostedApiClient(options: ApiClientOptions) {
       throw new ApiError(response.status, body.error ?? body.message ?? `Request failed (${response.status})`);
     }
     return body as T;
+  }
+
+  async function requestBlob(path: string): Promise<{ blob: Blob; name?: string }> {
+    const headers = new Headers({ Accept: "*/*" });
+    const token = options.getToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const controller = new AbortController();
+    activeRequests.add(controller);
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}/api/v1${path}`, { headers, signal: controller.signal });
+    } catch (error) {
+      if (error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError")) {
+        throw new ApiError(408, "Connection timed out.");
+      }
+      throw new ApiError(0, error instanceof Error ? error.message : "Unable to reach the Boosted server.");
+    } finally {
+      activeRequests.delete(controller);
+    }
+    if (!response.ok) {
+      if (response.status === 401) await options.onUnauthorized?.();
+      const body = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, body.error ?? body.message ?? `Request failed (${response.status})`);
+    }
+    return {
+      blob: await response.blob(),
+      name: responseFilename(response.headers.get("Content-Disposition")),
+    };
+  }
+
+  function workspaceFilePath(scope: WorkspaceFileScope, path: string) {
+    const resource = scope.kind === "codex" ? `/codex/chats/${encodeURIComponent(scope.id)}/file` : `/tasks/${encodeURIComponent(scope.id)}/artifact`;
+    return `${resource}?path=${encodeURIComponent(path)}`;
   }
 
   const client = {
@@ -138,6 +189,11 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   codexChat: (id: string) => request<CodexChatThread>(`/codex/chats/${encodeURIComponent(id)}`),
   sendCodexMessage: (id: string, message: string, clientMessageId: string, options: { model: string; reasoningEffort: string; accessMode: CodexAccessOption["id"]; attachmentIds?: string[] }) => request<CodexTurnStart>(`/codex/chats/${encodeURIComponent(id)}/messages`, json("POST", { message, clientMessageId, ...options })),
   stopCodexTurn: (id: string) => request<void>(`/codex/chats/${encodeURIComponent(id)}/stop`, json("POST")),
+  workspaceFile: (scope: WorkspaceFileScope, path: string) => requestBlob(workspaceFilePath(scope, path)),
+  downloadWorkspaceFile: async (scope: WorkspaceFileScope, path: string, fallbackName: string) => {
+    const file = await requestBlob(workspaceFilePath(scope, path));
+    saveBlob(file.blob, file.name ?? fallbackName);
+  },
   browseFolders: (path?: string) => request<FolderBrowseResponse>(`/folders${path ? `?path=${encodeURIComponent(path)}` : ""}`),
   projects: () => request<Project[]>("/projects"),
   openProject: (repoPath: string) => {
@@ -160,25 +216,8 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   task: (id: string) => request<Task>(`/tasks/${id}`),
   createTask: (projectId: string, title: string, description: string, options: { baseBranch?: string; model?: string; reasoningEffort?: string; accessMode?: CodexAccessOption["id"]; attachmentIds?: string[] } = {}) => request<Task>("/tasks", json("POST", { projectId, title, description, ...options })),
   downloadTaskAttachment: async (taskId: string, attachment: TaskAttachment) => {
-    const headers = new Headers();
-    const token = options.getToken();
-    if (token) headers.set("Authorization", `Bearer ${token}`);
-    const controller = new AbortController();
-    activeRequests.add(controller);
-    let response: Response;
-    try {
-      response = await fetch(`${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(attachment.id)}`, { headers, signal: controller.signal });
-    } finally {
-      activeRequests.delete(controller);
-    }
-    if (!response.ok) {
-      if (response.status === 401) await options.onUnauthorized?.();
-      throw new ApiError(response.status, "Unable to download attachment");
-    }
-    const url = URL.createObjectURL(await response.blob());
-    const link = document.createElement("a");
-    link.href = url; link.download = attachment.name; link.click();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+    const file = await requestBlob(`/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(attachment.id)}`);
+    saveBlob(file.blob, file.name ?? attachment.name);
   },
   integrations: (projectId: string) => request<Integration[]>(`/projects/${projectId}/integrations`),
   discoverIntegrationTargets: (projectId: string, input: { provider: Integration["provider"]; config: Record<string, unknown> }, signal?: AbortSignal) => request<IntegrationDiscoveryResult>(`/projects/${projectId}/integrations/discover`, { ...json("POST", input), signal }),

@@ -4,6 +4,7 @@ import { Bot, Check, CheckCircle2, ChevronDown, ChevronRight, CircleStop, Downlo
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Badge } from "@/components/ui/badge";
+import { WorkspaceFileProvider, workspaceFileMarkdownComponents, workspaceMarkdownUrlTransform } from "@/components/assistant-ui/workspace-file-markdown";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -64,7 +65,11 @@ function TimelineEvent({ event }: { event: TaskEvent }) {
       <div className={cn("mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border", user ? "border-primary/20 bg-primary/10 text-primary" : error ? "border-destructive/25 bg-destructive/10 text-destructive" : "border-border bg-secondary text-muted-foreground")}>{user ? <UserRound className="size-3.5" /> : <Bot className="size-3.5" />}</div>
       <div className={cn("min-w-0 max-w-[84%]", user && "text-right")}>
         <div className="mb-1 text-[10px] text-muted-foreground">{user ? event.actorName ?? "You" : error ? "Error" : "Codex"}</div>
-        <div className={cn("selectable-text whitespace-pre-wrap text-[13px] leading-5", user && "inline-block rounded-lg bg-primary/10 px-3 py-2 text-left", error && "text-destructive")}>{textPayload(event)}</div>
+        <div className={cn("selectable-text text-[13px] leading-5", user && "inline-block whitespace-pre-wrap rounded-lg bg-primary/10 px-3 py-2 text-left", error && "whitespace-pre-wrap text-destructive", !user && !error && "aui-markdown")}>
+          {!user && !error
+            ? <ReactMarkdown components={workspaceFileMarkdownComponents} remarkPlugins={[remarkGfm]} urlTransform={workspaceMarkdownUrlTransform}>{textPayload(event)}</ReactMarkdown>
+            : textPayload(event)}
+        </div>
       </div>
     </article>
   );
@@ -260,7 +265,8 @@ export function TaskPanel() {
   }
 
   return (
-    <div className="panel-root">
+    <WorkspaceFileProvider scope={{ kind: "task", id: selectedTaskId }}>
+      <div className="panel-root">
       {task.data && (
         <section className="border-b border-border bg-background/20 px-4 py-3">
           <div className="mx-auto flex max-w-3xl items-start gap-3">
@@ -280,7 +286,7 @@ export function TaskPanel() {
       )}
       <ScrollArea className="chat-scroll min-h-0 flex-1 px-4">
         <div className="mx-auto max-w-3xl py-3">
-          {task.data && <section className="mb-4 rounded-lg border border-border bg-background/25 p-4"><div className="aui-markdown text-xs"><ReactMarkdown remarkPlugins={[remarkGfm]}>{task.data.description}</ReactMarkdown></div>{task.data.source && <a className="mt-3 inline-flex items-center gap-1.5 text-[11px] capitalize text-primary hover:underline" href={task.data.source.externalUrl} target="_blank" rel="noreferrer">Imported from {task.data.source.provider} · {task.data.source.externalId}<ExternalLink className="size-3" /></a>}{task.data.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{task.data.attachments.map((attachment) => <Button key={attachment.id} type="button" variant="secondary" size="sm" onClick={() => void api.downloadTaskAttachment(task.data!.id, attachment)}><Paperclip />{attachment.name}<Download /></Button>)}</div>}</section>}
+          {task.data && <section className="mb-4 rounded-lg border border-border bg-background/25 p-4"><div className="aui-markdown text-xs"><ReactMarkdown components={workspaceFileMarkdownComponents} remarkPlugins={[remarkGfm]} urlTransform={workspaceMarkdownUrlTransform}>{task.data.description}</ReactMarkdown></div>{task.data.source && <a className="mt-3 inline-flex items-center gap-1.5 text-[11px] capitalize text-primary hover:underline" href={task.data.source.externalUrl} target="_blank" rel="noreferrer">Imported from {task.data.source.provider} · {task.data.source.externalId}<ExternalLink className="size-3" /></a>}{task.data.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{task.data.attachments.map((attachment) => <Button key={attachment.id} type="button" variant="secondary" size="sm" onClick={() => void api.downloadTaskAttachment(task.data!.id, attachment)}><Paperclip />{attachment.name}<Download /></Button>)}</div>}</section>}
           {task.data?.status === "queued" && <div className="mb-4 grid gap-2 rounded-lg border border-border bg-background/25 p-4"><div className="flex items-center gap-2 text-xs font-medium"><Sparkles className="size-4 text-primary" />Ready to plan</div><p className="text-xs leading-5 text-muted-foreground">Start planning to let Codex inspect the repository and turn this task into concrete steps. You can answer any follow-up questions here.</p></div>}
           {task.data?.plan && <section className="mb-4 rounded-lg border border-border bg-background/25 p-3"><div className="mb-2 flex items-center gap-2"><ListChecks className="size-4 text-muted-foreground" /><h2 className="text-xs font-medium">Plan · revision {task.data.plan.revision}</h2>{task.data.status === "ready" && <Button className="ml-auto" size="sm" onClick={() => approve.mutate()} disabled={approve.isPending}>{approve.isPending ? <LoaderCircle className="animate-spin" /> : <Play />}Approve and run</Button>}</div>{task.data.plan.explanation && <p className="mb-2 text-xs leading-5 text-muted-foreground">{task.data.plan.explanation}</p>}<ol className="grid gap-1.5">{task.data.plan.steps.map((step, index) => <li key={`${step.step}-${index}`} className="flex gap-2 text-xs leading-5"><span className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border border-border text-[9px] text-muted-foreground">{step.status === "completed" ? <Check className="size-2.5 text-success" /> : index + 1}</span><span className={cn(step.status === "completed" && "text-muted-foreground line-through")}>{step.step}</span></li>)}</ol>{approve.error && <p className="mt-2 text-xs text-destructive">{approve.error.message}</p>}</section>}
           <div className="mb-1 flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground"><span>Task chat</span><span className="h-px flex-1 bg-border" /></div>
@@ -303,6 +309,7 @@ export function TaskPanel() {
         </div>
         {send.error && <p className="mx-auto mt-1.5 max-w-3xl text-xs text-destructive">{send.error.message}</p>}
       </form>
-    </div>
+      </div>
+    </WorkspaceFileProvider>
   );
 }

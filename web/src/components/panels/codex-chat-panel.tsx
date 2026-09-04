@@ -13,6 +13,7 @@ import {
 } from "@assistant-ui/react";
 import { ArrowDown, Bot, ChevronDown, ChevronRight, Image, LoaderCircle, MessageSquareText, Plus, Send, Square, UserRound, Wrench, X } from "lucide-react";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
+import { WorkspaceFileProvider } from "@/components/assistant-ui/workspace-file-markdown";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { api } from "@/lib/api";
@@ -289,9 +290,10 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
   });
 
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <ThreadPrimitive.Root className="min-h-0 flex-1">
-        <ThreadPrimitive.Viewport className="codex-thread-viewport relative flex h-full flex-col overflow-y-auto px-4">
+    <WorkspaceFileProvider scope={{ kind: "codex", id: thread.chat.id }}>
+      <AssistantRuntimeProvider runtime={runtime}>
+        <ThreadPrimitive.Root className="min-h-0 flex-1">
+          <ThreadPrimitive.Viewport className="codex-thread-viewport relative flex h-full flex-col overflow-y-auto px-4">
           <ThreadPrimitive.Empty><div className="empty-state min-h-48 flex-1"><MessageSquareText className="size-8" /><p>Send a message to continue this Codex chat.</p></div></ThreadPrimitive.Empty>
           <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
           <ThreadPrimitive.ViewportFooter className="codex-composer-footer sticky bottom-0 z-10 mt-auto bg-[var(--surface)] pb-3 pt-2">
@@ -323,9 +325,10 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
               </ComposerPrimitive.Root>
             </div>
           </ThreadPrimitive.ViewportFooter>
-        </ThreadPrimitive.Viewport>
-      </ThreadPrimitive.Root>
-    </AssistantRuntimeProvider>
+          </ThreadPrimitive.Viewport>
+        </ThreadPrimitive.Root>
+      </AssistantRuntimeProvider>
+    </WorkspaceFileProvider>
   );
 }
 

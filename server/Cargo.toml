@@ -20,7 +20,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 dirs-next = "2.0"
 futures-util = "0.3"
-mime_guess = { version = "2", optional = true }
+mime_guess = "2"
 portable-pty = "0.9"
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -57,7 +57,7 @@ scap-vc = "0.1.0"
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [features]
-embedded-web = ["dep:mime_guess", "dep:rust-embed"]
+embedded-web = ["dep:rust-embed"]
 # The legacy Objective-C macros used by Cocoa probe this cfg internally.
 cargo-clippy = []
 

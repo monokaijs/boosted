@@ -98,6 +98,26 @@ describe("Boosted API client", () => {
     expect(api.webSocket("/remote-viewer/sessions/viewer-a/control")).toBe("wss://boosted.example/api/v1/remote-viewer/sessions/viewer-a/control");
   });
 
+  it("fetches generated chat files through the authenticated remote server", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(new Blob(["report"]), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/pdf",
+        "Content-Disposition": "inline; filename=\"report.pdf\"",
+      },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = client("https://boosted.example", { token: "machine-token" });
+
+    const file = await api.workspaceFile({ kind: "codex", id: "thread/a" }, "/srv/workspace/report final.pdf");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://boosted.example/api/v1/codex/chats/thread%2Fa/file?path=%2Fsrv%2Fworkspace%2Freport%20final.pdf");
+    expect((init?.headers as Headers).get("Authorization")).toBe("Bearer machine-token");
+    expect(file.name).toBe("report.pdf");
+    expect(file.blob.type).toBe("application/pdf");
+  });
+
   it("aborts this client's outstanding requests when its workspace is disposed", async () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_input, init) => new Promise((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
