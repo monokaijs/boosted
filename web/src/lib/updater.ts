@@ -129,7 +129,7 @@ async function waitForUpdatedServer(targetVersion: string) {
       const health = await api.health();
       if (health.version === targetVersion) return;
     } catch {
-      // The managed launcher briefly takes the listener down while changing binaries.
+      // The server briefly takes its listener down while replacing and restarting itself.
     }
     await new Promise((resolve) => window.setTimeout(resolve, 1_000));
   }

@@ -207,6 +207,30 @@ impl AppState {
 }
 
 pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    run_with_updater(
+        config,
+        updater::ServerUpdater::disabled(
+            "Server updates for the desktop application are handled by the desktop updater.",
+        ),
+    )
+    .await
+}
+
+pub async fn run_headless(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    updater::wait_for_restart_delay().await;
+    if let Some(status) = updater::launch_cached_release().await? {
+        if status.success() {
+            return Ok(());
+        }
+        return Err(format!("cached Boosted release exited with {status}").into());
+    }
+    run_with_updater(config, updater::ServerUpdater::from_env()).await
+}
+
+async fn run_with_updater(
+    config: Config,
+    updater: updater::ServerUpdater,
+) -> Result<(), Box<dyn std::error::Error>> {
     tokio::fs::create_dir_all(&config.data_dir).await?;
     let db = Database::connect(&config.data_dir.join("boosted.sqlite3")).await?;
     let global_settings = db.global_settings().await?;
@@ -253,7 +277,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         started_codex_threads: Arc::new(RwLock::new(HashMap::new())),
         uploads_dir,
         worktrees_dir: config.data_dir.join("worktrees"),
-        updater: updater::ServerUpdater::from_env(),
+        updater,
     };
     let scheduler_state = state.clone();
     tokio::spawn(async move {
@@ -609,9 +633,12 @@ async fn install_update(
     ensure_admin(&user)?;
     let status = state.updater.install().await?;
     if status.restart_pending {
-        tokio::spawn(async {
+        let restart = state.updater.restart_action()?;
+        tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(750)).await;
-            std::process::exit(updater::restart_exit_code());
+            if let Err(error) = restart.execute() {
+                tracing::error!(%error, "could not restart after installing the server update");
+            }
         });
     }
     Ok(Json(status))

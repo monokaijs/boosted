@@ -56,6 +56,35 @@ describe("Boosted API client", () => {
     expect((init?.headers as Headers).get("Authorization")).toBe("Bearer machine-token");
   });
 
+  it("uses the authenticated server self-update endpoints", async () => {
+    const status = {
+      supported: true,
+      currentVersion: "0.3.5",
+      targetVersion: "0.3.6",
+      updateAvailable: true,
+      restartPending: false,
+    };
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(status), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = client("https://boosted.example", { token: "machine-token" });
+
+    await api.updateStatus();
+    await api.checkForUpdate();
+    await api.installUpdate();
+
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.method ?? "GET"])).toEqual([
+      ["https://boosted.example/api/v1/updates/status", "GET"],
+      ["https://boosted.example/api/v1/updates/check", "POST"],
+      ["https://boosted.example/api/v1/updates/install", "POST"],
+    ]);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect((init?.headers as Headers).get("Authorization")).toBe("Bearer machine-token");
+    }
+  });
+
   it("posts draft integration credentials to the workspace discovery endpoint", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ targets: [] }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
