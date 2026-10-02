@@ -1,345 +1,223 @@
-import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Check, ChevronDown, Ellipsis, Files, Folder, FolderOpen, FolderPlus, GitBranch, GitCommitHorizontal, KanbanSquare, ListTodo, LogOut, MessagesSquare, MonitorPlay, Server, Settings, TerminalSquare, X } from "lucide-react";
+import { ArrowLeft, Bot, ChevronDown, FolderOpen, LogOut, MessagesSquare, Ellipsis, Files, GitBranch, ListChecks, TerminalSquare, Plus, X } from "lucide-react";
+import { openProvidersEvent } from "@/features/agents/agents-panel";
+import { AgentAvatar } from "@/features/agents/components/session/agent-avatar";
+import { apiClient } from "@/features/agents/lib/api-client";
 import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ForcePasswordDialog, NewTaskDialog, OpenProjectDialog } from "@/components/create-dialogs";
-import { SettingsDialog } from "@/components/settings-dialog";
-import { TaskDrawer } from "@/components/task-drawer";
-import { CodexChatsDrawer } from "@/components/codex-chats-drawer";
-import { ConnectionsDialog, MachineSwitcher } from "@/components/machine-manager";
-import { Workspace } from "@/components/workspace";
+import { SettingsPage, type SettingsSectionId } from "@/components/settings-page";
+import { MachineSwitcher } from "@/components/machine-manager";
+import { ChatList } from "@/components/chat-list";
+import { ProjectsPage, ScheduledPage } from "@/components/app-pages";
+import { FilesPanel } from "@/components/panels/files-panel";
+import { GitPanel } from "@/components/panels/git-panel";
+import { PlanPanel } from "@/components/panels/plan-panel";
+import { NewChatPanel, TaskPanel } from "@/components/panels/chat-panel";
+import { TaskboardPanel } from "@/components/panels/taskboard-panel";
+import { EditorPanel } from "@/components/panels/editor-panel";
 import { api, setToken } from "@/lib/api";
+import { useBoostedApiClient } from "@/lib/api-context";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import { useNotificationNavigation } from "@/hooks/use-notification-navigation";
-import { machinePreferenceKey, useAppStore } from "@/lib/store";
+import { useAppStore } from "@/lib/store";
+import { destinations, navigate, pageFromHash, type AppPage } from "@/lib/navigation";
 import { formatUpdateProgress, useAppUpdateState } from "@/lib/updater";
-import { cn } from "@/lib/utils";
 
-const railPanels = [
-  { id: "taskboard", label: "Taskboard", icon: KanbanSquare },
+const CodexChatPanel = lazy(() => import("@/components/panels/codex-chat-panel").then((module) => ({ default: module.CodexChatPanel })));
+const AgentsPanel = lazy(() => import("@/features/agents/agents-panel").then((module) => ({ default: module.AgentsPanel })));
+const TerminalPanel = lazy(() => import("@/components/panels/terminal-panel").then((module) => ({ default: module.TerminalPanel })));
+const tools = [
   { id: "files", label: "Files", icon: Files },
-  { id: "git", label: "Git changes", icon: GitBranch },
-  { id: "history", label: "Git history", icon: GitCommitHorizontal },
+  { id: "git", label: "Changes", icon: GitBranch },
+  { id: "plan", label: "Plan", icon: ListChecks },
   { id: "terminal", label: "Terminal", icon: TerminalSquare },
-  { id: "remoteViewer", label: "Remote Viewer", icon: MonitorPlay },
 ] as const;
-
-const defaultDrawerWidth = 292;
-const minimumDrawerWidth = 220;
-const maximumDrawerWidth = 520;
-const drawerWidthKey = "boosted.drawer.width";
-const closedWorkspacesKey = "boosted.workspaces.closed.v1";
-
-function readClosedWorkspaceIds() {
-  try {
-    const stored = JSON.parse(localStorage.getItem(machinePreferenceKey(closedWorkspacesKey)) ?? "[]");
-    return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-function persistClosedWorkspaceIds(ids: string[]) {
-  localStorage.setItem(machinePreferenceKey(closedWorkspacesKey), JSON.stringify(ids));
-}
-
-function clampDrawerWidth(width: number) {
-  const viewportLimit = typeof window === "undefined" ? maximumDrawerWidth : Math.floor(window.innerWidth * 0.48);
-  return Math.max(minimumDrawerWidth, Math.min(maximumDrawerWidth, viewportLimit, Math.round(width)));
-}
-
-function initialDrawerWidth() {
-  if (typeof window === "undefined") return defaultDrawerWidth;
-  const saved = Number.parseInt(localStorage.getItem(drawerWidthKey) ?? "", 10);
-  return Number.isFinite(saved) ? clampDrawerWidth(saved) : defaultDrawerWidth;
-}
-
-function openPanel(id: string) {
-  window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: id }));
-}
-
-function GitHubMark() {
-  return <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.26c0 4.55 2.87 8.41 6.84 9.77.5.09.68-.22.68-.49v-1.89c-2.78.62-3.37-1.2-3.37-1.2-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.63.07-.63 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.64-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05A9.38 9.38 0 0 1 12 6.84c.85 0 1.71.12 2.5.35 1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.8-4.57 5.05.36.32.68.94.68 1.9v2.81c0 .27.18.59.69.49A10.03 10.03 0 0 0 22 12.26C22 6.58 17.52 2 12 2Z" /></svg>;
-}
+type ContentView = "chat" | "task" | "editor" | "agents";
+type ToolView = typeof tools[number]["id"];
 
 export function AppShell() {
+  const { profileId } = useBoostedApiClient();
   useLiveEvents();
   useNotificationNavigation();
   const appUpdate = useAppUpdateState();
-  const [drawerView, setDrawerView] = useState<"tasks" | "chats">("tasks");
-  const [drawerWidth, setDrawerWidth] = useState(initialDrawerWidth);
-  const [drawerResizing, setDrawerResizing] = useState(false);
-  const drawerResizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+  const [page, setPage] = useState(pageFromHash);
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId>("connections");
+  const previousPage = useRef<AppPage>("home");
+  const [view, setView] = useState<ContentView>("chat");
+  const [toolView, setToolView] = useState<ToolView>();
+  const [selectedAgentId, setSelectedAgentId] = useState(() => localStorage.getItem(`boosted.selected-agent.${profileId}`) ?? "pock");
+  const [terminalStarted, setTerminalStarted] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [newTaskDialogOpen, setNewTaskDialogOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [connectionsOpen, setConnectionsOpen] = useState(false);
-  const [activePanelId, setActivePanelId] = useState("chat");
-  const [closedWorkspaceIds, setClosedWorkspaceIds] = useState(readClosedWorkspaceIds);
-  const selectedProjectId = useAppStore((state) => state.selectedProjectId);
-  const selectedTaskId = useAppStore((state) => state.selectedTaskId);
-  const drawerOpen = useAppStore((state) => state.taskDrawerOpen);
-  const setDrawerOpen = useAppStore((state) => state.setTaskDrawerOpen);
-  const selectProject = useAppStore((state) => state.selectProject);
-  const selectTask = useAppStore((state) => state.selectTask);
+  const projectId = useAppStore((state) => state.selectedProjectId);
+  const chatId = useAppStore((state) => state.selectedCodexChatId);
+  const taskId = useAppStore((state) => state.selectedTaskId);
+  const mobileChatsOpen = useAppStore((state) => state.taskDrawerOpen);
+  const setMobileChatsOpen = useAppStore((state) => state.setTaskDrawerOpen);
+  const user = useAppStore((state) => state.user);
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
-  const openProjects = useMemo(() => projects.data?.filter((project) => !closedWorkspaceIds.includes(project.id)) ?? [], [closedWorkspaceIds, projects.data]);
-  const tasks = useQuery({ queryKey: ["tasks", selectedProjectId], queryFn: () => api.tasks(selectedProjectId), enabled: Boolean(selectedProjectId) });
-  const selectedTask = tasks.data?.find((task) => task.id === selectedTaskId);
-  const mobileTasksActive = drawerOpen ? drawerView === "tasks" : activePanelId === "task";
-  const mobileChatsActive = drawerOpen ? drawerView === "chats" : activePanelId === "chat" || activePanelId === "codexChat";
+  const agents = useQuery({ queryKey: ["agents"], queryFn: apiClient.assistant.list, refetchInterval: 5000 });
+  const selectedAgent = agents.data?.find((agent) => agent.id === selectedAgentId) ?? agents.data?.[0];
+  const project = projects.data?.find((entry) => entry.id === projectId);
+  const current = destinations.find((entry) => entry.id === page)!;
+  const toolsOpen = page === "home" && Boolean(toolView);
+
+  const goTo = useCallback((next: AppPage) => { if (page !== "settings") previousPage.current = page; setPage(next); navigate(next); setMobileChatsOpen(false); }, [page, setMobileChatsOpen]);
+  const newChat = useCallback(() => {
+    useAppStore.getState().selectCodexChat(undefined);
+    useAppStore.getState().selectTask(undefined);
+    setView("chat");
+    goTo("home");
+  }, [goTo]);
+  const openProviderSettings = useCallback(() => { setSettingsSection("providers"); goTo("settings"); }, [goTo]);
+  const selectAgent = useCallback((id: string) => {
+    setSelectedAgentId(id);
+    localStorage.setItem(`boosted.selected-agent.${profileId}`, id);
+  }, [profileId]);
+  const openAgent = useCallback((id: string) => {
+    selectAgent(id);
+    setView("agents");
+    goTo("home");
+  }, [selectAgent, goTo]);
 
   useEffect(() => {
-    if (!selectedProjectId && openProjects[0]) selectProject(openProjects[0]);
-    else if (selectedProjectId && projects.data && !projects.data.some((project) => project.id === selectedProjectId)) selectProject(openProjects[0]);
-  }, [openProjects, projects.data, selectProject, selectedProjectId]);
+    const select = (event: Event) => {
+      const id = (event as CustomEvent<string>).detail;
+      if (id) openAgent(id);
+    };
+    window.addEventListener("boosted:select-agent", select);
+    return () => window.removeEventListener("boosted:select-agent", select);
+  }, [openAgent]);
 
   useEffect(() => {
-    if (!selectedProjectId || !closedWorkspaceIds.includes(selectedProjectId)) return;
-    setClosedWorkspaceIds((current) => {
-      const next = current.filter((id) => id !== selectedProjectId);
-      persistClosedWorkspaceIds(next);
-      return next;
-    });
-  }, [closedWorkspaceIds, selectedProjectId]);
+    const openSettings = (event: Event) => {
+      const section = (event as CustomEvent<SettingsSectionId>).detail;
+      if (section) setSettingsSection(section);
+      goTo("settings");
+    };
+    window.addEventListener(openProvidersEvent, openProviderSettings);
+    window.addEventListener("boosted:open-settings", openSettings);
+    return () => {
+      window.removeEventListener(openProvidersEvent, openProviderSettings);
+      window.removeEventListener("boosted:open-settings", openSettings);
+    };
+  }, [goTo, openProviderSettings]);
 
   useEffect(() => {
-    if (selectedTaskId && tasks.data && !tasks.data.some((task) => task.id === selectedTaskId)) selectTask(undefined);
-  }, [selectTask, selectedTaskId, tasks.data]);
+    if (!projects.data) return;
+    if (!projectId || !projects.data.some((entry) => entry.id === projectId)) useAppStore.getState().selectProject(projects.data[0]);
+  }, [projectId, projects.data]);
 
   useEffect(() => {
-    const openNewTask = () => setNewTaskDialogOpen(true);
+    const hashChange = () => { setPage(pageFromHash()); setMobileChatsOpen(false); };
+    window.addEventListener("hashchange", hashChange);
+    return () => window.removeEventListener("hashchange", hashChange);
+  }, [setMobileChatsOpen]);
+
+  useEffect(() => {
+    function showContent(id: string, toggle = false) {
+      const tool = tools.find((entry) => entry.id === id);
+      if (tool) { setToolView((active) => toggle && active === tool.id ? undefined : tool.id); if (tool.id === "terminal") setTerminalStarted(true); goTo("home"); return; }
+      if (id === "taskboard") { setView("chat"); goTo("tasks"); }
+      else if (id === "task") { setView("task"); goTo("tasks"); }
+      else if (id === "chat") newChat();
+      else if (id === "agents") { setView("agents"); goTo("home"); }
+    }
+    const open = (event: Event) => showContent((event as CustomEvent<string>).detail);
+    const toggle = (event: Event) => showContent((event as CustomEvent<string>).detail, true);
+    const openChat = (event: Event) => {
+      const detail = (event as CustomEvent<{ threadId: string }>).detail;
+      if (!detail?.threadId) return;
+      useAppStore.getState().selectCodexChat(detail.threadId);
+      setView("chat"); goTo("home");
+    };
+    const openFile = () => { setView("editor"); goTo("home"); };
+    const openTask = () => setNewTaskDialogOpen(true);
     const openProject = () => setProjectDialogOpen(true);
     const showDrawer = (event: Event) => {
-      const view = (event as CustomEvent<"tasks" | "chats">).detail;
-      if (view === "tasks" || view === "chats") {
-        setDrawerView(view);
-        setDrawerOpen(true);
-      }
+      if ((event as CustomEvent<string>).detail === "tasks") { setView("task"); goTo("tasks"); }
+      else setMobileChatsOpen(true);
     };
-    window.addEventListener("boosted:new-task", openNewTask);
-    window.addEventListener("boosted:open-project", openProject);
-    window.addEventListener("boosted:show-drawer", showDrawer);
-    return () => {
-      window.removeEventListener("boosted:new-task", openNewTask);
-      window.removeEventListener("boosted:open-project", openProject);
-      window.removeEventListener("boosted:show-drawer", showDrawer);
+    const keyboard = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n") { event.preventDefault(); newChat(); }
+      if (event.key === "Escape") { setMobileChatsOpen(false); setToolView(undefined); }
     };
-  }, [setDrawerOpen]);
-
-  useEffect(() => {
-    const updateActivePanel = (event: Event) => {
-      const panelId = (event as CustomEvent<string | undefined>).detail;
-      if (panelId) setActivePanelId(panelId);
-    };
-    window.addEventListener("boosted:active-panel", updateActivePanel);
-    return () => window.removeEventListener("boosted:active-panel", updateActivePanel);
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem(drawerWidthKey, String(drawerWidth));
-  }, [drawerWidth]);
-
-  function startNewTask() {
-    setNewTaskDialogOpen(true);
-  }
-
-  function closeWorkspace(projectId: string) {
-    const currentIndex = openProjects.findIndex((project) => project.id === projectId);
-    const nextProject = openProjects[currentIndex + 1] ?? openProjects[currentIndex - 1];
-    if (selectedProjectId === projectId) selectProject(nextProject);
-    setClosedWorkspaceIds((current) => {
-      const next = current.includes(projectId) ? current : [...current, projectId];
-      persistClosedWorkspaceIds(next);
-      return next;
-    });
-  }
-
-  function toggleDrawer(view: "tasks" | "chats") {
-    if (drawerOpen && drawerView === view) {
-      setDrawerOpen(false);
-      return;
-    }
-    setDrawerView(view);
-    setDrawerOpen(true);
-  }
-
-  function showPanel(id: string) {
-    setDrawerOpen(false);
-    openPanel(id);
-  }
+    const listeners: [string, EventListener][] = [
+      ["boosted:open-panel", open], ["boosted:toggle-panel", toggle], ["boosted:open-codex-chat", openChat],
+      ["boosted:open-file", openFile], ["boosted:new-task", openTask], ["boosted:open-project", openProject], ["boosted:show-drawer", showDrawer],
+      ["keydown", keyboard as EventListener],
+    ];
+    for (const [name, listener] of listeners) window.addEventListener(name, listener);
+    return () => { for (const [name, listener] of listeners) window.removeEventListener(name, listener); };
+  }, [goTo, newChat, setMobileChatsOpen]);
 
   async function logout() {
-    try {
-      await api.logout();
-    } catch {
-      // A disconnected machine should not prevent local sign-out.
-    } finally {
-      await setToken();
-      useAppStore.getState().setUser(undefined);
-    }
+    try { await api.logout(); }
+    catch { /* Allow local sign-out while disconnected. */ }
+    finally { await setToken(); useAppStore.getState().setUser(undefined); }
   }
 
-  function startDrawerResize(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    drawerResizeRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: drawerWidth };
-    event.currentTarget.setPointerCapture(event.pointerId);
-    setDrawerResizing(true);
-  }
+  const navigation = destinations.map(({ id, label, icon: Icon }) => <Tooltip key={id}><TooltipTrigger asChild><button className="destination" aria-label={label} aria-current={page === id && !(id === "home" && view === "agents") ? "page" : undefined} onClick={() => { if (id === "home") setView("chat"); if (id === "tasks") setView("chat"); goTo(id); }}><Icon /><span>{label}</span></button></TooltipTrigger><TooltipContent side="left">{label}</TooltipContent></Tooltip>);
 
-  function resizeDrawer(event: ReactPointerEvent<HTMLDivElement>) {
-    const resize = drawerResizeRef.current;
-    if (!resize || resize.pointerId !== event.pointerId) return;
-    setDrawerWidth(clampDrawerWidth(resize.startWidth + event.clientX - resize.startX));
-  }
-
-  function finishDrawerResize(event: ReactPointerEvent<HTMLDivElement>) {
-    if (drawerResizeRef.current?.pointerId !== event.pointerId) return;
-    drawerResizeRef.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    setDrawerResizing(false);
-  }
-
-  function resizeDrawerWithKeyboard(event: ReactKeyboardEvent<HTMLDivElement>) {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "Home") return;
-    event.preventDefault();
-    if (event.key === "Home") {
-      setDrawerWidth(defaultDrawerWidth);
-      return;
-    }
-    const direction = event.key === "ArrowLeft" ? -1 : 1;
-    setDrawerWidth((width) => clampDrawerWidth(width + direction * (event.shiftKey ? 48 : 16)));
-  }
-
-  return (
-    <main
-      className="app-shell"
-      data-drawer={drawerOpen ? "open" : "closed"}
-      data-drawer-resizing={drawerResizing ? "true" : "false"}
-      style={{ "--drawer-width": `${drawerWidth}px` } as CSSProperties}
-    >
-      <header className="app-topbar app-desktop-topbar">
-        <div className="app-brand flex h-full w-12 items-center justify-center"><img src="/favicon.svg" alt="Boosted" className="size-6" /></div>
-        <MachineSwitcher onManage={() => setConnectionsOpen(true)} />
-        <div className="app-machine-divider mx-1 h-4 w-px bg-border" />
-        <div className="app-drawer-switchers ml-1 flex items-center gap-0.5">
-          <Button className={cn(drawerOpen && drawerView === "tasks" && "bg-accent")} variant="ghost" size="icon-sm" title="Tasks" aria-label="Tasks" aria-pressed={drawerOpen && drawerView === "tasks"} onClick={() => toggleDrawer("tasks")}><ListTodo /></Button>
-          <Button className={cn(drawerOpen && drawerView === "chats" && "bg-accent")} variant="ghost" size="icon-sm" title="Codex chats" aria-label="Codex chats" aria-pressed={drawerOpen && drawerView === "chats"} onClick={() => toggleDrawer("chats")}><MessagesSquare /></Button>
-        </div>
-        <div className="app-project-divider mx-2 h-4 w-px bg-border" />
-        <div className="app-workspace-tabs" role="tablist" aria-label="Open workspaces">
-          {!openProjects.length && <span className="app-no-workspace">No workspace</span>}
-          {openProjects.map((project) => (
-            <div
-              key={project.id}
-              role="presentation"
-              className={cn("app-workspace-tab", selectedProjectId === project.id && "app-workspace-tab-active")}
-              title={project.repoPath}
-            >
-              <button type="button" className="app-workspace-tab-select" role="tab" aria-selected={selectedProjectId === project.id} onClick={() => selectProject(project)}>
-                <Folder />
-                <span>{project.name}</span>
-              </button>
-              <button type="button" className="app-workspace-tab-close" aria-label={`Close ${project.name} workspace`} title={`Close ${project.name} workspace`} onClick={() => closeWorkspace(project.id)}><X /></button>
-            </div>
-          ))}
-        </div>
-        <Button className="app-open-project" variant="ghost" size="icon-sm" title="Open project folder" onClick={() => setProjectDialogOpen(true)}><FolderOpen /></Button>
-        {selectedTask && <span className="app-selected-task min-w-0"><span className="mx-2 text-muted-foreground">/</span><span className="inline-block max-w-[38vw] truncate align-middle text-xs text-muted-foreground">{selectedTask.title}</span></span>}
-        <div className="app-actions ml-auto flex items-center gap-1 pr-2">
-          <Button className="app-open-project-mobile" variant="ghost" size="icon-sm" title="Open workspace" aria-label="Open workspace" onClick={() => setProjectDialogOpen(true)}><FolderPlus /></Button>
-          {["downloading", "installing", "restarting"].includes(appUpdate.phase) && <button type="button" className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[10px] text-muted-foreground hover:bg-accent" onClick={() => setSettingsOpen(true)}><span className="size-3 animate-spin rounded-full border-2 border-current border-r-transparent" />{appUpdate.phase === "downloading" ? `Updating${formatUpdateProgress(appUpdate) !== undefined ? ` ${formatUpdateProgress(appUpdate)}%` : ""}` : appUpdate.phase === "installing" ? "Installing update" : "Restarting"}</button>}
-          <Button variant="ghost" size="icon-sm" title="Settings" onClick={() => setSettingsOpen(true)}><Settings /></Button>
-          <Button variant="ghost" size="icon-sm" onClick={() => void logout()} title="Sign out of this machine"><LogOut /></Button>
+  return <main className="app-frame" data-page={page} data-chats-open={mobileChatsOpen}>
+    <header className="shell-titlebar"><img src="/favicon.svg" alt="" /><span>Boosted</span><span className="shell-titlebar-section">{current.label}</span>{appUpdate.phase === "downloading" && <span className="shell-update">Updating{formatUpdateProgress(appUpdate) !== undefined ? ` ${formatUpdateProgress(appUpdate)}%` : "…"}</span>}<div className="shell-machine"><MachineSwitcher onManage={() => goTo("settings")} /></div></header>
+    <section className="content-surface" aria-label="Content">
+    <section className="main-surface" aria-label={`${current.label} page`}>
+      <header className="main-surface-header" hidden={page === "settings"}>
+        {page === "home" && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Project tools"><Ellipsis /></Button></DropdownMenuTrigger><DropdownMenuContent align="start"><DropdownMenuLabel>Project tools</DropdownMenuLabel>{tools.map(({ id, label, icon: Icon }) => <DropdownMenuItem key={id} onClick={() => { setToolView(id); if (id === "terminal") setTerminalStarted(true); }}><Icon />{label}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>}
+        <span className="main-page-label">{current.label}</span>
+        <div className="main-header-actions">
+          {project && <DropdownMenu><DropdownMenuTrigger asChild><button className="project-context"><FolderOpen /><span>{project.name}</span><ChevronDown /></button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Project</DropdownMenuLabel>{projects.data?.map((entry) => <DropdownMenuItem key={entry.id} onClick={() => { useAppStore.getState().selectProject(entry); setView("chat"); }}><FolderOpen />{entry.name}</DropdownMenuItem>)}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => setProjectDialogOpen(true)}><Plus />Open project</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
+          {page === "home" && <Button variant="ghost" size="icon-sm" aria-label="Agents" title="Agents" onClick={() => setView(view === "agents" ? "chat" : "agents")}><Bot /></Button>}
+          <Button className="mobile-chats-toggle" variant="ghost" size="icon-sm" aria-label="Show chats" aria-expanded={mobileChatsOpen} onClick={() => setMobileChatsOpen(!mobileChatsOpen)}><MessagesSquare /></Button>
         </div>
       </header>
+      <div className="workspace-body" data-tools-open={toolsOpen}>
+      {(toolView || terminalStarted) && <aside className="workspace-tools" aria-label="Project tools panel" hidden={!toolsOpen}>
+        <header className="workspace-tools-header"><nav aria-label="Project tool panels">{tools.map(({ id, label, icon: Icon }) => <Tooltip key={id}><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" aria-label={label} aria-pressed={toolView === id} onClick={() => { setToolView(id); if (id === "terminal") setTerminalStarted(true); }}><Icon /></Button></TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>)}</nav><Button variant="ghost" size="icon-sm" aria-label="Close project tools" onClick={() => setToolView(undefined)}><X /></Button></header>
+        <div className="workspace-tools-content"><Suspense fallback={<div className="empty-state">Loading…</div>}>
+          {toolView === "files" && <FilesPanel key={projectId ?? "empty"} />}
+          {toolView === "git" && <GitPanel key={taskId ?? "empty"} />}
+          {toolView === "plan" && <PlanPanel key={taskId ?? "empty"} />}
+          {terminalStarted && <div className="tool-panel-slot" hidden={toolView !== "terminal"}><TerminalPanel /></div>}
+        </Suspense></div>
+      </aside>}
+      {toolsOpen && <button className="mobile-tools-scrim" aria-label="Dismiss project tools" onClick={() => setToolView(undefined)} />}
+      <div className="main-surface-content"><Suspense fallback={<div className="empty-state">Loading…</div>}>
+        {page === "home" && (view === "editor" ? <div className="page-detail">
+          <div className="page-detail-back"><Button variant="ghost" size="sm" onClick={() => setView("chat")}><ArrowLeft />Back to chat</Button></div>
+          <EditorPanel />
+        </div> : view === "agents" ? <AgentsPanel selectedId={selectedAgentId} selectAgent={selectAgent} /> : chatId ? <CodexChatPanel key={chatId} threadId={chatId} /> : <NewChatPanel key={projectId ?? "empty"} />)}
+        {page === "scheduled" && <ScheduledPage />}
+        {page === "projects" && <ProjectsPage onOpenProject={() => setProjectDialogOpen(true)} onSelect={newChat} />}
+        {page === "tasks" && (view === "task" && taskId ? <div className="page-detail"><div className="page-detail-back"><Button variant="ghost" size="sm" onClick={() => setView("chat")}><ArrowLeft />All tasks</Button></div><TaskPanel key={taskId} /></div> : <TaskboardPanel />)}
+        {page === "settings" && <SettingsPage section={settingsSection} onSectionChange={setSettingsSection} onClose={() => goTo(previousPage.current)} />}
+      </Suspense></div>
+      </div>
+    </section>
+    {page !== "settings" && <aside className="right-navigation" aria-label="Navigation and chats">
+      <ChatList activeChatId={page === "home" && view === "chat" ? chatId : undefined} onNewChat={newChat} onOpenProject={() => setProjectDialogOpen(true)} onClose={() => setMobileChatsOpen(false)} />
 
-      <header className="app-mobile-topbar">
-        <MachineSwitcher onManage={() => setConnectionsOpen(true)}>
-          <Button className="mobile-machine-button" variant="ghost" size="icon" aria-label="Switch machine" title="Switch machine"><Server /></Button>
-        </MachineSwitcher>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button type="button" className="mobile-workspace-switcher" aria-label={`Switch workspace${selectedProjectId ? `, current workspace ${openProjects.find((project) => project.id === selectedProjectId)?.name ?? ""}` : ""}`}>
-              <span className="mobile-workspace-icon"><Folder /></span>
-              <span className="mobile-workspace-copy"><span>Workspace</span><strong>{openProjects.find((project) => project.id === selectedProjectId)?.name ?? "No workspace"}</strong></span>
-              <ChevronDown />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-72 max-w-[calc(100vw-1rem)]">
-            <DropdownMenuLabel>Open workspaces</DropdownMenuLabel>
-            {openProjects.map((project) => <DropdownMenuItem key={project.id} onClick={() => selectProject(project)}><Folder /><span className="min-w-0 flex-1 truncate">{project.name}</span>{selectedProjectId === project.id && <Check />}</DropdownMenuItem>)}
-            {!openProjects.length && <DropdownMenuItem disabled>No workspaces open</DropdownMenuItem>}
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => setProjectDialogOpen(true)}><FolderPlus />Open workspace</DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-        <Button className="mobile-settings-button" variant="ghost" size="icon" aria-label="Settings" title="Settings" onClick={() => setSettingsOpen(true)}><Settings /></Button>
-      </header>
-
-      <nav className="app-rail" aria-label="Workspace panels">
-        {railPanels.map(({ id, label, icon: Icon }) => (
-          <Tooltip key={id}><TooltipTrigger asChild><Button variant="ghost" size="icon" aria-label={label} onClick={() => openPanel(id)}><Icon /></Button></TooltipTrigger><TooltipContent side="left">{label}</TooltipContent></Tooltip>
-        ))}
-        <div className="mt-auto">
-          <Tooltip><TooltipTrigger asChild><Button asChild variant="ghost" size="icon"><a href="https://github.com/monokaijs/boosted" target="_blank" rel="noreferrer" aria-label="Open Boosted on GitHub"><GitHubMark /></a></Button></TooltipTrigger><TooltipContent side="left">GitHub</TooltipContent></Tooltip>
-        </div>
-      </nav>
-
-      <nav className="mobile-bottom-nav" aria-label="Primary navigation">
-        <button type="button" className="mobile-nav-item" data-active={mobileTasksActive} aria-current={mobileTasksActive ? "page" : undefined} onClick={() => toggleDrawer("tasks")}><ListTodo /><span>Tasks</span></button>
-        <button type="button" className="mobile-nav-item" data-active={mobileChatsActive} aria-current={mobileChatsActive ? "page" : undefined} onClick={() => toggleDrawer("chats")}><MessagesSquare /><span>Chats</span></button>
-        <button type="button" className="mobile-nav-item" data-active={!drawerOpen && activePanelId === "taskboard"} aria-current={!drawerOpen && activePanelId === "taskboard" ? "page" : undefined} onClick={() => showPanel("taskboard")}><KanbanSquare /><span>Board</span></button>
-        <button type="button" className="mobile-nav-item" data-active={!drawerOpen && (activePanelId === "files" || activePanelId === "editor")} aria-current={!drawerOpen && (activePanelId === "files" || activePanelId === "editor") ? "page" : undefined} onClick={() => showPanel("files")}><Files /><span>Files</span></button>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button type="button" className="mobile-nav-item" data-active={!drawerOpen && ["git", "history", "terminal", "remoteViewer"].includes(activePanelId)} aria-label="More workspace tools"><Ellipsis /><span>More</span></button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" side="top" sideOffset={8} className="w-64 max-w-[calc(100vw-1rem)]">
-            <DropdownMenuLabel>Workspace tools</DropdownMenuLabel>
-            <DropdownMenuItem onClick={() => showPanel("git")}><GitBranch />Git changes{activePanelId === "git" && <Check className="ml-auto" />}</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => showPanel("history")}><GitCommitHorizontal />Git history{activePanelId === "history" && <Check className="ml-auto" />}</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => showPanel("terminal")}><TerminalSquare />Terminal{activePanelId === "terminal" && <Check className="ml-auto" />}</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => showPanel("remoteViewer")}><MonitorPlay />Remote Viewer{activePanelId === "remoteViewer" && <Check className="ml-auto" />}</DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => setProjectDialogOpen(true)}><FolderPlus />Open workspace</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => setSettingsOpen(true)}><Settings />Settings</DropdownMenuItem>
-            <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => void logout()}><LogOut />Sign out</DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </nav>
-
-      {drawerOpen && <button type="button" className="app-drawer-scrim" aria-label="Close tasks and chats panel" onClick={() => setDrawerOpen(false)} />}
-      {drawerView === "tasks" ? <TaskDrawer onNewTask={startNewTask} onClose={() => setDrawerOpen(false)} /> : <CodexChatsDrawer onClose={() => setDrawerOpen(false)} />}
-      {drawerOpen && (
-        <div
-          className="drawer-resize-handle"
-          role="separator"
-          aria-label="Resize tasks and chats panel"
-          aria-orientation="vertical"
-          aria-valuemin={minimumDrawerWidth}
-          aria-valuemax={maximumDrawerWidth}
-          aria-valuenow={drawerWidth}
-          tabIndex={0}
-          title="Drag to resize · Double-click to reset"
-          onDoubleClick={() => setDrawerWidth(defaultDrawerWidth)}
-          onKeyDown={resizeDrawerWithKeyboard}
-          onPointerDown={startDrawerResize}
-          onPointerMove={resizeDrawer}
-          onPointerUp={finishDrawerResize}
-          onPointerCancel={finishDrawerResize}
-        />
-      )}
-      <section className="workspace"><Workspace key={selectedProjectId ?? "empty"} workspaceId={selectedProjectId ?? "empty"} /></section>
-
-      <OpenProjectDialog open={projectDialogOpen} onOpenChange={setProjectDialogOpen} />
-      <NewTaskDialog open={newTaskDialogOpen} onOpenChange={setNewTaskDialogOpen} />
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
-      <ConnectionsDialog open={connectionsOpen} onOpenChange={setConnectionsOpen} />
-      <ForcePasswordDialog />
-    </main>
-  );
+    </aside>}
+    </section>
+    <div className="navigation-rail">
+      <nav aria-label="Primary navigation">{navigation}</nav>
+      {!!agents.data?.length && <>
+        <Separator className="rail-divider" decorative={false} />
+        <nav className="agent-navigation" aria-label="Agents">
+          {agents.data.map((agent) => <Tooltip key={agent.id}><TooltipTrigger asChild><button type="button" className="destination agent-destination" aria-label={agent.profile.name} aria-current={page === "home" && view === "agents" && selectedAgent?.id === agent.id ? "page" : undefined} onClick={() => openAgent(agent.id)}><AgentAvatar name={agent.profile.name} avatar={agent.profile.avatar} className="size-7 text-[10px]" /></button></TooltipTrigger><TooltipContent side="left">{agent.profile.name}</TooltipContent></Tooltip>)}
+        </nav>
+      </>}
+      <DropdownMenu><DropdownMenuTrigger asChild><button className="account-avatar" aria-label="Account menu">{user?.username.slice(0, 2).toUpperCase() ?? "B"}</button></DropdownMenuTrigger><DropdownMenuContent side="left" align="end"><DropdownMenuLabel>{user?.username ?? "Boosted"}</DropdownMenuLabel><DropdownMenuItem onClick={() => goTo("settings")}>Settings</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void logout()}><LogOut />Sign out</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+    </div>
+    <nav className="mobile-page-navigation" aria-label="Mobile navigation">{navigation}</nav>
+    {mobileChatsOpen && <button className="mobile-chat-scrim" aria-label="Dismiss chats" onClick={() => setMobileChatsOpen(false)} />}
+    <OpenProjectDialog open={projectDialogOpen} onOpenChange={setProjectDialogOpen} />
+    <NewTaskDialog open={newTaskDialogOpen} onOpenChange={setNewTaskDialogOpen} />
+    <ForcePasswordDialog />
+  </main>;
 }

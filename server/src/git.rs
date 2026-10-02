@@ -1,6 +1,6 @@
 use crate::{
     error::{AppError, AppResult},
-    models::{GitChange, GitCommit, GitStatus},
+    models::{GitChange, GitStatus},
     process::background_command,
 };
 use std::{
@@ -282,46 +282,6 @@ pub async fn commit(repo: &Path, message: &str) -> AppResult<String> {
     }
     git(repo, &["commit", "-m", message.trim()]).await?;
     Ok(git(repo, &["rev-parse", "HEAD"]).await?.trim().to_string())
-}
-
-pub async fn history(repo: &Path, limit: usize) -> AppResult<Vec<GitCommit>> {
-    let limit = limit.clamp(1, 500).to_string();
-    let raw = git(
-        repo,
-        &[
-            "log",
-            "--all",
-            "--topo-order",
-            &format!("-n{limit}"),
-            "--date=iso-strict",
-            "--pretty=format:%H%x1f%P%x1f%an%x1f%ae%x1f%s%x1f%b%x1f%aI%x1f%D%x1e",
-        ],
-    )
-    .await?;
-    Ok(raw
-        .split('\x1e')
-        .filter_map(|record| {
-            let values: Vec<_> = record.trim().split('\x1f').collect();
-            if values.len() < 8 {
-                return None;
-            }
-            Some(GitCommit {
-                id: values[0].into(),
-                parents: values[1].split_whitespace().map(str::to_string).collect(),
-                author: values[2].into(),
-                email: values[3].into(),
-                subject: values[4].into(),
-                body: values[5].trim().into(),
-                authored_at: values[6].into(),
-                refs: values[7]
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .map(str::to_string)
-                    .collect(),
-            })
-        })
-        .collect())
 }
 
 pub fn safe_path(root: &Path, relative: &str, allow_missing: bool) -> AppResult<PathBuf> {

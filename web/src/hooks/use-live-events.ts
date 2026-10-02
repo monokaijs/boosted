@@ -3,7 +3,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { getToken } from "@/lib/api";
 import { useBoostedApiClient } from "@/lib/api-context";
 import { notifyForLiveEvent } from "@/lib/notifications";
-import type { LiveEvent } from "@/lib/types";
+import { applyChatStatusEvent, setCachedChatStatus } from "@/lib/codex-chat-status";
+import type { CodexLiveEvent, LiveEvent } from "@/lib/types";
 
 export function useLiveEvents() {
   const api = useBoostedApiClient();
@@ -23,6 +24,10 @@ export function useLiveEvents() {
         try {
           const event = JSON.parse(message.data) as LiveEvent;
           void notifyForLiveEvent(event, api);
+          if (event.topic === "assistant.updated") {
+            window.dispatchEvent(new CustomEvent("boosted:assistant-updated", { detail: event.data }));
+          }
+          if (event.topic === "provider-chats.updated") void queryClient.invalidateQueries({ queryKey: ["codex-chats"] });
           if (event.topic.startsWith("task.")) {
             void queryClient.invalidateQueries({ queryKey: ["tasks"] });
             const taskId = (event.data as { taskId?: string })?.taskId;
@@ -35,7 +40,17 @@ export function useLiveEvents() {
           }
           if (event.topic.startsWith("project.")) void queryClient.invalidateQueries({ queryKey: ["projects"] });
           if (event.topic.startsWith("integration.")) void queryClient.invalidateQueries({ queryKey: ["integrations"] });
+          if (event.topic === "codex.approval") {
+            const data = event.data as { threadId?: string; requestId?: unknown };
+            if (data.threadId) {
+              if (data.requestId !== undefined) setCachedChatStatus(queryClient, data.threadId, "needs_input");
+              void queryClient.invalidateQueries({ queryKey: ["codex-approvals", data.threadId] });
+              void queryClient.invalidateQueries({ queryKey: ["codex-chats"] });
+              void queryClient.invalidateQueries({ queryKey: ["codex-chat", data.threadId] });
+            }
+          }
           if (event.topic === "codex.event") {
+            applyChatStatusEvent(queryClient, event.data as CodexLiveEvent);
             window.dispatchEvent(new CustomEvent("boosted:codex-event", { detail: event.data }));
             const data = event.data as { threadId?: string; method?: string };
             if (data.method === "turn/completed" && data.threadId) {

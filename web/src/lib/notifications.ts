@@ -4,6 +4,7 @@ import { isTauriRuntime } from "@/lib/runtime";
 import type { LiveEvent } from "@/lib/types";
 
 export const notificationEventDefinitions = [
+  { id: "agentMessage", group: "Agents", label: "Agent replies", description: "An agent sends a reply or scheduled update." },
   { id: "taskCreated", group: "Tasks", label: "Task created", description: "A new task is added to a workspace." },
   { id: "taskNeedsInput", group: "Tasks", label: "Input required", description: "Codex needs an answer before it can continue." },
   { id: "taskReady", group: "Tasks", label: "Plan ready", description: "A task plan is ready for approval." },
@@ -32,7 +33,7 @@ export interface PwaNotificationContent {
   body: string;
   tag: string;
   data: {
-    kind: "task" | "codex" | "integration";
+    kind: "agent" | "task" | "codex" | "integration";
     id: string;
     url: string;
   };
@@ -48,6 +49,7 @@ export const defaultNotificationSettings: PwaNotificationSettings = {
   enabled: false,
   delivery: "background",
   events: [
+    "agentMessage",
     "taskNeedsInput",
     "taskReady",
     "taskReview",
@@ -131,6 +133,7 @@ function eventData(event: LiveEvent) {
 
 export function notificationEventId(event: LiveEvent): NotificationEventId | undefined {
   const data = eventData(event);
+  if (event.topic === "assistant.message") return "agentMessage";
   if (event.topic === "task.created") return "taskCreated";
   if (event.topic === "task.updated") {
     if (data.status === "needs_input") return "taskNeedsInput";
@@ -161,6 +164,12 @@ export async function buildNotificationForEvent(event: LiveEvent, api: BoostedAp
   if (!selectedEvent) return undefined;
   const data = eventData(event);
 
+  if (selectedEvent === "agentMessage") {
+    if (typeof data.agentId !== "string" || typeof data.content !== "string") return undefined;
+    return { event: selectedEvent, title: String(data.assistantName ?? "Agent"), body: data.content.slice(0, 240),
+      tag: `boosted:${api.profileId}:agent:${String(data.messageId ?? data.agentId)}`,
+      data: { kind: "agent", id: data.agentId, url: notificationUrl("agent", data.agentId) } };
+  }
   if (selectedEvent.startsWith("task")) {
     const taskId = typeof data.taskId === "string" ? data.taskId : undefined;
     if (!taskId) return undefined;

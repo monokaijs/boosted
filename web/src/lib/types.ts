@@ -21,58 +21,6 @@ export interface GlobalSettings {
   updatedAt?: string;
 }
 
-export type RemoteViewerCodec = "auto" | "h264" | "vp8";
-export type RemoteViewerResolution = "720p" | "1080p" | "1440p" | "native";
-
-export interface RemoteViewerSettings {
-  enabled: boolean;
-  controlEnabled: boolean;
-  audioEnabled: boolean;
-  preferredCodec: RemoteViewerCodec;
-  defaultFps: number;
-  maxFps: number;
-  defaultResolution: RemoteViewerResolution;
-  maxResolution: RemoteViewerResolution;
-  maxBitrateKbps: number;
-  maxConcurrentStreams: number;
-}
-
-export interface RemoteViewerCapabilities {
-  platform: "macos" | "windows" | "unsupported";
-  captureAvailable: boolean;
-  controlAvailable: boolean;
-  capturePermission: "granted" | "denied" | "prompt" | "unavailable";
-  controlPermission: "granted" | "denied" | "prompt" | "unavailable";
-  codecs: Array<"h264" | "vp8">;
-}
-
-export interface CaptureSource {
-  id: string;
-  kind: "window" | "display";
-  name: string;
-  appName?: string;
-  width: number;
-  height: number;
-  scale: number;
-}
-
-export interface ViewerSessionRequest {
-  sourceId: string;
-  fps?: number;
-  resolution?: RemoteViewerResolution;
-  supportedCodecs?: Array<"h264" | "vp8">;
-}
-
-export interface ViewerSession {
-  id: string;
-  source: CaptureSource;
-  effectiveCodec: "h264" | "vp8";
-  effectiveFps: number;
-  width: number;
-  height: number;
-  audioEnabled: boolean;
-}
-
 export interface SetupState {
   needsSetup: boolean;
   codex: {
@@ -108,9 +56,26 @@ export interface CodexChatMessage {
   content: string;
   kind: "message" | "reasoning" | "plan" | "tool" | "system";
   createdAt?: string;
+  questions?: { title: string; options?: string[] | null }[];
+}
+
+export interface CodexQuestion {
+  id: string;
+  header: string;
+  question: string;
+  options?: { label: string; description: string }[] | null;
+  isOther?: boolean;
+  isSecret?: boolean;
+}
+
+export interface CodexPendingRequest {
+  id: string;
+  method: string;
+  params: Record<string, unknown> & { questions?: CodexQuestion[] };
 }
 
 export interface CodexChatThread {
+  runtimeDefaults?: { model?: string; reasoningEffort?: string; accessMode?: CodexAccessOption["id"]; approvalPolicy?: string; serviceTier?: string };
   chat: CodexChat;
   messages: CodexChatMessage[];
 }
@@ -403,17 +368,6 @@ export interface GitStatus {
   ahead: number;
   behind: number;
   changes: GitChange[];
-}
-
-export interface GitCommit {
-  id: string;
-  parents: string[];
-  author: string;
-  email: string;
-  subject: string;
-  body: string;
-  authoredAt: string;
-  refs: string[];
 }
 
 export interface Health {

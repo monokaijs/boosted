@@ -2,54 +2,17 @@ import { create } from "zustand";
 import { machineScopedKey } from "@/lib/machines";
 import type { Project, Task, User } from "@/lib/types";
 
-type WorkspaceContext = {
-  selectedTaskId?: string;
-  selectedCodexChatId?: string;
-  openFilePath?: string;
-};
-
-type StoredWorkspaceState = {
-  selectedProjectId?: string;
-  selectedTaskId?: string;
-  selectedCodexChatId?: string;
-  openFilePath?: string;
-  workspaceContexts: Record<string, WorkspaceContext>;
-};
-
 function key(machineId: string | undefined, value: string) {
   return machineId ? machineScopedKey(machineId, value) : value;
 }
 
-function readWorkspaceContexts(machineId?: string) {
-  try {
-    return JSON.parse(localStorage.getItem(key(machineId, "boosted.workspace-contexts.v1")) ?? "{}") as Record<string, WorkspaceContext>;
-  } catch {
-    return {};
-  }
-}
-
-function readMachineState(machineId?: string): StoredWorkspaceState {
-  const selectedProjectId = localStorage.getItem(key(machineId, "boosted.project")) ?? undefined;
-  const workspaceContexts = readWorkspaceContexts(machineId);
-  const context = selectedProjectId
-    ? workspaceContexts[selectedProjectId] ?? {
-        selectedTaskId: localStorage.getItem(key(machineId, "boosted.task")) ?? undefined,
-        selectedCodexChatId: localStorage.getItem(key(machineId, "boosted.codexChat")) ?? undefined,
-      }
-    : {};
+function readMachineState(machineId?: string) {
   return {
-    selectedProjectId,
-    selectedTaskId: context.selectedTaskId,
-    selectedCodexChatId: context.selectedCodexChatId,
-    openFilePath: context.openFilePath,
-    workspaceContexts: selectedProjectId && !workspaceContexts[selectedProjectId]
-      ? { ...workspaceContexts, [selectedProjectId]: context }
-      : workspaceContexts,
+    selectedProjectId: localStorage.getItem(key(machineId, "boosted.project")) ?? undefined,
+    selectedTaskId: localStorage.getItem(key(machineId, "boosted.task")) ?? undefined,
+    selectedCodexChatId: localStorage.getItem(key(machineId, "boosted.codexChat")) ?? undefined,
+    openFilePath: undefined as string | undefined,
   };
-}
-
-function persistWorkspaceContexts(machineId: string | undefined, contexts: Record<string, WorkspaceContext>) {
-  localStorage.setItem(key(machineId, "boosted.workspace-contexts.v1"), JSON.stringify(contexts));
 }
 
 function setOptional(machineId: string | undefined, storageKey: string, value?: string) {
@@ -58,7 +21,7 @@ function setOptional(machineId: string | undefined, storageKey: string, value?: 
   else localStorage.removeItem(resolved);
 }
 
-type AppStore = StoredWorkspaceState & {
+type AppStore = ReturnType<typeof readMachineState> & {
   activeMachineId?: string;
   user?: User;
   taskDrawerOpen: boolean;
@@ -71,79 +34,37 @@ type AppStore = StoredWorkspaceState & {
   setTaskDrawerOpen: (open: boolean) => void;
 };
 
-const initial = readMachineState();
-
 export const useAppStore = create<AppStore>((set, get) => ({
-  ...initial,
+  ...readMachineState(),
   activeMachineId: undefined,
   user: undefined,
   taskDrawerOpen: false,
-  activateMachine: (activeMachineId) => {
-    const stored = readMachineState(activeMachineId);
-    set({ ...stored, activeMachineId, user: undefined, taskDrawerOpen: false });
-  },
+  activateMachine: (activeMachineId) => set({ ...readMachineState(activeMachineId), activeMachineId, user: undefined, taskDrawerOpen: false }),
   setUser: (user) => set({ user }),
   selectProject: (project) => {
     const state = get();
+    if (state.selectedProjectId === project?.id) return;
     setOptional(state.activeMachineId, "boosted.project", project?.id);
-    const context = project ? state.workspaceContexts[project.id] ?? {} : {};
-    setOptional(state.activeMachineId, "boosted.task", context.selectedTaskId);
-    setOptional(state.activeMachineId, "boosted.codexChat", context.selectedCodexChatId);
-    set({
-      selectedProjectId: project?.id,
-      selectedTaskId: context.selectedTaskId,
-      selectedCodexChatId: context.selectedCodexChatId,
-      openFilePath: context.openFilePath,
-    });
+    setOptional(state.activeMachineId, "boosted.task");
+    setOptional(state.activeMachineId, "boosted.codexChat");
+    set({ selectedProjectId: project?.id, selectedTaskId: undefined, selectedCodexChatId: undefined, openFilePath: undefined });
   },
   selectTask: (task) => {
     const state = get();
-    const projectId = task?.projectId ?? state.selectedProjectId;
     setOptional(state.activeMachineId, "boosted.task", task?.id);
-    if (!projectId) {
-      set({ selectedTaskId: task?.id, selectedProjectId: task?.projectId, openFilePath: undefined });
-      return;
+    if (task) {
+      setOptional(state.activeMachineId, "boosted.project", task.projectId);
+      setOptional(state.activeMachineId, "boosted.codexChat");
     }
-    if (task && task.projectId !== state.selectedProjectId) setOptional(state.activeMachineId, "boosted.project", task.projectId);
-    const previous = state.workspaceContexts[projectId] ?? {};
-    const nextContext = { ...previous, selectedTaskId: task?.id, openFilePath: undefined };
-    const workspaceContexts = { ...state.workspaceContexts, [projectId]: nextContext };
-    persistWorkspaceContexts(state.activeMachineId, workspaceContexts);
-    set({
-      workspaceContexts,
-      selectedTaskId: task?.id,
-      selectedProjectId: projectId,
-      selectedCodexChatId: nextContext.selectedCodexChatId,
-      openFilePath: undefined,
-    });
+    set({ selectedTaskId: task?.id, selectedProjectId: task?.projectId ?? state.selectedProjectId, ...(task ? { selectedCodexChatId: undefined } : {}), openFilePath: undefined });
   },
   selectCodexChat: (id) => {
     const state = get();
     setOptional(state.activeMachineId, "boosted.codexChat", id);
-    if (!state.selectedProjectId) {
-      set({ selectedCodexChatId: id });
-      return;
-    }
-    const workspaceContexts = {
-      ...state.workspaceContexts,
-      [state.selectedProjectId]: { ...state.workspaceContexts[state.selectedProjectId], selectedCodexChatId: id },
-    };
-    persistWorkspaceContexts(state.activeMachineId, workspaceContexts);
-    set({ selectedCodexChatId: id, workspaceContexts });
+    if (id) setOptional(state.activeMachineId, "boosted.task");
+    set({ selectedCodexChatId: id, ...(id ? { selectedTaskId: undefined, openFilePath: undefined } : {}) });
   },
-  openFile: (openFilePath) => {
-    const state = get();
-    if (!state.selectedProjectId) {
-      set({ openFilePath });
-      return;
-    }
-    const workspaceContexts = {
-      ...state.workspaceContexts,
-      [state.selectedProjectId]: { ...state.workspaceContexts[state.selectedProjectId], openFilePath },
-    };
-    persistWorkspaceContexts(state.activeMachineId, workspaceContexts);
-    set({ openFilePath, workspaceContexts });
-  },
+  openFile: (openFilePath) => set({ openFilePath }),
   setTaskDrawerOpen: (taskDrawerOpen) => set({ taskDrawerOpen }),
 }));
 

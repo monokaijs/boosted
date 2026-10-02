@@ -3,7 +3,10 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  appState: { selectedProjectId: "workspace-a" as string | undefined },
+  appState: { selectedProjectId: "workspace-a" as string | undefined, user: { role: "admin" } },
+  updateState: { phase: "idle", supported: true, currentVersion: "0.4.0", downloadedBytes: 0, supportReason: undefined as string | undefined },
+  checkAndInstallAppUpdate: vi.fn(),
+  refreshAppUpdateAvailability: vi.fn(),
   integrations: vi.fn(),
   discoverIntegrationTargets: vi.fn(),
   createIntegration: vi.fn(),
@@ -13,6 +16,12 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/api", () => ({ api: mocks }));
+vi.mock("@/lib/updater", () => ({
+  useAppUpdateState: () => mocks.updateState,
+  formatUpdateProgress: () => undefined,
+  checkAndInstallAppUpdate: mocks.checkAndInstallAppUpdate,
+  refreshAppUpdateAvailability: mocks.refreshAppUpdateAvailability,
+}));
 vi.mock("@/lib/store", () => ({
   useAppStore: Object.assign(
     (selector: (state: typeof mocks.appState) => unknown) => selector(mocks.appState),
@@ -20,7 +29,7 @@ vi.mock("@/lib/store", () => ({
   ),
 }));
 
-import { IntegrationsSettings } from "@/components/settings-dialog";
+import { ApplicationSettings, IntegrationsSettings } from "@/components/settings-page";
 
 function renderSettings() {
   const queryClient = new QueryClient({
@@ -186,5 +195,50 @@ describe("integration target discovery", () => {
     expect(screen.getByRole("button", { name: /^Huly/ })).toBeDisabled();
     resolveCreate({});
     await waitFor(() => expect(screen.queryByText("Install Huly")).not.toBeInTheDocument());
+  });
+});
+
+describe("application updates", () => {
+  afterEach(cleanup);
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.appState.user.role = "admin";
+    mocks.updateState.phase = "idle";
+    mocks.updateState.supported = true;
+    mocks.updateState.supportReason = undefined;
+  });
+
+  it("uses one action for the app, backend, and web UI", () => {
+    render(<ApplicationSettings />);
+    expect(mocks.refreshAppUpdateAvailability).toHaveBeenCalledOnce();
+    expect(screen.getByText(/One update for the selected machine/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Update Boosted" }));
+    expect(mocks.checkAndInstallAppUpdate).toHaveBeenCalledOnce();
+    expect(screen.queryByText("Release security")).not.toBeInTheDocument();
+  });
+
+  it("restricts updates to administrators", () => {
+    mocks.appState.user.role = "member";
+    render(<ApplicationSettings />);
+    const button = screen.getByRole("button", { name: "Update Boosted" });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(mocks.checkAndInstallAppUpdate).not.toHaveBeenCalled();
+  });
+
+  it("prevents repeat clicks during updates", () => {
+    mocks.updateState.phase = "restarting";
+    render(<ApplicationSettings />);
+    expect(screen.getByRole("button", { name: "Updating…" })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Restarting Boosted…");
+  });
+
+  it("explains manual installations and disables their update action", () => {
+    mocks.updateState.phase = "unsupported";
+    mocks.updateState.supported = false;
+    mocks.updateState.supportReason = "Development build";
+    render(<ApplicationSettings />);
+    expect(screen.getByText("Development build")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Update Boosted" })).toBeDisabled();
   });
 });

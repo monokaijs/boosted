@@ -1,16 +1,19 @@
+mod agents;
 mod auth;
 pub mod cli;
 mod codex;
+mod codex_transcript;
 mod db;
+mod dev_web;
 mod error;
 mod files;
 mod git;
 mod integrations;
 mod models;
 mod process;
-mod remote_viewer;
+mod providers;
 mod terminal;
-mod updater;
+pub mod updater;
 
 use axum::{
     Extension, Json, Router,
@@ -26,6 +29,7 @@ use axum::{
     routing::{delete, get, patch, post, put},
 };
 use chrono::{TimeZone, Utc};
+use codex_transcript::{codex_item_message, codex_live_item_message};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -38,7 +42,6 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
 };
 use tokio::sync::{RwLock, broadcast};
 use tower_http::{
@@ -61,9 +64,6 @@ use crate::{
     db::Database,
     error::{AppError, AppResult},
     models::*,
-    remote_viewer::{
-        ControlEvent, MediaMessage, RemoteViewerManager, ViewerSessionPatch, ViewerSessionRequest,
-    },
     terminal::TerminalManager,
 };
 
@@ -73,6 +73,8 @@ pub struct Config {
     pub local_bind: Option<SocketAddr>,
     pub data_dir: PathBuf,
     pub web_dir: PathBuf,
+    /// Forward frontend requests to Vite during development.
+    pub web_dev_url: Option<String>,
     pub web_ui_enabled: Option<bool>,
     pub allowed_ips: Option<Vec<IpAddr>>,
 }
@@ -120,6 +122,7 @@ impl Config {
             local_bind: None,
             data_dir,
             web_dir,
+            web_dev_url: std::env::var("BOOSTED_WEB_DEV_URL").ok(),
             web_ui_enabled,
             allowed_ips,
         }
@@ -142,9 +145,10 @@ struct PendingInput {
 #[derive(Clone)]
 struct AppState {
     db: Database,
+    providers: providers::ProviderManager,
+    agents: agents::AgentManager,
     codex: CodexManager,
     terminals: TerminalManager,
-    remote_viewer: RemoteViewerManager,
     live: broadcast::Sender<LiveEvent>,
     sequence: Arc<AtomicU64>,
     pending_inputs: Arc<RwLock<HashMap<String, PendingInput>>>,
@@ -227,7 +231,7 @@ pub async fn run_headless(config: Config) -> Result<(), Box<dyn std::error::Erro
     run_with_updater(config, updater::ServerUpdater::from_env()).await
 }
 
-async fn run_with_updater(
+pub async fn run_with_updater(
     config: Config,
     updater: updater::ServerUpdater,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -264,12 +268,15 @@ async fn run_with_updater(
     let uploads_dir = config.data_dir.join("uploads");
     tokio::fs::create_dir_all(&uploads_dir).await?;
     let (live, _) = broadcast::channel(4096);
-    let remote_viewer_settings = db.remote_viewer_settings().await?;
+    let agents = agents::AgentManager::load(&db).await?;
     let state = AppState {
+        agents,
+        providers: providers::ProviderManager::new(
+            config.data_dir.join("providers/codex/accounts"),
+        ),
         db,
         codex,
         terminals: TerminalManager::default(),
-        remote_viewer: RemoteViewerManager::new(remote_viewer_settings),
         live,
         sequence: Arc::new(AtomicU64::new(1)),
         pending_inputs: Arc::new(RwLock::new(HashMap::new())),
@@ -279,11 +286,18 @@ async fn run_with_updater(
         worktrees_dir: config.data_dir.join("worktrees"),
         updater,
     };
+    tokio::spawn(agents::scheduler(state.clone()));
     let scheduler_state = state.clone();
     tokio::spawn(async move {
         integration_scheduler(scheduler_state).await;
     });
-    let app = router(state, &config.web_dir, web_ui_enabled, allowed_ips);
+    let app = router(
+        state,
+        &config.web_dir,
+        config.web_dev_url.as_deref(),
+        web_ui_enabled,
+        allowed_ips,
+    );
     if let Some((local_bind, local_listener)) = local_listener {
         let local_app = app.clone();
         tokio::spawn(async move {
@@ -314,6 +328,7 @@ fn bind_covers(bind: SocketAddr, local_bind: SocketAddr) -> bool {
 fn router(
     state: AppState,
     web_dir: &Path,
+    web_dev_url: Option<&str>,
     web_ui_enabled: bool,
     allowed_ips: Vec<IpAddr>,
 ) -> Router {
@@ -323,16 +338,46 @@ fn router(
         .route("/setup/admin", post(create_admin))
         .route("/auth/login", post(login))
         .route("/ws", get(live_ws))
-        .route("/terminals/{id}/ws", get(terminal_ws))
+        .route("/terminals/{id}/ws", get(terminal_ws));
+    let protected = Router::new()
+        .route("/providers", get(providers::list_providers))
         .route(
-            "/remote-viewer/sessions/{id}/media",
-            get(remote_viewer_media_ws),
+            "/provider-accounts",
+            get(providers::list_accounts).post(providers::create_account),
+        )
+        .route("/provider-accounts/limits", get(providers::account_limits))
+        .route(
+            "/provider-accounts/{id}",
+            get(providers::read_account)
+                .patch(providers::update_account)
+                .delete(providers::delete_account),
         )
         .route(
-            "/remote-viewer/sessions/{id}/control",
-            get(remote_viewer_control_ws),
-        );
-    let protected = Router::new()
+            "/provider-accounts/{id}/authenticate",
+            post(providers::authenticate_account),
+        )
+        .route(
+            "/provider-accounts/{id}/models",
+            get(providers::account_models),
+        )
+        .route(
+            "/agents",
+            get(agents::list_agents).post(agents::create_agent),
+        )
+        .route("/agents/{id}", get(agents::read_agent))
+        .route(
+            "/agents/{id}/messages",
+            post(agents::send_message).layer(DefaultBodyLimit::max(15 * 1024 * 1024)),
+        )
+        .route("/agents/{id}/stop", post(agents::stop_agent))
+        .route(
+            "/agents/{id}/avatar",
+            put(agents::update_avatar).layer(DefaultBodyLimit::max(3 * 1024 * 1024)),
+        )
+        .route(
+            "/agents/{id}/follow-ups/{followup_id}",
+            delete(agents::cancel_followup),
+        )
         .route("/auth/me", get(me))
         .route("/auth/session", delete(logout))
         .route("/auth/password", put(change_password))
@@ -340,30 +385,9 @@ fn router(
             "/settings/global",
             get(read_global_settings).put(update_global_settings),
         )
-        .route(
-            "/settings/remote-viewer",
-            get(read_remote_viewer_settings).put(update_remote_viewer_settings),
-        )
         .route("/updates/status", get(read_update_status))
         .route("/updates/check", post(check_for_update))
         .route("/updates/install", post(install_update))
-        .route(
-            "/remote-viewer/capabilities",
-            get(remote_viewer_capabilities),
-        )
-        .route("/remote-viewer/sources", get(remote_viewer_sources))
-        .route(
-            "/remote-viewer/sources/{id}/thumbnail",
-            get(remote_viewer_thumbnail),
-        )
-        .route(
-            "/remote-viewer/sessions",
-            post(create_remote_viewer_session),
-        )
-        .route(
-            "/remote-viewer/sessions/{id}",
-            patch(patch_remote_viewer_session).delete(delete_remote_viewer_session),
-        )
         .route("/users", get(list_users).post(create_user))
         .route("/users/{id}", patch(patch_user))
         .route("/codex/login", post(start_codex_login))
@@ -389,12 +413,19 @@ fn router(
         .route("/codex/chats/{id}/file", get(download_codex_file))
         .route("/codex/chats/{id}/messages", post(send_codex_message))
         .route("/codex/chats/{id}/stop", post(stop_codex_turn))
+        .route(
+            "/codex/chats/{id}/approvals",
+            get(providers::pending_approvals),
+        )
+        .route(
+            "/codex/chats/{id}/approvals/{request_id}",
+            post(providers::answer_approval),
+        )
         .route("/folders", get(browse_folders))
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/{id}/files", get(list_project_files))
         .route("/projects/{id}/file", get(read_project_file))
         .route("/projects/{id}/git/branches", get(list_project_branches))
-        .route("/projects/{id}/git/history", get(project_git_history))
         .route("/projects/{id}/terminals", post(create_project_terminal))
         .route(
             "/projects/{id}/integrations",
@@ -441,7 +472,6 @@ fn router(
         .route("/tasks/{id}/git/unstage", post(git_unstage))
         .route("/tasks/{id}/git/discard", post(git_discard))
         .route("/tasks/{id}/git/commit", post(git_commit))
-        .route("/tasks/{id}/git/history", get(git_history))
         .route("/tasks/{id}/terminals", post(create_terminal))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -465,7 +495,10 @@ fn router(
         )
         .layer(TraceLayer::new_for_http());
     let app = if web_ui_enabled {
-        web_app_fallback(app, web_dir)
+        match web_dev_url {
+            Some(url) => dev_web::proxy(app, url),
+            None => web_app_fallback(app, web_dir),
+        }
     } else {
         tracing::info!("Web UI serving is disabled");
         app
@@ -483,6 +516,12 @@ fn router(
 }
 
 fn web_app_fallback(app: Router, web_dir: &Path) -> Router {
+    // Release desktops and the bundled backend must use the same compiled assets.
+    // Headless installations can still explicitly override the web directory.
+    #[cfg(all(feature = "embedded-web", not(debug_assertions)))]
+    if web_dir == Config::default_web_dir() {
+        return embedded_web_fallback(app, web_dir);
+    }
     let index = web_dir.join("index.html");
     if index.is_file() {
         return app
@@ -631,17 +670,7 @@ async fn install_update(
     Extension(user): Extension<AuthUser>,
 ) -> AppResult<Json<updater::UpdateStatus>> {
     ensure_admin(&user)?;
-    let status = state.updater.install().await?;
-    if status.restart_pending {
-        let restart = state.updater.restart_action()?;
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(750)).await;
-            if let Err(error) = restart.execute() {
-                tracing::error!(%error, "could not restart after installing the server update");
-            }
-        });
-    }
-    Ok(Json(status))
+    Ok(Json(state.updater.install_and_restart().await?))
 }
 
 async fn setup_state(State(state): State<AppState>) -> AppResult<Json<Value>> {
@@ -765,92 +794,6 @@ async fn update_global_settings(
         updated_at: None,
     };
     Ok(Json(state.db.update_global_settings(&settings).await?))
-}
-
-async fn read_remote_viewer_settings(
-    State(state): State<AppState>,
-    Extension(_user): Extension<AuthUser>,
-) -> AppResult<Json<RemoteViewerSettings>> {
-    Ok(Json(state.db.remote_viewer_settings().await?))
-}
-
-async fn update_remote_viewer_settings(
-    State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
-    Json(settings): Json<RemoteViewerSettings>,
-) -> AppResult<Json<RemoteViewerSettings>> {
-    ensure_admin(&user)?;
-    remote_viewer::validate_settings(&settings)?;
-    let saved = state.db.update_remote_viewer_settings(&settings).await?;
-    state.remote_viewer.apply_settings(saved.clone());
-    Ok(Json(saved))
-}
-
-async fn remote_viewer_capabilities(
-    State(state): State<AppState>,
-    Extension(_user): Extension<AuthUser>,
-) -> Json<remote_viewer::RemoteViewerCapabilities> {
-    Json(state.remote_viewer.capabilities())
-}
-
-#[derive(Deserialize)]
-struct RemoteViewerSourcesQuery {
-    kind: Option<String>,
-}
-
-async fn remote_viewer_sources(
-    State(state): State<AppState>,
-    Extension(_user): Extension<AuthUser>,
-    Query(query): Query<RemoteViewerSourcesQuery>,
-) -> AppResult<Json<Vec<remote_viewer::CaptureSource>>> {
-    if let Some(kind) = query.kind.as_deref()
-        && !matches!(kind, "window" | "display")
-    {
-        return Err(AppError::BadRequest(
-            "source kind must be window or display".into(),
-        ));
-    }
-    Ok(Json(
-        state.remote_viewer.list_sources(query.kind.as_deref())?,
-    ))
-}
-
-async fn remote_viewer_thumbnail(
-    State(state): State<AppState>,
-    Extension(_user): Extension<AuthUser>,
-    AxumPath(id): AxumPath<String>,
-) -> AppResult<Response> {
-    let (bytes, content_type) = state.remote_viewer.thumbnail(&id)?;
-    Ok(([(axum::http::header::CONTENT_TYPE, content_type)], bytes).into_response())
-}
-
-async fn create_remote_viewer_session(
-    State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
-    Json(request): Json<ViewerSessionRequest>,
-) -> AppResult<(StatusCode, Json<remote_viewer::ViewerSession>)> {
-    let session = state.remote_viewer.create_session(&user.id, request)?;
-    Ok((StatusCode::CREATED, Json(session)))
-}
-
-async fn patch_remote_viewer_session(
-    State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
-    AxumPath(id): AxumPath<String>,
-    Json(patch): Json<ViewerSessionPatch>,
-) -> AppResult<Json<remote_viewer::ViewerSession>> {
-    Ok(Json(
-        state.remote_viewer.patch_session(&user.id, &id, patch)?,
-    ))
-}
-
-async fn delete_remote_viewer_session(
-    State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
-    AxumPath(id): AxumPath<String>,
-) -> AppResult<StatusCode> {
-    state.remote_viewer.delete_session(&user.id, &id)?;
-    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_users(
@@ -1027,8 +970,14 @@ async fn load_codex_options(client: &CodexClient) -> AppResult<CodexOptions> {
     })
 }
 
-async fn read_codex_options(State(state): State<AppState>) -> AppResult<Json<CodexOptions>> {
-    let client = state.codex.client().await?;
+async fn read_codex_options(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> AppResult<Json<CodexOptions>> {
+    let client = match query.get("threadId") {
+        Some(id) => providers::client_for_thread(&state, id).await?,
+        None => state.codex.client().await?,
+    };
     Ok(Json(load_codex_options(&client).await?))
 }
 
@@ -1305,15 +1254,43 @@ struct CodexChatListQuery {
     cwd: Option<String>,
 }
 
+fn apply_codex_chat_activity(
+    chat: &mut CodexChat,
+    active_turn_id: Option<&str>,
+    approvals: &[Value],
+) {
+    if let Some(turn_id) = active_turn_id {
+        chat.status = if approvals.iter().any(|approval| {
+            approval["threadId"].as_str() == Some(chat.id.as_str())
+                && approval["turnId"].as_str() == Some(turn_id)
+        }) {
+            "needs_input"
+        } else {
+            "active"
+        }
+        .to_string();
+    }
+}
+
+async fn refresh_codex_chat_activity(state: &AppState, chats: &mut [CodexChat]) -> AppResult<()> {
+    let approvals = providers::documents(&state.db, "approvals").await?;
+    let active = state.active_codex_turns.read().await;
+    for chat in chats {
+        let turn_id = active.get(&chat.id).map(String::as_str);
+        apply_codex_chat_activity(chat, turn_id, &approvals);
+    }
+    Ok(())
+}
+
 async fn list_codex_chats(
     State(state): State<AppState>,
     Query(query): Query<CodexChatListQuery>,
 ) -> AppResult<Json<Vec<CodexChat>>> {
-    let client = state.codex.client().await?;
+    let client = state.codex.client().await.ok();
     let mut chats = Vec::new();
     let mut cursor: Option<String> = None;
-    loop {
-        let result = client
+    while let Some(client) = &client {
+        let result = match client
             .request(
                 "thread/list",
                 json!({
@@ -1326,7 +1303,14 @@ async fn list_codex_chats(
                     "archived": false
                 }),
             )
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::debug!(%error,"Shared Codex history unavailable");
+                break;
+            }
+        };
         if let Some(threads) = result.get("data").and_then(Value::as_array) {
             chats.extend(threads.iter().map(codex_chat));
         }
@@ -1346,7 +1330,30 @@ async fn list_codex_chats(
     .into_iter()
     .collect::<HashSet<_>>();
     chats.retain(|chat| !task_thread_ids.contains(&chat.id));
+    for metadata in providers::documents(&state.db, "provider-chats").await? {
+        if query.cwd.as_deref().is_some_and(|cwd| {
+            !cwd.is_empty() && metadata["workingDirectory"].as_str() != Some(cwd)
+        }) {
+            continue;
+        }
+        let Some(id) = metadata["id"].as_str() else {
+            continue;
+        };
+        if chats.iter().any(|chat| chat.id == id) {
+            continue;
+        }
+        if let Ok(client) = providers::client_for_thread(&state, id).await {
+            if let Ok(result) = client
+                .request("thread/read", json!({"threadId":id,"includeTurns":false}))
+                .await
+            {
+                chats.push(codex_chat(&result["thread"]));
+            }
+        }
+    }
+    chats.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     chats.truncate(500);
+    refresh_codex_chat_activity(&state, &mut chats).await?;
     Ok(Json(chats))
 }
 
@@ -1392,148 +1399,6 @@ async fn create_codex_chat(
     Ok((StatusCode::CREATED, Json(chat)))
 }
 
-fn codex_input_text(content: &[Value]) -> String {
-    content
-        .iter()
-        .filter_map(|input| match input.get("type").and_then(Value::as_str) {
-            Some("text") => input
-                .get("text")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            Some("image") => Some("[Image attachment]".into()),
-            Some("localImage") => Some("[Image attachment]".into()),
-            Some("audio") => Some("[Audio attachment]".into()),
-            Some("localAudio") => Some("[Audio attachment]".into()),
-            Some("skill") => Some(format!(
-                "${}",
-                input.get("name").and_then(Value::as_str).unwrap_or("skill")
-            )),
-            Some("mention") => Some(format!(
-                "@{}",
-                input
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("mention")
-            )),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-fn codex_tool_text(item: &Value) -> Option<(String, String)> {
-    match item.get("type").and_then(Value::as_str)? {
-        "reasoning" => {
-            let summary = item
-                .get("summary")?
-                .as_array()?
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            (!summary.is_empty()).then(|| {
-                (
-                    "reasoning".into(),
-                    format!(
-                        "> **Reasoning summary**\n> {}",
-                        summary.replace('\n', "\n> ")
-                    ),
-                )
-            })
-        }
-        "plan" => item
-            .get("text")
-            .and_then(Value::as_str)
-            .map(|text| ("plan".into(), format!("**Plan**\n\n{text}"))),
-        "commandExecution" => {
-            let command = item
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or("command");
-            let output = item
-                .get("aggregatedOutput")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let exit = item
-                .get("exitCode")
-                .and_then(Value::as_i64)
-                .map(|code| format!(" · exit {code}"))
-                .unwrap_or_default();
-            let body = if output.is_empty() {
-                format!("`$ {command}`{exit}")
-            } else {
-                format!("`$ {command}`{exit}\n\n```text\n{}\n```", output.trim())
-            };
-            Some(("tool".into(), body))
-        }
-        "fileChange" => {
-            let files = item
-                .get("changes")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|change| change.get("path").and_then(Value::as_str))
-                .collect::<Vec<_>>();
-            Some((
-                "tool".into(),
-                format!(
-                    "**Files changed**\n\n{}",
-                    files
-                        .iter()
-                        .map(|path| format!("- `{path}`"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                ),
-            ))
-        }
-        "mcpToolCall" => Some((
-            "tool".into(),
-            format!(
-                "**Tool** · `{}/{}`",
-                item.get("server").and_then(Value::as_str).unwrap_or("MCP"),
-                item.get("tool").and_then(Value::as_str).unwrap_or("call")
-            ),
-        )),
-        "dynamicToolCall" => Some((
-            "tool".into(),
-            format!(
-                "**Tool** · `{}`",
-                item.get("tool").and_then(Value::as_str).unwrap_or("call")
-            ),
-        )),
-        "collabAgentToolCall" => Some((
-            "tool".into(),
-            format!(
-                "**Agent collaboration** · `{}`",
-                item.get("tool").and_then(Value::as_str).unwrap_or("call")
-            ),
-        )),
-        "webSearch" => Some((
-            "tool".into(),
-            format!(
-                "**Web search** · {}",
-                item.get("query")
-                    .and_then(Value::as_str)
-                    .unwrap_or("search")
-            ),
-        )),
-        "imageView" => Some((
-            "tool".into(),
-            format!(
-                "**Viewed image** · `{}`",
-                item.get("path").and_then(Value::as_str).unwrap_or("image")
-            ),
-        )),
-        "contextCompaction" => Some((
-            "system".into(),
-            "*Codex compacted the conversation context.*".into(),
-        )),
-        "enteredReviewMode" => Some(("system".into(), "*Codex entered review mode.*".into())),
-        "exitedReviewMode" => Some(("system".into(), "*Codex completed review mode.*".into())),
-        _ => None,
-    }
-}
-
 fn codex_messages(thread: &Value) -> Vec<CodexChatMessage> {
     let mut messages = Vec::new();
     let Some(turns) = thread.get("turns").and_then(Value::as_array) else {
@@ -1560,52 +1425,6 @@ fn codex_messages(thread: &Value) -> Vec<CodexChatMessage> {
         }
     }
     messages
-}
-
-fn codex_item_message(
-    item: &Value,
-    created_at: Option<String>,
-    fallback_id: &str,
-) -> Option<CodexChatMessage> {
-    let item_type = item.get("type").and_then(Value::as_str).unwrap_or("item");
-    let id = item
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or(fallback_id)
-        .to_string();
-    let normalized = match item_type {
-        "userMessage" => {
-            let content = codex_input_text(
-                item.get("content")
-                    .and_then(Value::as_array)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-            );
-            (!content.is_empty()).then(|| ("user".into(), "message".into(), content))
-        }
-        "agentMessage" => item
-            .get("text")
-            .and_then(Value::as_str)
-            .filter(|text| !text.is_empty())
-            .map(|text| ("assistant".into(), "message".into(), text.to_string())),
-        _ => codex_tool_text(item).map(|(kind, content)| ("assistant".into(), kind, content)),
-    };
-    normalized.map(|(role, kind, content)| CodexChatMessage {
-        id,
-        role,
-        content,
-        kind,
-        created_at,
-    })
-}
-
-fn codex_live_item_message(item: &Value, client_message_id: &str) -> Option<CodexChatMessage> {
-    codex_item_message(item, None, "live-item").map(|mut message| {
-        if message.role == "user" {
-            message.id = client_message_id.to_string();
-        }
-        message
-    })
 }
 
 fn is_codex_thread_writer_conflict(error: &AppError) -> bool {
@@ -1635,9 +1454,7 @@ async fn read_codex_chat(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> AppResult<Json<CodexChatThread>> {
-    let result = state
-        .codex
-        .client()
+    let result = providers::client_for_thread(&state, &id)
         .await?
         .request(
             "thread/read",
@@ -1647,8 +1464,12 @@ async fn read_codex_chat(
     let thread = result
         .get("thread")
         .ok_or_else(|| AppError::Internal("Codex returned no thread".into()))?;
+    let runtime_defaults = providers::runtime_defaults(&state, &id).await?;
+    let mut chat = codex_chat(thread);
+    refresh_codex_chat_activity(&state, std::slice::from_mut(&mut chat)).await?;
     Ok(Json(CodexChatThread {
-        chat: codex_chat(thread),
+        runtime_defaults,
+        chat,
         messages: codex_messages(thread),
     }))
 }
@@ -1658,9 +1479,7 @@ async fn download_codex_file(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<FileQuery>,
 ) -> AppResult<Response> {
-    let result = state
-        .codex
-        .client()
+    let result = providers::client_for_thread(&state, &id)
         .await?
         .request(
             "thread/read",
@@ -1680,6 +1499,8 @@ async fn send_codex_message(
     AxumPath(requested_thread_id): AxumPath<String>,
     Json(input): Json<CodexMessageCreate>,
 ) -> AppResult<(StatusCode, Json<CodexTurnStart>)> {
+    let chat_lock = state.providers.chat_lock(&requested_thread_id).await;
+    let _chat_guard = chat_lock.lock().await;
     let message = input.message.trim().to_string();
     if message.is_empty() && input.attachment_ids.is_empty() {
         return Err(AppError::BadRequest(
@@ -1691,18 +1512,31 @@ async fn send_codex_message(
             "a message can include at most 4 images".into(),
         ));
     }
-    if state
+    let active_turn_id = state
         .active_codex_turns
         .read()
         .await
-        .contains_key(&requested_thread_id)
-    {
+        .get(&requested_thread_id)
+        .cloned();
+    if let Some(turn_id) = active_turn_id {
+        if input.attachment_ids.is_empty() && codex_transcript::is_question_reply(&message) {
+            providers::client_for_thread(&state, &requested_thread_id).await?
+                .request("turn/steer", json!({"threadId":requested_thread_id,"expectedTurnId":turn_id,"clientUserMessageId":input.client_message_id,"input":[{"type":"text","text":message}]})).await?;
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(CodexTurnStart {
+                    turn_id,
+                    thread_id: requested_thread_id,
+                    forked_from_thread_id: None,
+                }),
+            ));
+        }
         return Err(AppError::Conflict(
             "This Codex chat already has a running turn".into(),
         ));
     }
 
-    let client = state.codex.client().await?;
+    let client = providers::client_for_thread(&state, &requested_thread_id).await?;
     let mut notifications = client.subscribe();
     let started = state
         .started_codex_threads
@@ -1738,6 +1572,12 @@ async fn send_codex_message(
             }
             Err(error) => return Err(error),
         };
+    if let Some(original) = &forked_from_thread_id {
+        if let Ok(mut metadata) = providers::document(&state.db, "provider-chats", original).await {
+            metadata["id"] = json!(thread_id);
+            providers::save_document(&state.db, "provider-chats", &metadata).await?;
+        }
+    }
     let codex_options = load_codex_options(&client).await?;
     let requested_model = input
         .model
@@ -1816,6 +1656,17 @@ async fn send_codex_message(
         .filter(|id| !id.trim().is_empty())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let forward_client_message_id = client_message_id.clone();
+    let approval_policy = input.approval_policy.as_deref().unwrap_or("never");
+    if !matches!(
+        approval_policy,
+        "never" | "on-request" | "untrusted" | "on-failure"
+    ) {
+        return Err(AppError::BadRequest("Invalid approval policy".into()));
+    }
+    let service_tier = input
+        .service_tier
+        .as_deref()
+        .or(resumed.get("serviceTier").and_then(Value::as_str));
     let result = client
         .request(
             "turn/start",
@@ -1823,10 +1674,11 @@ async fn send_codex_message(
                 "threadId": thread_id,
                 "clientUserMessageId": client_message_id,
                 "input": turn_input,
-                "approvalPolicy": "never",
+                "approvalPolicy": approval_policy,
                 "sandboxPolicy": sandbox_policy,
                 "model": selected_model.model,
-                "effort": reasoning_effort
+                "effort": reasoning_effort,
+                "serviceTier": service_tier
             }),
         )
         .await?;
@@ -1836,6 +1688,21 @@ async fn send_codex_message(
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::Internal("Codex returned no turn id".into()))?
         .to_string();
+    providers::save_document(
+        &state.db,
+        "chat-runtime",
+        &json!({
+            "id": thread_id, "model": selected_model.model, "reasoningEffort": reasoning_effort,
+            "accessMode": access_mode, "serviceTier": service_tier, "approvalPolicy": approval_policy
+        }),
+    )
+    .await?;
+    providers::save_document(
+        &state.db,
+        "coding-requests",
+        &json!({"id":turn_id,"chatId":thread_id,"content":message}),
+    )
+    .await?;
     state
         .active_codex_turns
         .write()
@@ -1855,6 +1722,8 @@ async fn send_codex_message(
     let forward_thread_id = thread_id.clone();
     let forward_turn_id = turn_id.clone();
     tokio::spawn(async move {
+        let mut initial_user_item_id: Option<String> = None;
+        let mut live_items: HashMap<String, Value> = HashMap::new();
         loop {
             let event = match notifications.recv().await {
                 Ok(event) => event,
@@ -1876,17 +1745,84 @@ async fn send_codex_message(
             let Some(method) = event.get("method").and_then(Value::as_str) else {
                 continue;
             };
+            if matches!(
+                method,
+                "item/commandExecution/requestApproval"
+                    | "item/fileChange/requestApproval"
+                    | "item/tool/requestUserInput"
+            ) {
+                let approval = json!({"id":Uuid::new_v4().to_string(),"threadId":forward_thread_id,"turnId":forward_turn_id,"requestId":event["id"],"method":method,"params":params});
+                if let Err(error) =
+                    providers::save_document(&forward_state.db, "approvals", &approval).await
+                {
+                    tracing::warn!(%error,"Unable to save coding approval");
+                }
+                forward_state.emit("codex.approval", approval);
+                continue;
+            }
+            if method == "serverRequest/resolved" {
+                if let Ok(requests) = providers::documents(&forward_state.db, "approvals").await {
+                    for request in requests.into_iter().filter(|request| {
+                        request["threadId"] == forward_thread_id
+                            && request["requestId"] == params["requestId"]
+                    }) {
+                        let _ = sqlx::query(
+                            "DELETE FROM feature_documents WHERE namespace='approvals' AND id=?",
+                        )
+                        .bind(request["id"].as_str().unwrap_or_default())
+                        .execute(&forward_state.db.pool)
+                        .await;
+                    }
+                }
+                forward_state.emit("codex.approval", json!({"threadId":forward_thread_id}));
+                continue;
+            }
             let data = match method {
                 "item/started" | "item/completed" => {
+                    let item = params.get("item");
+                    if let Some(item) = item {
+                        if let Some(id) = item["id"].as_str() {
+                            live_items.insert(id.to_string(), item.clone());
+                        }
+                    }
+                    if let Some(item) = item.filter(|item| item["type"] == "userMessage") {
+                        if initial_user_item_id.is_none() {
+                            initial_user_item_id = item["id"].as_str().map(str::to_string);
+                        }
+                    }
+                    let is_initial_user = item.is_some_and(|item| {
+                        item["type"] == "userMessage"
+                            && item["id"].as_str() == initial_user_item_id.as_deref()
+                    });
+                    let client_message_id = if is_initial_user {
+                        forward_client_message_id.as_str()
+                    } else {
+                        ""
+                    };
                     let normalized = params
                         .get("item")
-                        .and_then(|item| codex_live_item_message(item, &forward_client_message_id));
-                    json!({ "threadId": forward_thread_id, "turnId": forward_turn_id, "method": method, "clientMessageId": forward_client_message_id, "message": normalized })
+                        .and_then(|item| codex_live_item_message(item, client_message_id));
+                    let client_id = normalized
+                        .as_ref()
+                        .filter(|message| message.role == "user")
+                        .map(|message| message.id.clone());
+                    json!({ "threadId": forward_thread_id, "turnId": forward_turn_id, "method": method, "clientMessageId": client_id, "message": normalized })
+                }
+                "item/commandExecution/outputDelta" => {
+                    let id = params["itemId"].as_str().unwrap_or_default();
+                    let normalized = live_items.get_mut(id).and_then(|item| {
+                        let output = item["aggregatedOutput"].as_str().unwrap_or_default();
+                        item["aggregatedOutput"] = json!(format!(
+                            "{output}{}",
+                            params["delta"].as_str().unwrap_or_default()
+                        ));
+                        codex_live_item_message(item, "")
+                    });
+                    json!({"threadId":forward_thread_id,"turnId":forward_turn_id,"method":method,"message":normalized})
                 }
                 "item/agentMessage/delta"
                 | "item/reasoning/summaryTextDelta"
-                | "item/plan/delta"
-                | "item/commandExecution/outputDelta" => json!({
+                | "item/plan/delta" => json!({
                     "threadId": forward_thread_id,
                     "turnId": forward_turn_id,
                     "method": method,
@@ -1905,15 +1841,53 @@ async fn send_codex_message(
                 }
                 _ => continue,
             };
+            // Completion listeners immediately refetch the chat list. Clear the
+            // active turn first so those requests cannot report it as running.
+            if method == "turn/completed" {
+                let mut active = forward_state.active_codex_turns.write().await;
+                if active.get(&forward_thread_id) == Some(&forward_turn_id) {
+                    active.remove(&forward_thread_id);
+                }
+            }
             forward_state.emit("codex.event", data);
             if method == "turn/completed" {
+                if let Err(error) = agents::record_outcome(
+                    &forward_state,
+                    &forward_thread_id,
+                    &forward_turn_id,
+                    params,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "Unable to save coding run outcome");
+                }
+            }
+            if method == "turn/completed" {
                 break;
+            }
+        }
+        if let Ok(approvals) = providers::documents(&forward_state.db, "approvals").await {
+            for approval in approvals
+                .into_iter()
+                .filter(|a| a["threadId"] == forward_thread_id && a["turnId"] == forward_turn_id)
+            {
+                let _ = sqlx::query(
+                    "DELETE FROM feature_documents WHERE namespace='approvals' AND id=?",
+                )
+                .bind(approval["id"].as_str().unwrap_or_default())
+                .execute(&forward_state.db.pool)
+                .await;
             }
         }
         let mut active = forward_state.active_codex_turns.write().await;
         if active.get(&forward_thread_id) == Some(&forward_turn_id) {
             active.remove(&forward_thread_id);
         }
+        drop(active);
+        forward_state.emit(
+            "provider-chats.updated",
+            json!({"threadId":forward_thread_id}),
+        );
     });
 
     Ok((
@@ -1937,9 +1911,7 @@ async fn stop_codex_turn(
         .get(&thread_id)
         .cloned()
         .ok_or_else(|| AppError::Conflict("This Codex chat has no running turn".into()))?;
-    state
-        .codex
-        .client()
+    providers::client_for_thread(&state, &thread_id)
         .await?
         .request(
             "turn/interrupt",
@@ -2040,17 +2012,6 @@ async fn list_project_branches(
 ) -> AppResult<Json<Vec<String>>> {
     let project = state.db.project(&id).await?;
     Ok(Json(git::branches(Path::new(&project.repo_path)).await?))
-}
-
-async fn project_git_history(
-    State(state): State<AppState>,
-    AxumPath(id): AxumPath<String>,
-    Query(query): Query<HistoryQuery>,
-) -> AppResult<Json<Vec<GitCommit>>> {
-    let project = state.db.project(&id).await?;
-    Ok(Json(
-        git::history(Path::new(&project.repo_path), query.limit).await?,
-    ))
 }
 
 async fn create_project_terminal(
@@ -2939,25 +2900,6 @@ async fn git_commit(
     refresh_diff_stats(&state, &id).await?;
     Ok(Json(json!({"commit":commit})))
 }
-#[derive(Deserialize)]
-struct HistoryQuery {
-    #[serde(default = "history_default")]
-    limit: usize,
-}
-fn history_default() -> usize {
-    100
-}
-async fn git_history(
-    State(state): State<AppState>,
-    AxumPath(id): AxumPath<String>,
-    Query(query): Query<HistoryQuery>,
-) -> AppResult<Json<Vec<GitCommit>>> {
-    let task = state.db.task(&id).await?;
-    Ok(Json(
-        git::history(Path::new(&task.worktree_path), query.limit).await?,
-    ))
-}
-
 async fn create_terminal(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -3000,144 +2942,6 @@ async fn terminal_ws(
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_terminal_ws(socket, state, id))
-}
-
-async fn remote_viewer_media_ws(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-    AxumPath(id): AxumPath<String>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_remote_viewer_media_ws(socket, state, id))
-}
-
-async fn handle_remote_viewer_media_ws(mut socket: WebSocket, state: AppState, id: String) {
-    let Some(user) = authenticate_websocket(&mut socket, &state).await else {
-        return;
-    };
-    if state
-        .remote_viewer
-        .owned_description(&user.id, &id)
-        .is_err()
-    {
-        let _ = socket.send(WsMessage::Close(None)).await;
-        return;
-    }
-    let Ok((mut media, config)) = state.remote_viewer.subscribe(&user.id, &id) else {
-        return;
-    };
-    if let Some(config) = config {
-        let _ = socket.send(WsMessage::Text(config.into())).await;
-    }
-    let _ = socket
-        .send(WsMessage::Text(
-            json!({"type":"status","state":"connected"})
-                .to_string()
-                .into(),
-        ))
-        .await;
-    let (mut sender, mut receiver) = socket.split();
-    loop {
-        tokio::select! {
-            message = media.recv() => match message {
-                Ok(MediaMessage::Text(text)) => {
-                    if sender.send(WsMessage::Text(text.into())).await.is_err() { break; }
-                }
-                Ok(MediaMessage::Binary(bytes)) => {
-                    if sender.send(WsMessage::Binary(bytes.into())).await.is_err() { break; }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let _ = state.remote_viewer.request_keyframe(&user.id, &id);
-                    continue;
-                }
-                Err(_) => break,
-            },
-            incoming = receiver.next() => match incoming {
-                Some(Ok(WsMessage::Text(text))) => {
-                    if serde_json::from_str::<Value>(&text).ok().and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned)).as_deref() == Some("keyframe") {
-                        let _ = state.remote_viewer.request_keyframe(&user.id, &id);
-                    }
-                }
-                Some(Ok(WsMessage::Ping(bytes))) => {
-                    if sender.send(WsMessage::Pong(bytes)).await.is_err() { break; }
-                }
-                Some(Ok(_)) => {}
-                _ => break,
-            }
-        }
-    }
-}
-
-async fn remote_viewer_control_ws(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-    AxumPath(id): AxumPath<String>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_remote_viewer_control_ws(socket, state, id))
-}
-
-async fn handle_remote_viewer_control_ws(mut socket: WebSocket, state: AppState, id: String) {
-    let Some(user) = authenticate_websocket(&mut socket, &state).await else {
-        return;
-    };
-    if state
-        .remote_viewer
-        .owned_description(&user.id, &id)
-        .is_err()
-    {
-        let _ = socket.send(WsMessage::Close(None)).await;
-        return;
-    }
-    let (mut sender, mut receiver) = socket.split();
-    let mut lease_check = tokio::time::interval(Duration::from_secs(2));
-    loop {
-        tokio::select! {
-            _ = lease_check.tick() => state.remote_viewer.expire_leases(),
-            incoming = receiver.next() => match incoming {
-                Some(Ok(WsMessage::Text(text))) => {
-                    let response = match serde_json::from_str::<ControlEvent>(&text) {
-                        Ok(event) => state.remote_viewer.handle_control(&user.id, &id, event),
-                        Err(error) => Err(AppError::BadRequest(format!("invalid control event: {error}"))),
-                    };
-                    let message = match response {
-                        Ok(value) => value,
-                        Err(error) => json!({"type":"error","message":error.to_string()}),
-                    };
-                    if sender.send(WsMessage::Text(message.to_string().into())).await.is_err() { break; }
-                }
-                Some(Ok(WsMessage::Ping(bytes))) => {
-                    if sender.send(WsMessage::Pong(bytes)).await.is_err() { break; }
-                }
-                Some(Ok(_)) => {}
-                _ => break,
-            }
-        }
-    }
-    state.remote_viewer.release_control(&user.id, &id);
-}
-
-async fn authenticate_websocket(socket: &mut WebSocket, state: &AppState) -> Option<AuthUser> {
-    let Some(Ok(WsMessage::Text(auth_message))) = socket.recv().await else {
-        return None;
-    };
-    let token = serde_json::from_str::<Value>(&auth_message)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("token")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        });
-    let Some(token) = token else {
-        let _ = socket.send(WsMessage::Close(None)).await;
-        return None;
-    };
-    match authenticate(&state.db, &token).await {
-        Ok(user) => Some(user),
-        Err(_) => {
-            let _ = socket.send(WsMessage::Close(None)).await;
-            None
-        }
-    }
 }
 
 async fn handle_terminal_ws(mut socket: WebSocket, state: AppState, id: String) {
@@ -3647,6 +3451,20 @@ fn slugify(value: &str) -> String {
 mod tests {
     use super::*;
     #[test]
+    fn chat_activity_uses_the_current_turn_and_ignores_stale_approvals() {
+        let mut chat = codex_chat(&json!({"id":"thread", "status":{"type":"notLoaded"}}));
+        let stale = json!({"threadId":"thread", "turnId":"old-turn"});
+        apply_codex_chat_activity(&mut chat, Some("turn"), &[stale]);
+        assert_eq!(chat.status, "active");
+        let pending = json!({"threadId":"thread", "turnId":"turn"});
+        apply_codex_chat_activity(&mut chat, Some("turn"), &[pending.clone()]);
+        assert_eq!(chat.status, "needs_input");
+        chat.status = "idle".into();
+        apply_codex_chat_activity(&mut chat, None, &[pending]);
+        assert_eq!(chat.status, "idle");
+    }
+
+    #[test]
     fn creates_safe_slug() {
         assert_eq!(
             slugify("Add loading skeleton to SearchBox"),
@@ -3899,39 +3717,6 @@ mod tests {
             .expect("authentication")
             .expect("persistent session");
         assert_eq!(authenticated.id, user_id);
-    }
-    #[tokio::test]
-    async fn remote_viewer_settings_default_disabled_and_round_trip() {
-        let root = tempfile::tempdir().expect("temporary database directory");
-        let db = Database::connect(&root.path().join("boosted.sqlite3"))
-            .await
-            .expect("database");
-        let defaults = db
-            .remote_viewer_settings()
-            .await
-            .expect("default viewer settings");
-        assert!(!defaults.enabled);
-        assert!(!defaults.control_enabled);
-        assert!(defaults.audio_enabled);
-        assert_eq!(defaults.default_fps, 30);
-        assert_eq!(defaults.max_concurrent_streams, 4);
-
-        let saved = RemoteViewerSettings {
-            enabled: true,
-            control_enabled: true,
-            max_fps: 45,
-            default_fps: 24,
-            ..defaults
-        };
-        db.update_remote_viewer_settings(&saved)
-            .await
-            .expect("saved viewer settings");
-        assert_eq!(
-            db.remote_viewer_settings()
-                .await
-                .expect("reloaded viewer settings"),
-            saved
-        );
     }
     #[cfg(feature = "embedded-web")]
     #[tokio::test]

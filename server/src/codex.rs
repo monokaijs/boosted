@@ -160,8 +160,48 @@ pub struct CodexClient {
 }
 
 impl CodexClient {
+    pub async fn for_account(home: &std::path::Path, dynamic_tools: bool) -> AppResult<Self> {
+        let codex = resolve_codex_command()
+            .await
+            .ok_or_else(|| AppError::Internal("Codex CLI was not found in PATH".into()))?;
+        Self::spawn_with_home(&codex, Some(home), dynamic_tools).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_process(program: PathBuf, dynamic_tools: bool) -> AppResult<Self> {
+        Self::spawn_with_home(
+            &CodexCommand {
+                program,
+                path: None,
+            },
+            None,
+            dynamic_tools,
+        )
+        .await
+    }
+
+    pub async fn shutdown(&self) {
+        let _ = self._child.lock().await.kill().await;
+    }
+
     async fn spawn(codex: &CodexCommand) -> AppResult<Self> {
+        Self::spawn_with_home(codex, None, false).await
+    }
+
+    async fn spawn_with_home(
+        codex: &CodexCommand,
+        home: Option<&std::path::Path>,
+        dynamic_tools: bool,
+    ) -> AppResult<Self> {
         let mut command = codex.command();
+        if let Some(home) = home {
+            command.env("CODEX_HOME", home);
+            // Account authentication belongs to its isolated home, not to inherited host credentials.
+            command
+                .env_remove("OPENAI_API_KEY")
+                .env_remove("CODEX_API_KEY")
+                .env_remove("OPENAI_ACCESS_TOKEN");
+        }
         command
             .args(["app-server", "--stdio"])
             .stdin(Stdio::piped())
@@ -200,8 +240,22 @@ impl CodexClient {
                 };
                 if message.get("method").is_some() {
                     let _ = notifications.send(message.clone());
-                    if message.get("method").and_then(Value::as_str)
-                        != Some("item/tool/requestUserInput")
+                    let method = message
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let coding_approval = !dynamic_tools
+                        && matches!(
+                            method,
+                            "item/commandExecution/requestApproval"
+                                | "item/fileChange/requestApproval"
+                        );
+                    if !coding_approval
+                        && !(dynamic_tools
+                            && message.get("method").and_then(Value::as_str)
+                                == Some("item/tool/call"))
+                        && message.get("method").and_then(Value::as_str)
+                            != Some("item/tool/requestUserInput")
                     {
                         if let Some(id) = message.get("id") {
                             let response = json!({"id": id, "error": {"code": -32601, "message": "Boosted does not support this server request yet"}});
@@ -296,6 +350,14 @@ pub struct CodexManager {
 }
 
 impl CodexManager {
+    #[cfg(test)]
+    pub(crate) fn test_unavailable() -> Self {
+        Self {
+            client: Default::default(),
+            info: Default::default(),
+        }
+    }
+
     pub async fn new() -> Self {
         let codex = resolve_codex_command().await;
         let version = if let Some(codex) = &codex {

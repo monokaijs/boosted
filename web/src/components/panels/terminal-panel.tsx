@@ -42,9 +42,10 @@ export function TerminalPanel() {
     return () => { input.dispose(); resize.disconnect(); socket.close(); terminal.dispose(); };
   }, [terminalId]);
 
-  if (!projectId) return <div className="empty-state"><TerminalSquare className="size-8" /><p>Open a project to start a workspace terminal.</p></div>;
+  if (!projectId) return <div className="panel-root"><div className="panel-header"><div className="panel-title"><TerminalSquare className="size-3.5" />Terminal</div></div><div className="empty-state min-h-0 flex-1"><TerminalSquare className="size-8" /><p>Open a project to start a workspace terminal.</p></div></div>;
   return (
     <div className="panel-root">
+      <div className="panel-header"><div className="panel-title"><TerminalSquare className="size-3.5" />Terminal</div></div>
       <div className="relative min-h-0 flex-1 p-2" ref={hostRef}>{!terminalId && !error && <div className="absolute inset-0 z-10 grid place-items-center bg-background"><LoaderCircle className="size-5 animate-spin text-primary" /></div>}</div>
       {error && <div className="border-t border-border px-3 py-2 text-xs text-destructive">{error}</div>}
     </div>

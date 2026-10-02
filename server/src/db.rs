@@ -1,8 +1,8 @@
 use crate::{
     error::{AppError, AppResult},
     models::{
-        AuthUser, CodexBinarySettings, GlobalSettings, Integration, Project, RemoteViewerSettings,
-        Task, TaskAttachment, TaskEvent, TaskPlan, TaskSource, User,
+        AuthUser, CodexBinarySettings, GlobalSettings, Integration, Project, Task, TaskAttachment,
+        TaskEvent, TaskPlan, TaskSource, User,
     },
 };
 use chrono::Utc;
@@ -41,6 +41,7 @@ impl Database {
         {
             sqlx::query(statement).execute(&self.pool).await?;
         }
+        sqlx::query("CREATE TABLE IF NOT EXISTS feature_documents (namespace TEXT NOT NULL, id TEXT NOT NULL, content_json TEXT NOT NULL, PRIMARY KEY(namespace,id))").execute(&self.pool).await?;
         Ok(())
     }
 
@@ -101,30 +102,6 @@ impl Database {
         let mut saved = settings.clone();
         saved.updated_at = Some(updated_at);
         Ok(saved)
-    }
-
-    pub async fn remote_viewer_settings(&self) -> AppResult<RemoteViewerSettings> {
-        let content = sqlx::query_scalar::<_, String>(
-            "SELECT content_json FROM remote_viewer_settings WHERE id=1",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
-        match content {
-            Some(content) => serde_json::from_str(&content).map_err(AppError::from),
-            None => Ok(RemoteViewerSettings::default()),
-        }
-    }
-
-    pub async fn update_remote_viewer_settings(
-        &self,
-        settings: &RemoteViewerSettings,
-    ) -> AppResult<RemoteViewerSettings> {
-        sqlx::query("INSERT INTO remote_viewer_settings(id,content_json,updated_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET content_json=excluded.content_json,updated_at=excluded.updated_at")
-            .bind(serde_json::to_string(settings)?)
-            .bind(Utc::now().to_rfc3339())
-            .execute(&self.pool)
-            .await?;
-        Ok(settings.clone())
     }
 
     pub async fn codex_binary_settings(&self) -> AppResult<CodexBinarySettings> {
@@ -365,7 +342,6 @@ const TASK_SELECT: &str = "SELECT t.id,t.project_id,t.title,t.description,t.stat
 const MIGRATION: &str = r#"
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','member')), must_change_password INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS global_settings(id INTEGER PRIMARY KEY CHECK(id=1), web_port INTEGER NOT NULL CHECK(web_port BETWEEN 1 AND 65535), web_ui_enabled INTEGER NOT NULL DEFAULT 1, allowed_ips_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS remote_viewer_settings(id INTEGER PRIMARY KEY CHECK(id=1), content_json TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
 UPDATE sessions SET expires_at='9999-12-31T23:59:59.999Z' WHERE expires_at!='9999-12-31T23:59:59.999Z';
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, repo_path TEXT NOT NULL UNIQUE, default_branch TEXT NOT NULL, created_by TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL);

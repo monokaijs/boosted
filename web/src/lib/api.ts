@@ -10,7 +10,7 @@ import type {
   CodexAttachment,
   CodexOptions,
   CodexAccessOption,
-  GitCommit,
+  CodexPendingRequest,
   GitStatus,
   Health,
   Project,
@@ -25,12 +25,7 @@ import type {
   IntegrationSyncResult,
   WorkspaceCodexSettings,
   User,
-  RemoteViewerSettings,
-  RemoteViewerCapabilities,
   ServerUpdateStatus,
-  CaptureSource,
-  ViewerSessionRequest,
-  ViewerSession,
 } from "@/lib/types";
 import { activeMachine, activeMachineToken, useMachineStore, type MachineProfile } from "@/lib/machines";
 
@@ -138,6 +133,7 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   }
 
   const client = {
+  featureRequest: request,
   cancelRequests: () => {
     for (const controller of activeRequests) controller.abort();
     activeRequests.clear();
@@ -151,43 +147,28 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   changePassword: (currentPassword: string, nextPassword: string) => request<User>("/auth/password", json("PUT", { currentPassword, nextPassword })),
   globalSettings: () => request<GlobalSettings>("/settings/global"),
   updateGlobalSettings: (settings: Pick<GlobalSettings, "webPort" | "webUiEnabled" | "allowedIps">) => request<GlobalSettings>("/settings/global", json("PUT", settings)),
-  remoteViewerSettings: () => request<RemoteViewerSettings>("/settings/remote-viewer"),
-  updateRemoteViewerSettings: (settings: RemoteViewerSettings) => request<RemoteViewerSettings>("/settings/remote-viewer", json("PUT", settings)),
   updateStatus: () => request<ServerUpdateStatus>("/updates/status"),
   checkForUpdate: () => request<ServerUpdateStatus>("/updates/check", json("POST")),
   installUpdate: () => request<ServerUpdateStatus>("/updates/install", json("POST")),
-  remoteViewerCapabilities: () => request<RemoteViewerCapabilities>("/remote-viewer/capabilities"),
-  remoteViewerSources: (kind: CaptureSource["kind"]) => request<CaptureSource[]>(`/remote-viewer/sources?kind=${kind}`),
-  remoteViewerThumbnail: async (id: string) => {
-    const headers = new Headers();
-    const token = options.getToken();
-    if (token) headers.set("Authorization", `Bearer ${token}`);
-    const response = await fetch(`${baseUrl}/api/v1/remote-viewer/sources/${encodeURIComponent(id)}/thumbnail`, { headers });
-    if (!response.ok) {
-      if (response.status === 401) await options.onUnauthorized?.();
-      const body = await response.json().catch(() => ({}));
-      throw new ApiError(response.status, body.error ?? "Unable to load source preview");
-    }
-    return response.blob();
-  },
-  createRemoteViewerSession: (requestBody: ViewerSessionRequest) => request<ViewerSession>("/remote-viewer/sessions", json("POST", requestBody)),
-  updateRemoteViewerSession: (id: string, requestBody: Partial<ViewerSessionRequest>) => request<ViewerSession>(`/remote-viewer/sessions/${encodeURIComponent(id)}`, json("PATCH", requestBody)),
-  deleteRemoteViewerSession: (id: string) => request<void>(`/remote-viewer/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
   users: () => request<User[]>("/users"),
   createUser: (username: string, password: string) => request<User>("/users", json("POST", { username, password })),
   setUserDisabled: (id: string, disabled: boolean) => request<User>(`/users/${id}`, json("PATCH", { disabled })),
   startCodexLogin: () => request<CodexLogin>("/codex/login", json("POST")),
   codexOptions: () => request<CodexOptions>("/codex/options"),
+  threadCodexOptions: (threadId: string) => request<CodexOptions>(`/codex/options?threadId=${encodeURIComponent(threadId)}`),
   uploadCodexAttachment: (file: File) => {
     const form = new FormData();
     form.append("file", file);
     return request<CodexAttachment>("/codex/attachments", { method: "POST", body: form });
   },
   removeCodexAttachment: (id: string) => request<void>(`/codex/attachments/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  codexChats: (cwd: string) => request<CodexChat[]>(`/codex/chats?cwd=${encodeURIComponent(cwd)}`),
+  codexChats: (cwd: string) => request<CodexChat[]>(`/codex/chats${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ""}`),
   createCodexChat: (cwd: string, model?: string) => request<CodexChat>("/codex/chats", json("POST", { cwd, model })),
   codexChat: (id: string) => request<CodexChatThread>(`/codex/chats/${encodeURIComponent(id)}`),
-  sendCodexMessage: (id: string, message: string, clientMessageId: string, options: { model: string; reasoningEffort: string; accessMode: CodexAccessOption["id"]; attachmentIds?: string[] }) => request<CodexTurnStart>(`/codex/chats/${encodeURIComponent(id)}/messages`, json("POST", { message, clientMessageId, ...options })),
+  sendCodexMessage: (id: string, message: string, clientMessageId: string, options: { model: string; reasoningEffort: string; accessMode: CodexAccessOption["id"]; approvalPolicy?: string; attachmentIds?: string[] }) => request<CodexTurnStart>(`/codex/chats/${encodeURIComponent(id)}/messages`, json("POST", { message, clientMessageId, ...options })),
+  codexApprovals: (id: string) => request<CodexPendingRequest[]>(`/codex/chats/${encodeURIComponent(id)}/approvals`),
+  answerCodexApproval: (id: string, requestId: string, decision: "accept" | "decline") => request<void>(`/codex/chats/${encodeURIComponent(id)}/approvals/${encodeURIComponent(requestId)}`, json("POST", { decision })),
+  answerCodexQuestions: (id: string, requestId: string, answers: Record<string, { answers: string[] }>) => request<void>(`/codex/chats/${encodeURIComponent(id)}/approvals/${encodeURIComponent(requestId)}`, json("POST", { answers })),
   stopCodexTurn: (id: string) => request<void>(`/codex/chats/${encodeURIComponent(id)}/stop`, json("POST")),
   workspaceFile: (scope: WorkspaceFileScope, path: string) => requestBlob(workspaceFilePath(scope, path)),
   downloadWorkspaceFile: async (scope: WorkspaceFileScope, path: string, fallbackName: string) => {
@@ -204,7 +185,6 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   projectFiles: (projectId: string, path = "") => request<FileEntry[]>(`/projects/${projectId}/files?path=${encodeURIComponent(path)}`),
   readProjectFile: (projectId: string, path: string) => request<FileContent>(`/projects/${projectId}/file?path=${encodeURIComponent(path)}`),
   projectBranches: (projectId: string) => request<string[]>(`/projects/${projectId}/git/branches`),
-  projectGitHistory: (projectId: string, limit = 100) => request<GitCommit[]>(`/projects/${projectId}/git/history?limit=${limit}`),
   createProjectTerminal: (projectId: string) => request<{ id: string }>(`/projects/${projectId}/terminals`, json("POST")),
   uploadTaskAttachment: (file: File) => {
     const form = new FormData();
@@ -243,7 +223,6 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   gitUnstage: (taskId: string, paths: string[]) => request<GitStatus>(`/tasks/${taskId}/git/unstage`, json("POST", { paths })),
   gitDiscard: (taskId: string, paths: string[]) => request<GitStatus>(`/tasks/${taskId}/git/discard`, json("POST", { paths })),
   gitCommit: (taskId: string, message: string) => request<{ commit: string }>(`/tasks/${taskId}/git/commit`, json("POST", { message })),
-  gitHistory: (taskId: string, limit = 100) => request<GitCommit[]>(`/tasks/${taskId}/git/history?limit=${limit}`),
   createTerminal: (taskId: string) => request<{ id: string }>(`/tasks/${taskId}/terminals`, json("POST")),
   };
 

@@ -6,8 +6,3 @@ resolver = "2"
 version = "0.4.0"
 edition = "2024"
 license = "MIT"
-
-[patch.crates-io]
-# scap 0.1.0-beta.1 was published with two stale windows-capture 1.5 API calls.
-# Keep the patch local until upstream publishes a corrected release.
-scap = { path = "third_party/scap" }

@@ -36,7 +36,7 @@ function task(id: string, projectId: string): Task {
   };
 }
 
-describe("workspace state", () => {
+describe("app selection state", () => {
   beforeEach(() => {
     const values = new Map<string, string>();
     vi.stubGlobal("localStorage", {
@@ -50,44 +50,28 @@ describe("workspace state", () => {
     vi.resetModules();
   });
 
-  it("restores each workspace's active task, chat, and file", async () => {
+  it("clears conversation and file context when switching projects", async () => {
     const { useAppStore } = await import("@/lib/store");
-
     useAppStore.getState().selectProject(firstProject);
     useAppStore.getState().selectTask(task("task-a", firstProject.id));
-    useAppStore.getState().selectCodexChat("chat-a");
     useAppStore.getState().openFile("src/alpha.ts");
-
     useAppStore.getState().selectProject(secondProject);
-    expect(useAppStore.getState()).toMatchObject({
-      selectedProjectId: secondProject.id,
-      selectedTaskId: undefined,
-      selectedCodexChatId: undefined,
-      openFilePath: undefined,
-    });
-
-    useAppStore.getState().selectTask(task("task-b", secondProject.id));
     useAppStore.getState().selectCodexChat("chat-b");
-    useAppStore.getState().openFile("src/beta.ts");
     useAppStore.getState().selectProject(firstProject);
-
-    expect(useAppStore.getState()).toMatchObject({
-      selectedProjectId: firstProject.id,
-      selectedTaskId: "task-a",
-      selectedCodexChatId: "chat-a",
-      openFilePath: "src/alpha.ts",
-    });
-
-    useAppStore.getState().selectProject(secondProject);
-    expect(useAppStore.getState()).toMatchObject({
-      selectedProjectId: secondProject.id,
-      selectedTaskId: "task-b",
-      selectedCodexChatId: "chat-b",
-      openFilePath: "src/beta.ts",
-    });
+    expect(useAppStore.getState()).toMatchObject({ selectedProjectId: firstProject.id, selectedTaskId: undefined, selectedCodexChatId: undefined, openFilePath: undefined });
+    expect(localStorage.getItem("boosted.workspace-contexts.v1")).toBeNull();
   });
 
-  it("restores a separate workspace for every active machine", async () => {
+  it("keeps task and Codex chat selections mutually exclusive", async () => {
+    const { useAppStore } = await import("@/lib/store");
+    useAppStore.getState().selectTask(task("task-a", firstProject.id));
+    useAppStore.getState().selectCodexChat("chat-a");
+    expect(useAppStore.getState().selectedTaskId).toBeUndefined();
+    useAppStore.getState().selectTask(task("task-b", secondProject.id));
+    expect(useAppStore.getState()).toMatchObject({ selectedProjectId: secondProject.id, selectedTaskId: "task-b", selectedCodexChatId: undefined });
+  });
+
+  it("restores the selected project and conversation for every active machine", async () => {
     const { useAppStore } = await import("@/lib/store");
 
     useAppStore.getState().activateMachine("machine-a");
@@ -107,7 +91,7 @@ describe("workspace state", () => {
     useAppStore.getState().activateMachine("machine-a");
     expect(useAppStore.getState()).toMatchObject({
       selectedProjectId: firstProject.id,
-      selectedTaskId: "task-a",
+      selectedTaskId: undefined,
       selectedCodexChatId: "chat-a",
     });
 

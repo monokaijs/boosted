@@ -1,4 +1,5 @@
 use crate::error::{AppError, AppResult};
+use futures_util::future::BoxFuture;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -6,10 +7,21 @@ use std::{
     ffi::OsString,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::Mutex;
+
+/// Lets the desktop host update its entire bundle through the same authenticated API.
+pub trait ApplicationUpdater: Send + Sync {
+    fn status(&self) -> UpdateStatus;
+    fn check(&self) -> BoxFuture<'_, Result<UpdateStatus, String>>;
+    fn install(&self) -> BoxFuture<'_, Result<UpdateStatus, String>>;
+    fn restart(&self) -> std::io::Result<()>;
+}
 
 const RELEASE_API: &str = "https://api.github.com/repos/monokaijs/boosted/releases/latest";
 const MANAGED_INSTALL_ENV: &str = "BOOSTED_MANAGED_INSTALL";
@@ -35,6 +47,8 @@ impl InstallMode {
 
 #[derive(Clone)]
 pub struct ServerUpdater {
+    application: Option<Arc<dyn ApplicationUpdater>>,
+    restart_scheduled: Arc<AtomicBool>,
     mode: Option<InstallMode>,
     unsupported_reason: Option<String>,
     client: reqwest::Client,
@@ -73,6 +87,7 @@ struct ActiveRelease {
 }
 
 pub enum RestartAction {
+    Application(Arc<dyn ApplicationUpdater>),
     ManagedLauncher(i32),
     Standalone {
         binary: PathBuf,
@@ -85,6 +100,7 @@ impl RestartAction {
     /// A successful Unix exec never returns.
     pub fn execute(self) -> std::io::Result<()> {
         match self {
+            Self::Application(application) => application.restart(),
             Self::ManagedLauncher(code) => std::process::exit(code),
             Self::Standalone { binary, arguments } => {
                 #[cfg(unix)]
@@ -114,6 +130,12 @@ impl RestartAction {
 }
 
 impl ServerUpdater {
+    pub fn for_application(application: Arc<dyn ApplicationUpdater>) -> Self {
+        let mut updater = Self::disabled("Application updates are unavailable.");
+        updater.application = Some(application);
+        updater
+    }
+
     pub fn from_env() -> Self {
         let managed = std::env::var(MANAGED_INSTALL_ENV).as_deref() == Ok("1");
         let launcher_cache_root = std::env::var_os(CACHE_ROOT_ENV).map(PathBuf::from);
@@ -143,6 +165,8 @@ impl ServerUpdater {
             .expect("the updater HTTP client configuration is valid");
         let initial_status = base_status(mode.is_some(), unsupported_reason.clone());
         Self {
+            application: None,
+            restart_scheduled: Arc::new(AtomicBool::new(false)),
             mode,
             unsupported_reason,
             client,
@@ -152,6 +176,9 @@ impl ServerUpdater {
     }
 
     pub fn status(&self) -> UpdateStatus {
+        if let Some(application) = &self.application {
+            return application.status();
+        }
         self.last_status
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -162,6 +189,12 @@ impl ServerUpdater {
         let _operation = self.operation.try_lock().map_err(|_| {
             AppError::Conflict("another server update operation is already in progress".into())
         })?;
+        if self.status().restart_pending {
+            return Ok(self.status());
+        }
+        if let Some(application) = &self.application {
+            return application.check().await.map_err(AppError::Internal);
+        }
         let release = self.latest_release().await?;
         let status = self.release_status(&release, false);
         self.remember_status(&status);
@@ -172,6 +205,12 @@ impl ServerUpdater {
         let _operation = self.operation.try_lock().map_err(|_| {
             AppError::Conflict("another server update operation is already in progress".into())
         })?;
+        if self.status().restart_pending {
+            return Ok(self.status());
+        }
+        if let Some(application) = &self.application {
+            return application.install().await.map_err(AppError::Internal);
+        }
         let cache_root = self.require_cache_root()?.to_path_buf();
         let release = self.latest_release().await?;
         let mut status = self.release_status(&release, false);
@@ -226,12 +265,37 @@ impl ServerUpdater {
         Ok(status)
     }
 
+    pub async fn install_and_restart(&self) -> AppResult<UpdateStatus> {
+        let status = self.install().await?;
+        if status.restart_pending {
+            let restart = self.restart_action()?;
+            if self.restart_scheduled.swap(true, Ordering::SeqCst) {
+                return Ok(status);
+            }
+            let restart_scheduled = self.restart_scheduled.clone();
+            tokio::spawn(async move {
+                // Let the response reach the client before the host exits.
+                tokio::time::sleep(Duration::from_millis(750)).await;
+                tokio::task::spawn_blocking(move || {
+                    if let Err(error) = restart.execute() {
+                        restart_scheduled.store(false, Ordering::SeqCst);
+                        tracing::error!(%error, "could not restart after installing the Boosted update");
+                    }
+                });
+            });
+        }
+        Ok(status)
+    }
+
     pub fn restart_action(&self) -> AppResult<RestartAction> {
         let status = self.status();
         if !status.restart_pending {
             return Err(AppError::Conflict(
                 "no verified server update is ready to restart".into(),
             ));
+        }
+        if let Some(application) = &self.application {
+            return Ok(RestartAction::Application(application.clone()));
         }
         let target_version = status
             .target_version
@@ -634,6 +698,94 @@ async fn replace_file(temporary: &Path, destination: &Path) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestApplication {
+        status: RwLock<UpdateStatus>,
+        installs: std::sync::atomic::AtomicUsize,
+        restarts: std::sync::atomic::AtomicUsize,
+        fail_install: bool,
+    }
+
+    impl TestApplication {
+        fn new(fail_install: bool) -> Self {
+            Self {
+                status: RwLock::new(base_status(true, None)),
+                installs: std::sync::atomic::AtomicUsize::new(0),
+                restarts: std::sync::atomic::AtomicUsize::new(0),
+                fail_install,
+            }
+        }
+    }
+
+    impl ApplicationUpdater for TestApplication {
+        fn status(&self) -> UpdateStatus {
+            self.status.read().unwrap().clone()
+        }
+        fn check(&self) -> BoxFuture<'_, Result<UpdateStatus, String>> {
+            Box::pin(async move { Ok(self.status()) })
+        }
+        fn install(&self) -> BoxFuture<'_, Result<UpdateStatus, String>> {
+            Box::pin(async move {
+                self.installs.fetch_add(1, Ordering::SeqCst);
+                if self.fail_install {
+                    return Err("signature verification failed".into());
+                }
+                let mut status = self.status.write().unwrap();
+                status.target_version = Some("99.0.0".into());
+                status.update_available = true;
+                status.restart_pending = true;
+                Ok(status.clone())
+            })
+        }
+        fn restart(&self) -> std::io::Result<()> {
+            self.restarts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn application_updates_use_the_host_and_restart_once_after_the_response() {
+        let application = Arc::new(TestApplication::new(false));
+        let updater = ServerUpdater::for_application(application.clone());
+        assert!(updater.status().supported);
+        assert!(updater.check().await.unwrap().supported);
+        assert!(updater.install_and_restart().await.unwrap().restart_pending);
+        assert_eq!(application.restarts.load(Ordering::SeqCst), 0);
+        assert!(
+            updater
+                .clone()
+                .install_and_restart()
+                .await
+                .unwrap()
+                .restart_pending
+        );
+        assert!(updater.check().await.unwrap().restart_pending);
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        assert_eq!(application.installs.load(Ordering::SeqCst), 1);
+        assert_eq!(application.restarts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_application_verification_never_schedules_a_restart() {
+        let application = Arc::new(TestApplication::new(true));
+        let updater = ServerUpdater::for_application(application.clone());
+        let error = updater.install_and_restart().await.unwrap_err();
+        assert_eq!(error.to_string(), "signature verification failed");
+        assert!(!updater.status().restart_pending);
+        assert!(!updater.restart_scheduled.load(Ordering::SeqCst));
+        assert_eq!(application.restarts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn application_updates_share_the_operation_lock_with_browser_requests() {
+        let updater = ServerUpdater::for_application(Arc::new(TestApplication::new(false)));
+        let _operation = updater.operation.lock().await;
+        assert!(matches!(updater.check().await, Err(AppError::Conflict(_))));
+        assert!(matches!(
+            updater.install().await,
+            Err(AppError::Conflict(_))
+        ));
+    }
 
     #[test]
     fn standalone_updates_use_the_default_cache_without_npm() {

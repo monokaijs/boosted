@@ -1,9 +1,7 @@
-import { getVersion } from "@tauri-apps/api/app";
-import { isTauri } from "@tauri-apps/api/core";
 import { useSyncExternalStore } from "react";
 import { getActiveApiClient } from "@/lib/api";
-
-export const serverUpdatedEvent = "boosted:server-updated";
+import { useMachineStore } from "@/lib/machines";
+import { refreshWebApp } from "@/lib/web-update";
 
 export type AppUpdatePhase =
   | "unsupported"
@@ -27,21 +25,20 @@ export interface AppUpdateState {
   supportReason?: string;
 }
 
-const automaticCheckDelayMs = 5_000;
-const automaticCheckIntervalMs = 6 * 60 * 60 * 1_000;
-const desktopRuntime = isTauri();
 const listeners = new Set<() => void>();
 
-let state: AppUpdateState = {
-  phase: desktopRuntime ? "idle" : "unsupported",
-  supported: desktopRuntime,
+const initialState: AppUpdateState = {
+  phase: "idle",
+  supported: false,
   downloadedBytes: 0,
 };
-let currentOperation: Promise<void> | undefined;
-let automaticUpdatesStarted = false;
+type ApiClient = ReturnType<typeof getActiveApiClient>;
+const states = new WeakMap<ApiClient, AppUpdateState>();
+const operations = new WeakMap<ApiClient, Promise<void>>();
+const availabilityChecks = new WeakMap<ApiClient, Promise<void>>();
 
-function publish(patch: Partial<AppUpdateState>) {
-  state = { ...state, ...patch };
+function publish(api: ApiClient, patch: Partial<AppUpdateState>) {
+  states.set(api, { ...(states.get(api) ?? initialState), ...patch });
   listeners.forEach((listener) => listener());
 }
 
@@ -51,82 +48,18 @@ function subscribe(listener: () => void) {
 }
 
 function snapshot() {
-  return state;
+  return states.get(getActiveApiClient()) ?? initialState;
 }
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function refreshCurrentVersion() {
-  if (!desktopRuntime || state.currentVersion) return;
-  try {
-    publish({ currentVersion: await getVersion() });
-  } catch {
-    // A version is helpful context, but its absence must not prevent updates.
-  }
-}
-
-async function runUpdateCheck() {
-  await refreshCurrentVersion();
-  publish({
-    phase: "checking",
-    targetVersion: undefined,
-    downloadedBytes: 0,
-    totalBytes: undefined,
-    error: undefined,
-  });
-
-  const { check } = await import("@tauri-apps/plugin-updater");
-  const update = await check({ timeout: 30_000 });
-  const checkedAt = new Date().toISOString();
-
-  if (!update) {
-    publish({ phase: "up-to-date", lastCheckedAt: checkedAt });
-    return;
-  }
-
-  try {
-    let downloadedBytes = 0;
-    publish({
-      phase: "downloading",
-      currentVersion: update.currentVersion,
-      targetVersion: update.version,
-      downloadedBytes,
-      lastCheckedAt: checkedAt,
-    });
-
-    await update.downloadAndInstall((event) => {
-      if (event.event === "Started") {
-        publish({
-          phase: "downloading",
-          downloadedBytes: 0,
-          totalBytes: event.data.contentLength,
-        });
-      } else if (event.event === "Progress") {
-        downloadedBytes += event.data.chunkLength;
-        publish({ phase: "downloading", downloadedBytes });
-      } else {
-        publish({ phase: "installing", downloadedBytes });
-      }
-    });
-
-    await update.close();
-    publish({ phase: "restarting" });
-    const { relaunch } = await import("@tauri-apps/plugin-process");
-    await relaunch();
-  } catch (error) {
-    await update.close().catch(() => undefined);
-    throw error;
-  }
-}
-
-async function waitForUpdatedServer(targetVersion: string) {
-  const api = getActiveApiClient();
+async function waitForUpdatedServer(api: ReturnType<typeof getActiveApiClient>, targetVersion: string) {
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
     try {
-      const health = await api.health();
+      const health = await api.health(AbortSignal.timeout(5_000));
       if (health.version === targetVersion) return;
     } catch {
       // The server briefly takes its listener down while replacing and restarting itself.
@@ -136,9 +69,9 @@ async function waitForUpdatedServer(targetVersion: string) {
   throw new Error(`Boosted ${targetVersion} was installed, but the server did not reconnect.`);
 }
 
-async function runServerUpdateCheck() {
-  const api = getActiveApiClient();
-  publish({
+async function runServerUpdateCheck(api: ApiClient) {
+  const publishState = (patch: Partial<AppUpdateState>) => publish(api, patch);
+  publishState({
     phase: "checking",
     targetVersion: undefined,
     downloadedBytes: 0,
@@ -147,7 +80,7 @@ async function runServerUpdateCheck() {
   });
   const checked = await api.checkForUpdate();
   const checkedAt = new Date().toISOString();
-  publish({
+  publishState({
     supported: checked.supported,
     currentVersion: checked.currentVersion,
     targetVersion: checked.targetVersion,
@@ -155,55 +88,65 @@ async function runServerUpdateCheck() {
     lastCheckedAt: checkedAt,
   });
   if (!checked.supported) {
-    publish({ phase: "unsupported" });
+    publishState({ phase: "unsupported" });
     return;
   }
   if (checked.reason) throw new Error(checked.reason);
-  if (!checked.updateAvailable || !checked.targetVersion) {
-    publish({ phase: "up-to-date" });
+  if (!checked.restartPending && (!checked.updateAvailable || !checked.targetVersion)) {
+    publishState({ phase: "up-to-date" });
+    if (api === getActiveApiClient()) await refreshWebApp(false);
     return;
   }
 
-  publish({ phase: "downloading", downloadedBytes: 0 });
-  const installed = await api.installUpdate();
+  publishState({ phase: "downloading", downloadedBytes: 0 });
+  const installed = checked.restartPending ? checked : await api.installUpdate();
   if (!installed.restartPending || !installed.targetVersion) {
-    publish({ phase: "up-to-date", currentVersion: installed.currentVersion });
+    publishState({ phase: "up-to-date", currentVersion: installed.currentVersion });
+    if (api === getActiveApiClient()) await refreshWebApp(false);
     return;
   }
-  publish({ phase: "restarting", targetVersion: installed.targetVersion });
-  await waitForUpdatedServer(installed.targetVersion);
-  window.dispatchEvent(new Event(serverUpdatedEvent));
-}
-
-export function isDesktopApp() {
-  return desktopRuntime;
+  publishState({ phase: "restarting", targetVersion: installed.targetVersion });
+  await waitForUpdatedServer(api, installed.targetVersion);
+  publishState({ phase: "up-to-date", currentVersion: installed.targetVersion });
+  if (api === getActiveApiClient()) await refreshWebApp();
 }
 
 export function useAppUpdateState() {
+  useMachineStore((state) => state.activeId);
   return useSyncExternalStore(subscribe, snapshot, snapshot);
 }
 
 export function checkAndInstallAppUpdate() {
+  const api = getActiveApiClient();
+  const currentOperation = operations.get(api);
   if (currentOperation) return currentOperation;
 
-  currentOperation = (desktopRuntime ? runUpdateCheck() : runServerUpdateCheck())
+  const operation = runServerUpdateCheck(api)
     .catch((error) => {
-      publish({ phase: "error", error: errorMessage(error) });
+      publish(api, { phase: "error", error: errorMessage(error) });
     })
     .finally(() => {
-      currentOperation = undefined;
+      operations.delete(api);
     });
-  return currentOperation;
+  operations.set(api, operation);
+  return operation;
 }
 
 export function refreshAppUpdateAvailability() {
-  if (desktopRuntime) return refreshCurrentVersion();
+  const api = getActiveApiClient();
+  const currentOperation = operations.get(api) ?? availabilityChecks.get(api);
   if (currentOperation) return currentOperation;
 
-  currentOperation = getActiveApiClient().updateStatus()
+  const previousState = states.get(api);
+  const operation = api.updateStatus()
     .then((status) => {
-      publish({
+      if (states.get(api) !== previousState) return;
+      publish(api, {
         phase: status.supported ? "idle" : "unsupported",
+        targetVersion: status.targetVersion,
+        downloadedBytes: 0,
+        totalBytes: undefined,
+        lastCheckedAt: undefined,
         supported: status.supported,
         currentVersion: status.currentVersion,
         supportReason: status.reason,
@@ -211,24 +154,14 @@ export function refreshAppUpdateAvailability() {
       });
     })
     .catch((error) => {
-      publish({ phase: "error", supported: false, error: errorMessage(error) });
+      if (states.get(api) !== previousState) return;
+      publish(api, { phase: "error", supported: false, error: errorMessage(error) });
     })
     .finally(() => {
-      currentOperation = undefined;
+      availabilityChecks.delete(api);
     });
-  return currentOperation;
-}
-
-export function startAutomaticAppUpdates() {
-  if (!desktopRuntime || !import.meta.env.PROD || automaticUpdatesStarted) return;
-  automaticUpdatesStarted = true;
-
-  void refreshCurrentVersion();
-  window.setTimeout(() => void checkAndInstallAppUpdate(), automaticCheckDelayMs);
-  window.setInterval(() => void checkAndInstallAppUpdate(), automaticCheckIntervalMs);
-  window.addEventListener("online", () => {
-    if (state.phase === "error") void checkAndInstallAppUpdate();
-  });
+  availabilityChecks.set(api, operation);
+  return operation;
 }
 
 export function formatUpdateProgress(update: AppUpdateState) {

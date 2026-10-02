@@ -9,12 +9,14 @@ Prerequisites: Node 22+, pnpm 10+, Rust 1.85+, Git, and the Codex CLI.
 ```bash
 pnpm install
 pnpm dev
-cargo run -p boosted-server
+cargo run -p boosted-server -- --web-dev-url http://127.0.0.1:5173
 ```
 
 The browser client uses its current origin; during Vite development, `/api` and WebSocket requests are proxied to `http://127.0.0.1:4782`. Set `VITE_BOOSTED_API_URL` when the service runs elsewhere. The server stores local state under the platform application-data directory, or under `BOOSTED_DATA_DIR` when set.
 
-The first browser visit creates the administrator. The admin then creates member accounts. All authenticated users share projects, tasks, history, terminals, and host-level execution access; only the first user can manage accounts and the shared Codex connection.
+Desktop development automatically serves the live Vite frontend through port 4782, including hot reload, so remote browsers receive the same UI as the desktop. The headless development command above enables the same behavior (`BOOSTED_WEB_DEV_URL` is the environment equivalent). Vite stays on loopback port 5173; remote browsers only need the backend port. Release desktop and backend builds use the same bundled `web/dist` assets.
+
+The first browser visit creates the administrator. The admin then creates member accounts. All authenticated users share projects, tasks, terminals, and host-level execution access; only the first user can manage accounts and the shared Codex connection.
 
 > Boosted currently starts Codex with full host access, matching the selected product policy. Only expose the server to trusted users, and put remote access behind your own authenticated TLS proxy or tunnel.
 
@@ -28,9 +30,15 @@ Boosted connects directly to the URL you provide. It does not provide TLS, serve
 
 Existing installations migrate automatically. Browser clients retain the current origin, desktop clients retain `http://127.0.0.1:4782`, and development builds continue to honor `VITE_BOOSTED_API_URL`. The existing session and selected workspace move into that generated connection.
 
-## Remote Viewer
+## Agents and provider accounts
 
-On macOS and Windows, administrators can enable **Settings → Global → Remote Viewer** to let authenticated members select a host window or display, stream its video and system audio, and optionally control it from the web UI. Multiple independent viewer tabs can run concurrently. Media and input use authenticated WebSockets on the same Boosted HTTP(S) origin, including through WebSocket-capable cloudflared HTTPS tunnels; no TURN server or extra exposed port is required. See the [Remote Viewer guide](docs/remote-viewer.md) for permissions, protocol details, and security considerations.
+Open **Agents** from the workspace rail (or **More → Agents** on mobile). Agents have separate persistent conversations, names, personalities, and avatars, and can manage coding chats across all registered projects. Create additional agents with **New agent**. Update an agent's identity in conversation, upload an avatar from its profile, or ask it to generate one.
+
+Use **Settings → Providers** or the agent panel's provider button to add isolated Codex accounts, sign in with a device code, inspect quotas, and configure each account's model, reasoning, access, speed, personality, and Codex home. Administrators manage provider accounts; authenticated members can use connected accounts and agents. Existing shared Codex task and chat connections continue to work.
+
+Agent conversations support queued messages, images and files, action receipts linking to coding chats, stopping, account switching with preserved history, and quota failover. Ask an agent to watch a coding run or schedule a follow-up. These commitments persist and execute while the Boosted server runs, including with the browser closed. Agent notifications use Boosted's existing live PWA notification delivery.
+
+The conversation and provider UI, agent instructions, tool definitions, and conversation-state helpers are ported from PockCode. Their runtime is implemented in Rust using Boosted's authenticated API, SQLite storage, and live event stream; no Node sidecar is required by the desktop or headless binaries.
 
 ## Issue integrations
 
@@ -100,9 +108,9 @@ Run the **Release Boosted** workflow from the repository's Actions tab and choos
 
 Trusted Publishing requires an existing npm package. Bootstrap `boosted-cli` with one authenticated manual publish, then configure its npm package settings with GitHub organization/user `monokaijs`, repository `boosted`, and workflow filename `release.yml`. No npm token is needed for later releases.
 
-Desktop builds check `monokaijs/boosted` GitHub Releases shortly after startup and every six hours. When a newer signed release is available, Boosted downloads it, verifies its updater signature, installs it, and relaunches. A manual **Check now** action and update progress are available under **Settings → Application**.
+Desktop builds check `monokaijs/boosted` GitHub Releases shortly after startup and every six hours. When a newer signed release is available, Boosted downloads it, verifies its updater signature, installs it, and relaunches. Administrators can also use **Settings → Application → Update Boosted** from the web UI or desktop app. This updates the selected machine’s desktop app, bundled backend, and web UI together, then restarts Boosted and refreshes the browser.
 
-Administrators can use **Settings → Application → Check now** in the web UI to update any self-contained headless release, whether it was launched directly or through `boosted-cli`. The server downloads the matching native release, verifies it against `SHA256SUMS.txt`, activates it atomically in its update cache, and restarts itself. The npm launcher recognizes the same active release when present, but npm is not required for web-based updates. Development and source builds without the embedded web app remain manual-update installations.
+The same **Update Boosted** action updates any self-contained headless release, whether it was launched directly or through `boosted-cli`. The server downloads the matching native release with its bundled web UI, verifies it against `SHA256SUMS.txt`, activates it atomically in its update cache, and restarts itself. The browser waits for the updated server, activates the latest cached web app, and refreshes automatically. Desktop-hosted servers use the signed desktop updater through the same administrator-only API; they install the full app bundle after responding to the browser. The npm launcher recognizes the same active release when present, but npm is not required for web-based updates. Development and source builds without the embedded web app remain manual-update installations.
 
 Updater packages are signed with the Tauri key whose public half is embedded in `desktop/src-tauri/tauri.conf.json`. The release workflow requires its private half in the `TAURI_SIGNING_PRIVATE_KEY` repository secret; `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is optional. Keep an offline backup of the private key: losing or replacing it prevents installed copies from trusting future updates. For a local release build using an unencrypted key, set `TAURI_SIGNING_PRIVATE_KEY` to the key’s path, export `TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""`, then run `pnpm desktop:build`.
 

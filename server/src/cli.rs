@@ -42,6 +42,16 @@ pub struct Cli {
     #[arg(long, global = true, env = "BOOSTED_WEB_DIR", value_name = "PATH")]
     web_dir: Option<PathBuf>,
 
+    /// Serve the live Vite frontend through the backend during development.
+    #[arg(
+        long,
+        global = true,
+        env = "BOOSTED_WEB_DEV_URL",
+        conflicts_with = "web_dir",
+        value_name = "URL"
+    )]
+    web_dev_url: Option<String>,
+
     /// Disable serving the browser UI while keeping the API available.
     #[arg(
         long,
@@ -91,6 +101,7 @@ impl Cli {
                 local_bind: None,
                 data_dir: self.data_dir.unwrap_or_else(Config::default_data_dir),
                 web_dir: self.web_dir.unwrap_or_else(Config::default_web_dir),
+                web_dev_url: self.web_dev_url,
                 web_ui_enabled: if self.disable_web_ui {
                     Some(false)
                 } else if self.enable_web_ui {

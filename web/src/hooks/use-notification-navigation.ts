@@ -3,7 +3,7 @@ import { useBoostedApiClient } from "@/lib/api-context";
 import { useAppStore } from "@/lib/store";
 
 type NotificationClickData = {
-  kind?: "task" | "codex" | "integration";
+  kind?: "agent" | "task" | "codex" | "integration";
   id?: string;
 };
 
@@ -13,6 +13,13 @@ export function useNotificationNavigation() {
   useEffect(() => {
     async function openNotification(data: NotificationClickData) {
       if (!data.id) return;
+      if (data.kind === "agent") {
+        localStorage.setItem(`boosted.selected-agent.${api.profileId}`, data.id);
+        window.dispatchEvent(new CustomEvent("boosted:select-agent", { detail: data.id }));
+        useAppStore.getState().setTaskDrawerOpen(false);
+        window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: "agents" }));
+        return;
+      }
       if (data.kind === "task") {
         const task = await api.task(data.id);
         const store = useAppStore.getState();
@@ -38,7 +45,7 @@ export function useNotificationNavigation() {
     const params = new URLSearchParams(window.location.search);
     const kind = params.get("notification");
     const id = params.get("notificationId");
-    if ((kind === "task" || kind === "codex") && id) {
+    if ((kind === "agent" || kind === "task" || kind === "codex") && id) {
       void openNotification({ kind, id }).catch(() => undefined);
       params.delete("notification");
       params.delete("notificationId");

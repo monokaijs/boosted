@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { Download, RefreshCw, WifiOff, X } from "lucide-react";
 import { useRegisterSW } from "virtual:pwa-register/react";
 import { Button } from "@/components/ui/button";
-import { serverUpdatedEvent } from "@/lib/updater";
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -13,7 +12,6 @@ export function PwaLifecycle() {
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent>();
   const [installDismissed, setInstallDismissed] = useState(false);
   const [online, setOnline] = useState(() => navigator.onLine);
-  const [activateServerUpdate, setActivateServerUpdate] = useState(false);
   const {
     needRefresh: [needRefresh, setNeedRefresh],
     offlineReady: [offlineReady, setOfflineReady],
@@ -47,23 +45,6 @@ export function PwaLifecycle() {
     const timeout = window.setTimeout(() => setOfflineReady(false), 8_000);
     return () => window.clearTimeout(timeout);
   }, [offlineReady, setOfflineReady]);
-
-  useEffect(() => {
-    const prepareServerUpdate = () => {
-      setActivateServerUpdate(true);
-      void (async () => {
-        const registration = await navigator.serviceWorker?.getRegistration();
-        if (registration) await registration.update();
-        else window.location.reload();
-      })().catch(() => window.location.reload());
-    };
-    window.addEventListener(serverUpdatedEvent, prepareServerUpdate);
-    return () => window.removeEventListener(serverUpdatedEvent, prepareServerUpdate);
-  }, []);
-
-  useEffect(() => {
-    if (activateServerUpdate && needRefresh) void updateServiceWorker(true);
-  }, [activateServerUpdate, needRefresh, updateServiceWorker]);
 
   async function install() {
     if (!installPrompt) return;

@@ -80,3 +80,9 @@ describe("live notification mapping", () => {
     expect(content).toMatchObject({ event: "integrationFailed", title: "GitLab issues", body: "GitLab is unavailable" });
   });
 });
+
+it('builds agent reply notifications with agent navigation', async () => {
+  const event = { sequence: 1, topic: 'assistant.message', data: { agentId: 'nova', messageId: 'reply-1', assistantName: 'Nova', content: 'The coding run needs your input.' } };
+  const content = await buildNotificationForEvent(event, { profileId: 'machine-a' } as Parameters<typeof buildNotificationForEvent>[1]);
+  expect(content).toMatchObject({ event: 'agentMessage', title: 'Nova', body: 'The coding run needs your input.', data: { kind: 'agent', id: 'nova', url: '/?notification=agent&notificationId=nova' } });
+});

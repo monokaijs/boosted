@@ -1,8 +1,8 @@
 export const palette = {
-  canvas: "#0e0e0e",
-  surface: "#121212",
+  canvas: "#272728",
+  surface: "#181818",
   foreground: "#e3e3e3",
-  muted: "#929292",
+  muted: "#a8a8a8",
   primary: "#b8b8b8",
   success: "#69c795",
   warning: "#d7a653",

@@ -74,7 +74,7 @@ function MachineForm({ editing, onDone }: MachineFormProps) {
   }
 
   return (
-    <form className="grid gap-3" onSubmit={submit}>
+    <form className="machine-form grid gap-3" onSubmit={submit}>
       <label className="grid gap-1.5"><span className="settings-label">Machine name</span><Input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="Studio PC" required /></label>
       <label className="grid gap-1.5"><span className="settings-label">Server URL</span><Input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="192.168.1.20:4782" autoCapitalize="none" autoCorrect="off" required /></label>
       {urlChanged && <div className="grid gap-3 rounded-lg border border-border bg-background/35 p-3"><p className="text-[11px] text-muted-foreground">Boosted will test the server and sign in before saving this connection.</p><label className="grid gap-1.5"><span className="settings-label">Username</span><Input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required /></label><label className="grid gap-1.5"><span className="settings-label">Password</span><Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required /></label></div>}
@@ -103,15 +103,16 @@ export function ConnectionsManager({ embedded = false, onClose }: { embedded?: b
     }
   }
 
-  if (form) return <div className={cn(!embedded && "p-1")}><MachineForm editing={form === "add" ? undefined : form} onDone={() => setForm(undefined)} /></div>;
+  if (form) return <div className={cn(!embedded && "p-1", embedded && "settings-machine-editor")}><MachineForm editing={form === "add" ? undefined : form} onDone={() => setForm(undefined)} /></div>;
 
   return (
-    <div className="grid gap-4">
-      <div className="grid gap-2">
+    <div className={cn("grid gap-4", embedded && "settings-machines")}>
+      {embedded && <div className="settings-machine-toolbar"><span>{profiles.length} {profiles.length === 1 ? "machine" : "machines"}</span><Button size="sm" onClick={() => setForm("add")}><Plus />Add machine</Button></div>}
+      <div className={embedded ? "settings-group" : "grid gap-2"}>
         {profiles.map((profile) => (
-          <div key={profile.id} className="settings-card flex items-center gap-3">
+          <div key={profile.id} className={embedded ? "settings-machine-row" : "settings-card flex items-center gap-3"}>
             <span className={cn("grid size-9 shrink-0 place-items-center rounded-lg bg-secondary text-muted-foreground", profile.id === activeId && "bg-primary/10 text-primary")}><Server className="size-4" /></span>
-            <span className="min-w-0 flex-1"><span className="flex items-center gap-1.5 text-xs font-medium">{profile.name}{profile.id === activeId && <Check className="size-3 text-success" />}</span><span className="mt-1 block truncate font-mono text-[10px] text-muted-foreground">{profile.baseUrl}</span></span>
+            <span className="min-w-0 flex-1 settings-row-copy"><span className="flex items-center gap-1.5 text-xs font-medium">{profile.name}{profile.id === activeId && <Check className="size-3 text-success" />}</span><span className="mt-1 block truncate font-mono text-[10px] text-muted-foreground" title={profile.baseUrl}>{profile.baseUrl}</span>{embedded && <small>{profile.id === activeId ? "Current machine" : tokens[profile.id] ? "Signed in" : "Sign-in required"}</small>}</span>
             {profile.id !== activeId && <Button variant="secondary" size="sm" onClick={() => void setActive(profile.id)}>Switch</Button>}
             {profile.id === activeId && tokens[profile.id] && <Button variant="ghost" size="icon-sm" title="Sign out" onClick={() => void signOut(profile.id)}><LogOut /></Button>}
             <Button variant="ghost" size="icon-sm" title="Edit machine" onClick={() => setForm(profile)}><Pencil /></Button>
@@ -120,7 +121,7 @@ export function ConnectionsManager({ embedded = false, onClose }: { embedded?: b
         ))}
         {profiles.length === 0 && <p className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">No Boosted machines have been added.</p>}
       </div>
-      <div className="flex justify-between gap-2"><Button variant="secondary" onClick={() => setForm("add")}><Plus />Add machine</Button>{onClose && <Button variant="ghost" onClick={onClose}>Done</Button>}</div>
+      {!embedded && <div className="flex justify-between gap-2"><Button variant="secondary" onClick={() => setForm("add")}><Plus />Add machine</Button>{onClose && <Button variant="ghost" onClick={onClose}>Done</Button>}</div>}
     </div>
   );
 }

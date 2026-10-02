@@ -20,8 +20,8 @@ export default defineConfig({
         scope: "/",
         display: "standalone",
         orientation: "any",
-        background_color: "#0e0e0e",
-        theme_color: "#0e0e0e",
+        background_color: "#272728",
+        theme_color: "#272728",
         categories: ["developer", "productivity"],
         icons: [
           { src: "/pwa-192x192.png", sizes: "192x192", type: "image/png" },
@@ -41,7 +41,9 @@ export default defineConfig({
   ],
   resolve: { alias: { "@": path.resolve(import.meta.dirname, "./src") } },
   server: {
+    host: "127.0.0.1",
     port: 5173,
+    strictPort: true,
     proxy: {
       "/api": { target: "http://127.0.0.1:4782", ws: true },
     },

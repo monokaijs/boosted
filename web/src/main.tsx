@@ -2,9 +2,9 @@ import { lazy, StrictMode, Suspense, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LoaderCircle, RefreshCw, Server } from "lucide-react";
-import "dockview-react/dist/styles/dockview.css";
 import "@xterm/xterm/css/xterm.css";
 import "./index.css";
+import "./app-shell.css";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import { AuthScreen } from "@/components/auth-screen";
@@ -14,11 +14,10 @@ import { getActiveApiClient } from "@/lib/api";
 import { ApiClientProvider, useBoostedApiClient } from "@/lib/api-context";
 import { isMixedContentConnection, useMachineStore, type MachineProfile } from "@/lib/machines";
 import { isTauriRuntime } from "@/lib/runtime";
+import { trackVisibleViewport } from "@/lib/viewport";
 import { setupRetryDelay, shouldRetrySetup } from "@/lib/startup";
 import { useAppStore } from "@/lib/store";
 import type { SetupState, User } from "@/lib/types";
-import { startAutomaticAppUpdates } from "@/lib/updater";
-import { MacOSPermissionHelper } from "@/components/macos-permission-helper";
 
 const AppShell = lazy(() => import("@/components/app-shell").then((module) => ({ default: module.AppShell })));
 
@@ -82,13 +81,12 @@ function SessionRoot({ profile }: { profile: MachineProfile }) {
 
   if (setup.data.needsSetup || !token || me.isError || !me.data) return <AuthScreen setup={setup.data} onAuthenticated={authenticated} />;
 
-  return <Suspense fallback={<div className="grid h-full place-items-center text-sm text-muted-foreground">Loading workspace…</div>}><AppShell /></Suspense>;
+  return <Suspense fallback={<div className="grid h-full place-items-center text-sm text-muted-foreground">Loading Boosted…</div>}><AppShell /></Suspense>;
 }
 
 function MachineBoundary({ profile }: { profile: MachineProfile }) {
   const [queryClient] = useState(createQueryClient);
   const [apiClient] = useState(getActiveApiClient);
-  useEffect(() => () => apiClient.cancelRequests(), [apiClient]);
   if (useAppStore.getState().activeMachineId !== profile.id) useAppStore.getState().activateMachine(profile.id);
   return <ApiClientProvider client={apiClient}><QueryClientProvider client={queryClient}><TooltipProvider delayDuration={350}><SessionRoot profile={profile} /></TooltipProvider></QueryClientProvider></ApiClientProvider>;
 }
@@ -101,7 +99,6 @@ function Bootstrap() {
 
   useEffect(() => {
     void initialize();
-    startAutomaticAppUpdates();
   }, [initialize]);
 
   if (!hydrated) return <div className="grid h-full place-items-center text-sm text-muted-foreground"><LoaderCircle className="mr-2 inline size-4 animate-spin" />Loading Boosted…</div>;
@@ -110,8 +107,7 @@ function Bootstrap() {
   return <MachineBoundary key={`${profile.id}:${profile.baseUrl}`} profile={profile} />;
 }
 
-const macOSPermissionHelper = window.__BOOSTED_MACOS_PERMISSION_HELPER__;
+const stopViewportTracking = trackVisibleViewport();
+import.meta.hot?.dispose(stopViewportTracking);
 
-createRoot(document.getElementById("root")!).render(macOSPermissionHelper
-  ? <StrictMode><MacOSPermissionHelper permission={macOSPermissionHelper} /></StrictMode>
-  : <StrictMode><Bootstrap />{!isTauriRuntime() && <PwaLifecycle />}</StrictMode>);
+createRoot(document.getElementById("root")!).render(<StrictMode><Bootstrap />{!isTauriRuntime() && <PwaLifecycle />}</StrictMode>);

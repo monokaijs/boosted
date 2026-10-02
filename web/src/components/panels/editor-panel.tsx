@@ -1,6 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { IDockviewPanelProps } from "dockview-react";
 import { ChevronRight, FileCode2, LoaderCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
@@ -12,7 +11,7 @@ function pathParts(path: string) {
   return path.split(/[\\/]+/).filter(Boolean);
 }
 
-export function EditorPanel({ api: panelApi }: IDockviewPanelProps) {
+export function EditorPanel() {
   const taskId = useAppStore((state) => state.selectedTaskId);
   const projectId = useAppStore((state) => state.selectedProjectId);
   const path = useAppStore((state) => state.openFilePath);
@@ -24,7 +23,6 @@ export function EditorPanel({ api: panelApi }: IDockviewPanelProps) {
   const sourceId = taskId ?? projectId;
   const editable = Boolean(taskId);
   const breadcrumbs = pathParts(path ?? "");
-  const fileName = breadcrumbs.at(-1) ?? "Editor";
   const file = useQuery({
     queryKey: ["file", taskId ? "task" : "project", sourceId, path],
     queryFn: () => taskId ? api.readFile(taskId, path!) : api.readProjectFile(projectId!, path!),
@@ -36,10 +34,6 @@ export function EditorPanel({ api: panelApi }: IDockviewPanelProps) {
     setRevision("");
     setDirty(false);
   }, [sourceId, path]);
-
-  useEffect(() => {
-    panelApi.setTitle(`${fileName}${dirty ? " •" : ""}`);
-  }, [dirty, fileName, panelApi]);
 
   useEffect(() => {
     if (file.data && !dirty) {

@@ -161,14 +161,14 @@ export function NewChatPanel() {
   return (
     <div className="new-task-canvas">
       <div className="new-task-stack">
-        <h1 className="new-task-title">new chat</h1>
+        <div className="new-chat-welcome"><Bot aria-hidden="true" /><h1 className="new-task-title">What should we work on{project ? <> in <span>{project.name}</span></> : " today"}?</h1></div>
         {project ? (
           <>
             <div className="new-task-context">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild><button type="button" className="new-task-option"><span>{project.name}</span><ChevronDown /></button></DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-64">
-                  <DropdownMenuLabel>Workspace</DropdownMenuLabel>
+                  <DropdownMenuLabel>Project</DropdownMenuLabel>
                   <DropdownMenuRadioGroup value={project.id} onValueChange={(id) => { const next = projects.data?.find((entry) => entry.id === id); if (next) selectProject(next); }}>
                     {projects.data?.map((entry) => <DropdownMenuRadioItem key={entry.id} value={entry.id}><span className="truncate">{entry.name}</span></DropdownMenuRadioItem>)}
                   </DropdownMenuRadioGroup>
@@ -183,7 +183,7 @@ export function NewChatPanel() {
               <Textarea
                 autoFocus
                 className="new-task-input"
-                placeholder="Ask Codex anything about this workspace…"
+                placeholder="Ask anything…"
                 value={prompt}
                 onChange={(event) => setPrompt(event.target.value)}
                 onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) event.currentTarget.form?.requestSubmit(); }}
@@ -216,7 +216,7 @@ export function NewChatPanel() {
             </form>
             {create.error && <p className="mt-2 text-xs text-destructive">{create.error.message}</p>}
             {codexOptions.error && <p className="mt-2 text-xs text-destructive">{codexOptions.error.message}</p>}
-            <p className="mt-2 text-[10px] text-muted-foreground">⌘ Enter to start a separate Codex chat</p>
+            <p className="new-chat-hint">⌘ Enter to send</p>
           </>
         ) : (
           <div className="mt-4 grid justify-items-start gap-3 text-sm text-muted-foreground"><p>Open a Git repository folder before starting a Codex chat.</p><Button onClick={() => window.dispatchEvent(new CustomEvent("boosted:open-project"))}><FolderOpen />Open project</Button></div>

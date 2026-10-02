@@ -13,11 +13,16 @@ import {
 } from "@assistant-ui/react";
 import { ArrowDown, Bot, ChevronDown, ChevronRight, Image, LoaderCircle, MessageSquareText, Plus, Send, Square, UserRound, Wrench, X } from "lucide-react";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
+import { CodexMessageText } from "@/components/assistant-ui/codex-message-content";
+import { CodexQuestionForm } from "@/components/assistant-ui/codex-question-form";
+import { CodexAsyncQuestionProvider, CodexAsyncQuestions } from "@/components/assistant-ui/codex-async-questions";
+import { codexQuestionReply, parseCodexMessage } from "@/lib/codex-message-format";
 import { WorkspaceFileProvider } from "@/components/assistant-ui/workspace-file-markdown";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { api } from "@/lib/api";
 import { appendCodexDelta, upsertCodexMessage } from "@/lib/codex-chat-state";
+import { chatActivity } from "@/lib/codex-chat-status";
 import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import type { CodexAccessOption, CodexAttachment, CodexChatMessage, CodexChatThread, CodexLiveEvent } from "@/lib/types";
 
@@ -26,7 +31,7 @@ function UserMessage() {
     <MessagePrimitive.Root className="mx-auto flex w-full max-w-3xl justify-end gap-3 py-3">
       <div className="min-w-0 max-w-[84%]">
         <div className="mb-1 text-right text-[10px] text-muted-foreground">You</div>
-        <div className="selectable-text rounded-lg bg-primary/10 px-3 py-2 text-left text-[13px] leading-5"><MessagePrimitive.Parts /></div>
+        <div className="selectable-text rounded-lg bg-primary/10 px-3 py-2 text-left text-[13px] leading-5"><CodexMessageText /></div>
       </div>
       <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border border-primary/20 bg-primary/10 text-primary"><UserRound className="size-3.5" /></div>
     </MessagePrimitive.Root>
@@ -37,14 +42,17 @@ function AssistantMessage() {
   const kind = useAuiState((state) => String(state.message.metadata.custom.kind ?? "message"));
   const label = useAuiState((state) => String(state.message.metadata.custom.label ?? "Tool call"));
 
-  if (kind === "tool") {
+  if (kind === "system") {
+    return <MessagePrimitive.Root className="mx-auto w-full max-w-3xl py-2 pl-9 text-xs text-muted-foreground"><CodexMessageText /></MessagePrimitive.Root>;
+  }
+  if (kind === "tool" || kind === "reasoning") {
     return (
       <MessagePrimitive.Root className="mx-auto w-full max-w-3xl py-0.5 pl-9">
         <details className="group rounded-md border border-border/70 bg-secondary/20 text-xs">
           <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-muted-foreground marker:hidden hover:text-foreground [&::-webkit-details-marker]:hidden">
             <ChevronRight className="size-3 shrink-0 transition-transform group-open:rotate-90" />
             <Wrench className="size-3 shrink-0" />
-            <span className="truncate font-mono text-[10px]">{label}</span>
+            <span className="truncate font-mono text-[10px]">{kind === "reasoning" ? "Reasoning summary" : label}</span>
           </summary>
           <div className="max-h-72 overflow-auto border-t border-border/50 px-3 py-2 text-xs"><MessagePrimitive.Parts components={{ Text: MarkdownText }} /></div>
         </details>
@@ -57,7 +65,8 @@ function AssistantMessage() {
       <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border border-border bg-secondary text-muted-foreground"><Bot className="size-3.5" /></div>
       <div className="min-w-0 max-w-[calc(100%-2.25rem)] flex-1">
         <div className="mb-1 text-[10px] text-muted-foreground">Codex</div>
-        <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
+        <CodexMessageText />
+        <CodexAsyncQuestions />
       </div>
     </MessagePrimitive.Root>
   );
@@ -75,7 +84,7 @@ function toAssistantMessage(message: CodexChatMessage): ThreadMessageLike {
     role: message.role,
     content: [{ type: "text", text: message.content }],
     createdAt: message.createdAt ? new Date(message.createdAt) : undefined,
-    metadata: { custom: { kind: message.kind, label: message.kind === "tool" ? toolLabel(message.content) : undefined } },
+    metadata: { custom: { kind: message.kind, questions: message.questions, label: message.kind === "tool" ? toolLabel(message.content) : undefined } },
   };
 }
 
@@ -99,22 +108,24 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
   const selectCodexChat = useAppStore((state) => state.selectCodexChat);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [messages, setMessages] = useState<CodexChatMessage[]>(thread.messages);
-  const [isRunning, setIsRunning] = useState(thread.chat.status === "active");
+  const [isRunning, setIsRunning] = useState(() => ["running", "waiting"].includes(chatActivity(thread.chat.status)));
   const [error, setError] = useState<string>();
-  const [model, setModel] = useState(() => localStorage.getItem(machinePreferenceKey("boosted.codex.model")) ?? thread.chat.model ?? "");
-  const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem(machinePreferenceKey("boosted.codex.effort")) ?? "");
+  const [model, setModel] = useState(() => thread.runtimeDefaults?.model ?? localStorage.getItem(machinePreferenceKey("boosted.codex.model")) ?? thread.chat.model ?? "");
+  const [reasoningEffort, setReasoningEffort] = useState(() => thread.runtimeDefaults?.reasoningEffort ?? localStorage.getItem(machinePreferenceKey("boosted.codex.effort")) ?? "");
   const [accessMode, setAccessMode] = useState<CodexAccessOption["id"]>(() => {
-    const stored = localStorage.getItem(machinePreferenceKey("boosted.codex.access"));
+    const stored = thread.runtimeDefaults?.accessMode ?? localStorage.getItem(machinePreferenceKey("boosted.codex.access"));
     return stored === "workspaceWrite" || stored === "readOnly" ? stored : "fullAccess";
   });
   const [attachments, setAttachments] = useState<CodexAttachment[]>([]);
   const [isUploading, setIsUploading] = useState(false);
-  const codexOptions = useQuery({ queryKey: ["codex-options"], queryFn: api.codexOptions, staleTime: 60_000 });
+  const codexOptions = useQuery({ queryKey: ["codex-options", thread.chat.id], queryFn: () => api.threadCodexOptions(thread.chat.id), staleTime: 60_000 });
+  const approvals = useQuery({ queryKey: ["codex-approvals", thread.chat.id], queryFn: () => api.codexApprovals(thread.chat.id), refetchInterval: isRunning ? 2000 : false });
   const selectedModel = codexOptions.data?.models.find((entry) => entry.model === model || entry.id === model);
   const selectedAccess = codexOptions.data?.accessModes.find((entry) => entry.id === accessMode);
   const supportsImages = selectedModel?.inputModalities.includes("image") ?? false;
 
   useEffect(() => setMessages(thread.messages), [thread.messages]);
+  useEffect(() => setIsRunning(["running", "waiting"].includes(chatActivity(thread.chat.status))), [thread.chat.status]);
 
   useEffect(() => {
     if (!codexOptions.data) return;
@@ -146,7 +157,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
         setError(undefined);
         return;
       }
-      if ((event.method === "item/started" || event.method === "item/completed") && event.message) {
+      if ((event.method === "item/started" || event.method === "item/completed" || event.method === "item/commandExecution/outputDelta") && event.message) {
         setMessages((current) => upsertCodexMessage(current, event.message!, event.clientMessageId));
         return;
       }
@@ -174,7 +185,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
     setIsRunning(true);
     setError(undefined);
     try {
-      const started = await api.sendCodexMessage(thread.chat.id, text, clientMessageId, { model, reasoningEffort, accessMode, attachmentIds: attachments.map((attachment) => attachment.id) });
+      const started = await api.sendCodexMessage(thread.chat.id, text, clientMessageId, { model, reasoningEffort, accessMode, approvalPolicy: accessMode === thread.runtimeDefaults?.accessMode ? thread.runtimeDefaults?.approvalPolicy : "never", attachmentIds: attachments.map((attachment) => attachment.id) });
       setAttachments([]);
       if (started.threadId !== thread.chat.id) {
         selectCodexChat(started.threadId);
@@ -281,6 +292,19 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
   }, [thread.chat.id]);
 
   const assistantMessages = useMemo(() => messages.map(toAssistantMessage), [messages]);
+  const answeredQuestions = useMemo(() => new Set(messages.filter((message) => message.role === "user").flatMap((message) =>
+    parseCodexMessage(message.content).flatMap((part) => part.type === "question-reply" ? part.replies.flatMap((reply) => reply.questionItemId ? [reply.questionItemId] : []) : []),
+  )), [messages]);
+  const replyToQuestions = useCallback(async (messageId: string, questions: NonNullable<CodexChatMessage["questions"]>, answers: Record<string, { answers: string[] }>) => {
+    const started = await api.sendCodexMessage(thread.chat.id, codexQuestionReply(messageId, questions, answers), createClientMessageId(), { model, reasoningEffort, accessMode });
+    setIsRunning(true);
+    if (started.threadId !== thread.chat.id) {
+      selectCodexChat(started.threadId);
+      window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", { detail: { threadId: started.threadId, title: thread.chat.title, replaceThreadId: thread.chat.id } }));
+    }
+    void queryClient.invalidateQueries({ queryKey: ["codex-chat", started.threadId] });
+    void queryClient.invalidateQueries({ queryKey: ["codex-chats"] });
+  }, [accessMode, model, queryClient, reasoningEffort, selectCodexChat, thread.chat.id, thread.chat.title]);
   const runtime = useExternalStoreRuntime({
     messages: assistantMessages,
     convertMessage: passthroughMessage,
@@ -292,6 +316,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
   return (
     <WorkspaceFileProvider scope={{ kind: "codex", id: thread.chat.id }}>
       <AssistantRuntimeProvider runtime={runtime}>
+        <CodexAsyncQuestionProvider value={{ answered: answeredQuestions, reply: replyToQuestions }}>
         <ThreadPrimitive.Root className="min-h-0 flex-1">
           <ThreadPrimitive.Viewport className="codex-thread-viewport relative flex h-full flex-col overflow-y-auto px-4">
           <ThreadPrimitive.Empty><div className="empty-state min-h-48 flex-1"><MessageSquareText className="size-8" /><p>Send a message to continue this Codex chat.</p></div></ThreadPrimitive.Empty>
@@ -299,6 +324,13 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
           <ThreadPrimitive.ViewportFooter className="codex-composer-footer sticky bottom-0 z-10 mt-auto bg-[var(--surface)] pb-3 pt-2">
             <ThreadPrimitive.ScrollToBottom asChild behavior="smooth"><Button className="absolute -top-9 right-0 z-20 shrink-0 rounded-full shadow-lg" variant="secondary" size="icon-sm" title="Scroll to bottom"><ArrowDown /></Button></ThreadPrimitive.ScrollToBottom>
             <div className="mx-auto w-full max-w-3xl">
+              {approvals.data?.map((approval) => approval.method === "item/tool/requestUserInput"
+                ? <div key={approval.id} className="mb-2"><CodexQuestionForm questions={approval.params.questions ?? []} onSubmit={async (answers) => { await api.answerCodexQuestions(thread.chat.id, approval.id, answers); await approvals.refetch(); }} /></div>
+                : <div className="mb-2 rounded-md border border-border bg-secondary px-3 py-2 text-xs" key={approval.id}>
+                <p className="font-medium">{approval.method.includes("commandExecution") ? "Command approval requested" : "File change approval requested"}</p>
+                <pre className="my-2 max-h-40 overflow-auto whitespace-pre-wrap break-words text-[11px]">{String(approval.params.command ?? approval.params.reason ?? "Codex needs permission to continue.")}</pre>
+                <div className="flex justify-end gap-2">{(["decline", "accept"] as const).map((decision) => <Button key={decision} size="sm" variant={decision === "accept" ? "default" : "outline"} onClick={async () => { try { await api.answerCodexApproval(thread.chat.id, approval.id, decision); await approvals.refetch(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not answer approval."); } }}>{decision === "accept" ? "Approve" : "Decline"}</Button>)}</div>
+              </div>)}
               {error && <div className="mb-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-[11px] text-destructive">{error}</div>}
               <ComposerPrimitive.Root className="rounded-lg border border-border p-2 focus-within:border-ring/60">
                 {attachments.length > 0 && <div className="mb-1.5 flex flex-wrap gap-1.5">{attachments.map((attachment) => <span key={attachment.id} className="inline-flex max-w-48 items-center gap-1.5 rounded-md border border-border bg-background/55 px-2 py-1 text-[10px] text-muted-foreground"><Image className="size-3 shrink-0" /><span className="truncate">{attachment.name}</span><button type="button" className="rounded-sm hover:text-foreground" aria-label={`Remove ${attachment.name}`} onClick={() => removeAttachment(attachment)}><X className="size-3" /></button></span>)}</div>}
@@ -327,6 +359,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
           </ThreadPrimitive.ViewportFooter>
           </ThreadPrimitive.Viewport>
         </ThreadPrimitive.Root>
+        </CodexAsyncQuestionProvider>
       </AssistantRuntimeProvider>
     </WorkspaceFileProvider>
   );

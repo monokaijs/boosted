@@ -67,69 +67,6 @@ pub struct GlobalSettingsUpdate {
     pub allowed_ips: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum RemoteViewerCodec {
-    Auto,
-    H264,
-    Vp8,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "lowercase")]
-pub enum RemoteViewerResolution {
-    #[serde(rename = "720p")]
-    P720,
-    #[serde(rename = "1080p")]
-    P1080,
-    #[serde(rename = "1440p")]
-    P1440,
-    Native,
-}
-
-impl RemoteViewerResolution {
-    pub fn rank(&self) -> u8 {
-        match self {
-            Self::P720 => 0,
-            Self::P1080 => 1,
-            Self::P1440 => 2,
-            Self::Native => 3,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoteViewerSettings {
-    pub enabled: bool,
-    pub control_enabled: bool,
-    pub audio_enabled: bool,
-    pub preferred_codec: RemoteViewerCodec,
-    pub default_fps: u32,
-    pub max_fps: u32,
-    pub default_resolution: RemoteViewerResolution,
-    pub max_resolution: RemoteViewerResolution,
-    pub max_bitrate_kbps: u32,
-    pub max_concurrent_streams: usize,
-}
-
-impl Default for RemoteViewerSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            control_enabled: false,
-            audio_enabled: true,
-            preferred_codec: RemoteViewerCodec::Auto,
-            default_fps: 30,
-            max_fps: 60,
-            default_resolution: RemoteViewerResolution::P1080,
-            max_resolution: RemoteViewerResolution::P1440,
-            max_bitrate_kbps: 8_000,
-            max_concurrent_streams: 4,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexBinarySettings {
@@ -201,11 +138,14 @@ pub struct CodexChatMessage {
     pub content: String,
     pub kind: String,
     pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub questions: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexChatThread {
+    pub runtime_defaults: Option<Value>,
     pub chat: CodexChat,
     pub messages: Vec<CodexChatMessage>,
 }
@@ -224,6 +164,8 @@ pub struct CodexMessageCreate {
     pub client_message_id: Option<String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub service_tier: Option<String>,
+    pub approval_policy: Option<String>,
     pub access_mode: Option<String>,
     #[serde(default)]
     pub attachment_ids: Vec<String>,
@@ -506,17 +448,4 @@ pub struct GitPaths {
 #[derive(Debug, Deserialize)]
 pub struct GitCommitCreate {
     pub message: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GitCommit {
-    pub id: String,
-    pub parents: Vec<String>,
-    pub author: String,
-    pub email: String,
-    pub subject: String,
-    pub body: String,
-    pub authored_at: String,
-    pub refs: Vec<String>,
 }

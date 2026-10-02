@@ -27,6 +27,18 @@ describe("Boosted API client", () => {
     expect(client().webSocket("/ws")).toBe("ws://machine.lan:4782/api/v1/ws");
   });
 
+  it("omits the working-directory filter when listing recent chats across projects", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = client();
+    await api.codexChats("");
+    await api.codexChats("/repos/example");
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "http://machine.lan:4782/api/v1/codex/chats",
+      "http://machine.lan:4782/api/v1/codex/chats?cwd=%2Frepos%2Fexample",
+    ]);
+  });
+
   it("classifies timeouts and network failures", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new DOMException("aborted", "AbortError"); }));
     await expect(client().health()).rejects.toMatchObject({ status: 408, message: "Connection timed out." });
@@ -102,29 +114,6 @@ describe("Boosted API client", () => {
       provider: "gitlab",
       config: { baseUrl: "https://gitlab.example", token: "gitlab-token" },
     });
-  });
-
-  it("uses authenticated REST and WebSocket paths for Remote Viewer", async () => {
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
-      id: "viewer-a",
-      source: { id: "source-a", kind: "window", name: "Simulator", width: 1280, height: 720, scale: 2 },
-      effectiveCodec: "h264",
-      effectiveFps: 30,
-      width: 1280,
-      height: 720,
-      audioEnabled: true,
-    }), { status: 201, headers: { "Content-Type": "application/json" } }));
-    vi.stubGlobal("fetch", fetchMock);
-    const api = client("https://boosted.example", { token: "machine-token" });
-
-    await api.createRemoteViewerSession({ sourceId: "source-a", fps: 30, resolution: "1080p" });
-
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe("https://boosted.example/api/v1/remote-viewer/sessions");
-    expect(init?.method).toBe("POST");
-    expect((init?.headers as Headers).get("Authorization")).toBe("Bearer machine-token");
-    expect(api.webSocket("/remote-viewer/sessions/viewer-a/media")).toBe("wss://boosted.example/api/v1/remote-viewer/sessions/viewer-a/media");
-    expect(api.webSocket("/remote-viewer/sessions/viewer-a/control")).toBe("wss://boosted.example/api/v1/remote-viewer/sessions/viewer-a/control");
   });
 
   it("fetches generated chat files through the authenticated remote server", async () => {
