@@ -8,6 +8,41 @@ that path as `CODEX_HOME`; inherited OpenAI credentials are removed. A process
 is shared by chats belonging to that account. Stopping one chat does not kill
 the process or other chats.
 
+The persistent assistant uses a separate ephemeral app-server thread for each
+turn, with native shell/file tools, live web search, full host and network
+access, and no execution approvals. MCP configuration is inherited from the
+selected account's Codex home. Boosted's dynamic management tools remain
+available alongside the native tools. Commands, file changes, web searches,
+image views and MCP calls are saved as action receipts, including failures.
+Stopping or timing out an assistant turn interrupts Codex and cleans its
+background terminals before shutting down its dedicated subprocess. Normal
+completion also cleans background terminals. Interrupted actions with no
+saved result are marked `resultUnknown`; recovery must inspect live state
+before retrying a mutation.
+
+Persistent agents also receive the bundled
+[computer-control skill](../server/skills/computer-control/SKILL.md), with
+`computer_status`, `computer_screenshot`, and `computer_action` dynamic tools.
+These use XCap and Enigo in the Rust server process to control its host desktop.
+Screenshots are bounded to 1600 pixels on the longest edge and delivered as
+Codex `inputImage` content; only metadata is saved in action receipts. Input
+coordinates are mapped from the screenshot to the selected display's native
+coordinate system, including Retina scaling and secondary displays.
+
+Each screenshot belongs to its agent, expires after 60 seconds, and is consumed
+by one input action. Any input invalidates other agents' snapshots. A shared
+desktop mutex serializes capture and input, and display-layout changes reject
+old coordinates. Independent human input is not detected; agents must refresh
+screenshots when focus may have changed. Dropping a tool future on Stop or
+timeout cancels queued work and multi-step input between events, releases held
+keys and drag buttons, and retains the lock until the worker exits. Delivered
+events cannot be rolled back. End-of-turn cleanup discards that agent's screen
+token. OS screen/input permissions and an interactive desktop are required;
+Linux input supports X11, not Wayland. No desktop sidecar or Docker service is
+needed. This adapts the screenshot/input workflow from
+[OpenDots](https://github.com/CopilotKit/OpenDots/blob/main/docs/COMPUTERS.md)
+to Boosted's existing host-access policy.
+
 | Tool | Behavior |
 | --- | --- |
 | `list_models` | Read the selected account's model catalog and reasoning efforts. Catalog membership is not an inference entitlement check. |
@@ -47,8 +82,20 @@ Run the installed CLI integration explicitly with:
 
 ```sh
 cargo test -p boosted-server --lib agents::tests::installed_codex_executes_and_interrupts_through_agent_tools -- --ignored
+cargo test -p boosted-server --lib agents::tests::installed_codex_agent_executes_native_tools_and_stops_commands -- --ignored
+cargo test -p boosted-server --lib agents::tests::installed_codex_agent_delivers_computer_screenshot_as_visual_input -- --ignored
 ```
 
 That integration uses a temporary account home and a loopback Responses
 endpoint. It verifies exact model requests, completed and interrupted turns,
 forks, clearing and deletion without external inference or existing chats.
+The native agent integration also uses a disposable stdio MCP server and
+loopback HTTP endpoint to verify shell execution, filesystem writes, network
+access, inherited MCP configuration, application tool replies, and termination
+of a running command on Stop.
+
+The screenshot integration uses a fake desktop and verifies that the installed
+CLI forwards image content to a loopback model endpoint, including code mode.
+Run desktop policy tests with `cargo test -p boosted-server --lib computer::tests`.
+For a read-only live capture check after granting OS permissions, run
+`cargo test -p boosted-server --lib computer::tests::native_desktop_status_and_screenshot -- --ignored --nocapture`.

@@ -3,6 +3,7 @@ mod auth;
 pub mod cli;
 mod codex;
 mod codex_transcript;
+mod computer;
 mod db;
 mod dev_web;
 mod error;

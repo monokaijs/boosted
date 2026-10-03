@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { AssistantMessage } from "../types/assistant"
-import { assistantMessageLayout } from "./assistant-conversation"
+import { assistantConversationLayout, assistantMessageLayout } from "./assistant-conversation"
 
 function message(role: AssistantMessage["role"], createdAt: string): AssistantMessage {
   return { id: createdAt, role, createdAt, content: "Message" }
@@ -41,5 +41,34 @@ describe("assistant conversation layout", () => {
 
   it("handles an empty conversation", () => {
     expect(assistantMessageLayout([])).toEqual([])
+  })
+
+  it("groups adjacent tool receipts while preserving replies and user messages", () => {
+    const receipt = (id: string, minute: number): AssistantMessage => ({
+      id, role: "assistant", content: "", createdAt: `2026-10-02T06:0${minute}:00`,
+      actions: [{ id: `${id}-action`, tool: "commandExecution", arguments: {}, status: "completed" }],
+    })
+    const messages = [
+      receipt("first", 0), receipt("second", 1), message("assistant", "2026-10-02T06:02:00"),
+      receipt("third", 3), message("user", "2026-10-02T06:04:00"), receipt("fourth", 5),
+    ]
+    const layout = assistantConversationLayout(messages)
+    expect(layout.map((item) => item.type)).toEqual(["tools", "message", "tools", "message", "tools"])
+    expect(layout[0].message.id).toBe("first")
+    expect(layout[0].type === "tools" && layout[0].actions.map((action) => action.id)).toEqual(["first-action", "second-action"])
+    expect(messages[0].actions).toHaveLength(1)
+    expect(layout[3].showSentTime).toBe(true)
+  })
+
+  it("keeps tool groups separate across timestamp breaks and attachment messages", () => {
+    const first: AssistantMessage = {
+      id: "first", role: "assistant", content: "", createdAt: "2026-10-02T06:00:00",
+      actions: [{ id: "action", tool: "commandExecution", arguments: {}, status: "completed" }],
+    }
+    const afterPause = { ...first, id: "paused", createdAt: "2026-10-02T06:15:00" }
+    const attachment = { ...afterPause, id: "attachment", attachments: [{ id: "image", kind: "image" as const, name: "image.png", mimeType: "image/png", size: 1, dataUrl: "data:image/png;base64,AA==" }] }
+    const layout = assistantConversationLayout([first, afterPause, attachment, { ...afterPause, id: "last" }])
+    expect(layout.map((item) => item.type)).toEqual(["tools", "tools", "message", "tools"])
+    expect(layout[1].showTimestamp).toBe(true)
   })
 })

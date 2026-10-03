@@ -84,3 +84,31 @@ describe("agent conversation scrolling", () => {
     expect(focus).toHaveBeenCalledWith({ preventScroll: true })
   })
 })
+
+it("collapses adjacent tools into a count and preserves expansion as new calls arrive", async () => {
+  const receipts: AssistantState["messages"] = [
+    { id: "command", role: "assistant", content: "", createdAt: "2026-10-02T00:00:02.000Z", actions: [{ id: "command-action", tool: "commandExecution", arguments: { command: "glab issue list" }, status: "failed" }] },
+    { id: "lookup", role: "assistant", content: "", createdAt: "2026-10-02T00:00:03.000Z", actions: [{ id: "lookup-action", tool: "mcpToolCall", arguments: {}, status: "completed" }] },
+  ]
+  apiMock.read.mockResolvedValue({ ...initial, messages: [...initial.messages, ...receipts] })
+  await renderConversation()
+  const toggle = screen.getByRole("button", { name: "2 tools" })
+  expect(toggle).toHaveAttribute("aria-expanded", "false")
+  expect(screen.queryByRole("img", { name: "Failed" })).not.toBeInTheDocument()
+  fireEvent.click(toggle)
+  expect(toggle).toHaveAttribute("aria-expanded", "true")
+  expect(screen.getByRole("img", { name: "Failed" })).toBeInTheDocument()
+  expect(screen.getByRole("img", { name: "Completed" })).toBeInTheDocument()
+  expect(screen.getByText("Run command").closest("summary")).toHaveTextContent(/^Run command$/)
+  act(() => window.dispatchEvent(new CustomEvent("boosted:assistant-updated", { detail: {
+    ...initial, updatedAt: "2026-10-02T00:00:04.000Z", messages: [...initial.messages, ...receipts,
+      { id: "search", role: "assistant", content: "", createdAt: "2026-10-02T00:00:04.000Z", actions: [{ id: "search-action", tool: "webSearch", arguments: {}, status: "running" }] },
+    ],
+  } })))
+  expect(screen.getByRole("button", { name: "3 tools" })).toBe(toggle)
+  expect(toggle).toHaveAttribute("aria-expanded", "true")
+  expect(screen.getByRole("img", { name: "Running" })).toBeInTheDocument()
+  fireEvent.click(toggle)
+  expect(toggle).toHaveAttribute("aria-expanded", "false")
+  expect(screen.queryByRole("img", { name: "Running" })).not.toBeInTheDocument()
+})

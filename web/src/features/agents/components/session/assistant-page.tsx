@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useId, useRef, useState } from "react"
 import { machinePreferenceKey } from "@/lib/store"
-import { ArrowUp, Check, ChevronRight, LoaderCircle, MessageSquarePlus, Plus, RefreshCw, ShieldCheck, Square, TriangleAlert } from "lucide-react"
+import { ArrowUp, Check, ChevronRight, LoaderCircle, MessageSquarePlus, Plus, RefreshCw, ShieldCheck, Square, TriangleAlert, Wrench } from "lucide-react"
 import type { AssistantAction, AssistantAttachment, AssistantState } from "@/features/agents/types/assistant"
 import { apiClient, type ProviderAccountResponse } from "@/features/agents/lib/api-client"
 import { MarkdownContent } from "@/features/agents/components/session/chat-markdown"
@@ -8,13 +8,15 @@ import type { SessionShellState } from "@/features/agents/components/session/ses
 import { cn } from "@/lib/utils"
 import { shouldAcceptAssistantState } from "@/features/agents/lib/assistant-state"
 import { readRecord } from "@/features/agents/lib/session"
-import { assistantMessageLayout } from "@/features/agents/lib/assistant-conversation"
+import { assistantConversationLayout } from "@/features/agents/lib/assistant-conversation"
 import { assistantMessagesWithOutbox, type AssistantPendingMessage } from "@/features/agents/lib/assistant-outbox"
 import { AssistantProfilePanel } from "@/features/agents/components/session/assistant-profile-panel"
 import { AssistantAttachmentList } from "@/features/agents/components/session/assistant-attachment-list"
 import { assistantAttachmentsFromFiles, checkAssistantAttachmentLimits, pastedImages } from "@/features/agents/lib/assistant-attachments"
 
 const labels: Record<string, string> = {
+  computer_status: "Inspect computer", computer_screenshot: "Capture screen", computer_action: "Control computer",
+  commandExecution: "Run command", fileChange: "Edit files", mcpToolCall: "Call MCP tool", webSearch: "Search the web", imageView: "View image",
   watch_chat: "Watch coding run", schedule_follow_up: "Schedule follow-up", list_follow_ups: "Read follow-ups", cancel_follow_up: "Cancel follow-up",
   get_profile: "Read assistant profile", update_profile: "Update name and personality",
   generate_avatar: "Generate avatar",
@@ -232,15 +234,17 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
             </div>
           ) : null}
           <div>
-            {assistantMessageLayout(messages).map(({ message, showTimestamp, startGroup, showSentTime, showDeliveryStatus }) => (
+            {assistantConversationLayout(messages).map((item) => {
+              const { message, showTimestamp, startGroup, showSentTime, showDeliveryStatus } = item
+              return (
               <div className={cn("min-w-0", startGroup ? "mt-4 first:mt-0" : "mt-1")} key={message.id}>
                 {showTimestamp ? <time className="mb-3 mt-6 block text-center text-[12px] text-muted-foreground" dateTime={message.createdAt}>{conversationDate(message.createdAt)}</time> : null}
-                <article aria-label={message.role === "user" ? "Your message" : `${message.assistantName ?? assistantName} reply`} className="group/message min-w-0 rounded-xl focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" tabIndex={showSentTime ? 0 : undefined}>
+                {item.type === "tools" ? <ActionGroup actions={item.actions} shell={shell} /> : <article aria-label={message.role === "user" ? "Your message" : `${message.assistantName ?? assistantName} reply`} className="group/message min-w-0 rounded-xl focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" tabIndex={showSentTime ? 0 : undefined}>
                   {message.attachments?.length ? <div className={cn("mb-2 flex max-w-[88%]", message.role === "user" && "ml-auto justify-end")}><AssistantAttachmentList attachments={message.attachments} /></div> : null}
                   {message.content ? <div className={cn("assistant-message-bubble w-fit min-w-0 max-w-[88%] rounded-[22px] px-4 py-2.5", message.role === "user" ? "assistant-message-user ml-auto text-white" : "assistant-message-reply text-foreground")}>
                     <MarkdownContent content={message.content} />
                   </div> : null}
-                  {message.actions?.length ? <div className={cn("w-fit min-w-0 max-w-[88%] space-y-2", message.content && "mt-3")}>{message.actions.map((action) => <ActionReceipt action={action} key={action.id} shell={shell} />)}</div> : null}
+                  {message.actions?.length ? <div className={cn(message.content && "mt-2")}><ActionGroup actions={message.actions} shell={shell} /></div> : null}
                   {message.delivery === "cancelled" ? <p className="mt-1 pr-4 text-right text-[11px] text-muted-foreground">Cancelled</p> : null}
                   {message.localDelivery ? <div className="mt-1 flex items-center justify-end gap-1 pr-4 text-[11px] text-muted-foreground" role="status">
                     {message.localDelivery === "sending" ? <><LoaderCircle aria-hidden="true" className="size-3 animate-spin" />Sending…</> : <><TriangleAlert aria-hidden="true" className="size-3 text-destructive" /><span title={message.sendError}>Not sent</span><button className="underline underline-offset-2" type="button" onClick={() => { const pending = outbox.find((item) => item.id === message.id); if (pending) retryMessage(pending) }}>Retry</button></>}
@@ -249,9 +253,9 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
                     <span aria-live={showDeliveryStatus ? "polite" : undefined}>{message.delivery === "processing" || message.delivery === "handled" ? "Read" : "Sent"}</span>
                     <time className="hidden group-hover/message:ml-1 group-hover/message:block group-focus-within/message:ml-1 group-focus-within/message:block" dateTime={message.readAt ?? message.createdAt}>{conversationTime(message.readAt ?? message.createdAt)}</time>
                   </div> : null}
-                </article>
+                </article>}
               </div>
-            ))}
+            )})}
           </div>
           {running && state?.typing ? <div aria-label={`${assistantName} is typing`} className="mt-3 flex items-center gap-2 px-4 text-xs text-muted-foreground" role="status"><span>{assistantName} is typing</span><span aria-hidden="true" className="animate-pulse tracking-widest motion-reduce:animate-none">•••</span></div> : null}
         </div>
@@ -281,21 +285,43 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
   )
 }
 
+function ActionGroup({ actions, shell }: { actions: AssistantAction[]; shell: SessionShellState }) {
+  const [expanded, setExpanded] = useState(false)
+  const panelId = useId()
+  const running = actions.some((action) => action.status === "running")
+  return (
+    <div className="w-fit min-w-0 max-w-[88%]">
+      <button className="inline-flex min-h-8 items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" type="button" aria-expanded={expanded} aria-controls={panelId} onClick={() => setExpanded((open) => !open)}>
+        {running ? <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin motion-reduce:animate-none" /> : <Wrench aria-hidden="true" className="size-3.5" />}
+        <span>{actions.length} {actions.length === 1 ? "tool" : "tools"}</span>
+        <ChevronRight aria-hidden="true" className={cn("size-3 transition-transform duration-200 motion-reduce:transition-none", expanded && "rotate-90")} />
+      </button>
+      <div className="assistant-tool-reveal" data-expanded={expanded} id={panelId} aria-hidden={!expanded} inert={!expanded}>
+        <div className="min-h-0 overflow-hidden">
+          <div className="flex min-w-0 flex-col items-start gap-1 pt-1.5">
+            {actions.map((action) => <ActionReceipt action={action} key={action.id} shell={shell} />)}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function ActionReceipt({ action, shell }: { action: AssistantAction; shell: SessionShellState }) {
   const chat = shell.chats.find((item) => item.id === action.chatId)
   const directory = action.workingDirectory ?? chat?.workingDirectory
   const workspace = shell.recentWorkspaces.find((item) => item.path === directory)
   const linkedChat = action.chatId ? { id: action.chatId, title: chat?.title ?? "Codex chat" } : null
   return (
-    <details className="group overflow-hidden rounded-xl border border-border bg-card">
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-xs">
-        {action.status === "running" ? <LoaderCircle className="size-3.5 animate-spin text-muted-foreground" /> : action.status === "failed" ? <TriangleAlert className="size-3.5 text-destructive" /> : <Check className="size-3.5 text-emerald-500" />}
-        <span className="flex-1">{labels[action.tool] ?? action.tool}</span>
-        <span className="text-[10px] text-muted-foreground">{action.status}</span><ChevronRight className="size-3 text-muted-foreground group-open:rotate-90" />
+    <details className="group min-w-0 max-w-full">
+      <summary className="inline-flex min-h-8 max-w-full cursor-pointer list-none items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 text-xs transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
+        {action.status === "running" ? <LoaderCircle role="img" aria-label="Running" className="size-3.5 shrink-0 animate-spin text-muted-foreground motion-reduce:animate-none" /> : action.status === "failed" ? <TriangleAlert role="img" aria-label="Failed" className="size-3.5 shrink-0 text-destructive" /> : <Check role="img" aria-label="Completed" className="size-3.5 shrink-0 text-emerald-500" />}
+        <span className="truncate">{labels[action.tool] ?? action.tool}</span>
+        <ChevronRight aria-hidden="true" className="size-3 shrink-0 text-muted-foreground transition-transform duration-200 group-open:rotate-90 motion-reduce:transition-none" />
       </summary>
-      <div className="border-t border-border px-3 py-3">
+      <div className="mt-1 rounded-2xl border border-border bg-card px-3 py-3">
         {linkedChat ? <button type="button" className="mb-3 inline-block text-xs text-info underline underline-offset-4" onClick={() => void shell.openSidebarChat(linkedChat)}>Open chat{workspace ? ` · ${workspace.name}` : ""}</button> : null}
-        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-[11px] leading-5 text-muted-foreground">{action.result ? prettyResult(action.result) : "Action in progress…"}</pre>
+        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-[11px] leading-5 text-muted-foreground">{action.result ? prettyResult(action.result) : prettyResult(JSON.stringify(action.arguments))}</pre>
       </div>
     </details>
   )

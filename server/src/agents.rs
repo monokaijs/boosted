@@ -11,6 +11,7 @@ const DEFAULT_PERSONALITY: &str =
 pub(crate) struct AgentManager {
     states: Arc<Mutex<HashMap<String, Value>>>,
     workers: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    computer: computer::ComputerControl,
 }
 impl AgentManager {
     pub async fn load(db: &Database) -> AppResult<Self> {
@@ -22,6 +23,14 @@ impl AgentManager {
                 for message in messages {
                     if message["delivery"] == "processing" {
                         message["delivery"] = json!("queued");
+                    }
+                    if let Some(actions) = message["actions"].as_array_mut() {
+                        for action in actions {
+                            if action["status"] == "running" {
+                                action["status"] = json!("failed");
+                                action["result"] = json!(json!({"error":"Server restarted before the action result was saved. Inspect live state before retrying.","resultUnknown":true}).to_string());
+                            }
+                        }
                     }
                 }
             }
@@ -396,10 +405,16 @@ async fn run_queue(state: &AppState, id: &str, mut cancel: watch::Receiver<bool>
         let mut excluded = HashSet::new();
         let result = loop {
             let latest = state.agents.get(id).await?;
-            let result = tokio::select! {
-                result = run_turn(state, id, &latest, &current, &background, &account_id) => result,
-                _ = cancel.changed() => Err(AppError::Conflict("Agent stopped".into()))
-            };
+            let result = run_turn(
+                state,
+                id,
+                &latest,
+                &current,
+                &background,
+                &account_id,
+                &mut cancel,
+            )
+            .await;
             if !*cancel.borrow()
                 && result
                     .as_ref()
@@ -516,11 +531,13 @@ async fn run_turn(
     current: &[Value],
     background: &[Value],
     account_id: &str,
+    cancel: &mut watch::Receiver<bool>,
 ) -> AppResult<()> {
     let account = document(&state.db, "accounts", account_id).await?;
     let home = providers::account_home(&state.providers, &account)?;
     let client = CodexClient::for_account(&home, true).await?;
-    let result = run_turn_with_client(state, id, snapshot, current, background, &client).await;
+    let result =
+        run_turn_with_client(state, id, snapshot, current, background, &client, cancel).await;
     client.shutdown().await;
     result
 }
@@ -532,22 +549,13 @@ async fn run_turn_with_client(
     current: &[Value],
     background: &[Value],
     client: &CodexClient,
+    cancel: &mut watch::Receiver<bool>,
 ) -> AppResult<()> {
+    if *cancel.borrow() {
+        return Err(AppError::Conflict("Agent stopped".into()));
+    }
     let mut notifications = client.subscribe();
     let tools: Value = serde_json::from_str(include_str!("agent-tools.json"))?;
-    let config = client
-        .request("config/read", json!({"includeLayers":false}))
-        .await?;
-    let servers = config
-        .pointer("/config/mcp_servers")
-        .and_then(Value::as_object)
-        .map(|servers| {
-            servers
-                .keys()
-                .map(|name| (name.clone(), json!({"command":"codex","enabled":false})))
-                .collect::<serde_json::Map<_, _>>()
-        })
-        .unwrap_or_default();
     let cwd = state
         .providers
         .home
@@ -557,11 +565,11 @@ async fn run_turn_with_client(
         .join(id);
     tokio::fs::create_dir_all(&cwd).await?;
     let thread = client.request("thread/start", json!({
-        "cwd":cwd, "ephemeral":true, "approvalPolicy":"never", "sandbox":"read-only",
+        "cwd":cwd, "ephemeral":true, "approvalPolicy":"never", "sandbox":"danger-full-access",
         "baseInstructions":include_str!("agent-instructions.txt"),
-        "developerInstructions":"Only use supplied Boosted tools. Do not use shell, filesystem, web, MCP or delegation tools.",
+        "developerInstructions":format!("Use Boosted application tools and native Codex tools to carry out the user's requested work on this server. Shell, filesystem, network, web search, configured MCP tools and host desktop tools are available. Resolve project paths before working in a repository. Send user-facing replies through send_agent_message.\n\n{}", include_str!("../skills/computer-control/SKILL.md")),
         "dynamicTools":tools,
-        "config":{"features.shell_tool":false,"features.apply_patch_tool":false,"features.multi_agent":false,"web_search":"disabled","mcp_servers":servers}
+        "config":{"features.shell_tool":true,"features.multi_agent":false,"web_search":"live"}
     })).await?;
     let thread_id = thread
         .pointer("/thread/id")
@@ -658,110 +666,253 @@ async fn run_turn_with_client(
             .map(|message|json!({"id":message["id"],"content":message["content"]})).collect::<Vec<_>>(),
         "originalUserMessages":original_messages,"backgroundEvents":background,
         "availableImages":available_images,"attachmentContext":attachment_context,
+        "workingDirectory":cwd,
         "recoveryInstructions":"Inspect saved successful actions and already sent replies. Never repeat them after a retry or server restart."
     });
     let mut input = vec![json!({"type":"text","text":prompt.to_string()})];
     input.extend(visual);
-    client
+    let turn = client
         .request(
             "turn/start",
             json!({"threadId":thread_id,"input":input,
-        "approvalPolicy":"never","sandboxPolicy":{"type":"readOnly","networkAccess":false}}),
+        "approvalPolicy":"never","sandboxPolicy":{"type":"dangerFullAccess"}}),
         )
         .await?;
+    let turn_id = turn.pointer("/turn/id").and_then(Value::as_str);
     let mut calls = 0;
     let mut call_results: HashMap<String, Value> = HashMap::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
-    loop {
-        let event = match tokio::time::timeout_at(deadline, notifications.recv()).await {
-            Ok(Ok(event)) => event,
-            Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
-                return Err(AppError::Internal(
-                    "Agent event stream overflowed. Completed actions are saved".into(),
-                ));
-            }
-            Ok(Err(error)) => return Err(AppError::Internal(error.to_string())),
-            Err(_) => {
-                return Err(AppError::Internal(
-                    "Agent timed out. Completed actions are saved".into(),
-                ));
-            }
-        };
-        let params = &event["params"];
-        if params["threadId"] != thread_id {
-            continue;
-        }
-        match event["method"].as_str().unwrap_or_default() {
-            "item/tool/call" => {
-                if current.is_empty() && !background.is_empty() {
-                    let latest = state.agents.get(id).await?;
-                    let cancelled = background.iter().all(|event| {
-                        latest["followUps"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .find(|followup| followup["id"] == event["id"])
-                            .is_some_and(|followup| followup["status"] == "cancelled")
-                    });
-                    if cancelled {
-                        return Err(AppError::Conflict("Follow-up cancelled".into()));
-                    }
-                }
-                let call_id = params["callId"]
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| event["id"].to_string());
-                let response = if let Some(previous) = call_results.get(&call_id) {
-                    previous.clone()
-                } else {
-                    calls += 1;
-                    let result = if calls > 24 {
-                        Err(AppError::Conflict(
-                            "Action limit reached. Ask the user to continue".into(),
-                        ))
-                    } else {
-                        execute_tool(
-                            state,
-                            id,
-                            params["tool"].as_str().unwrap_or_default(),
-                            &params["arguments"],
-                            &call_id,
-                            current,
-                        )
-                        .await
-                    };
-                    let response = match result {
-                        Ok(value) => {
-                            json!({"success":true,"contentItems":[{"type":"inputText","text":value.to_string()}]})
-                        }
-                        Err(error) => {
-                            json!({"success":false,"contentItems":[{"type":"inputText","text":json!({"error":error.to_string()}).to_string()}]})
-                        }
-                    };
-                    call_results.insert(call_id, response.clone());
-                    response
-                };
-                client.respond(event["id"].clone(), response).await?;
-            }
-            "turn/completed" => {
-                let status = params
-                    .pointer("/turn/status")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if status == "failed" || status == "interrupted" {
+    let work = async {
+        loop {
+            let event = match tokio::time::timeout_at(deadline, notifications.recv()).await {
+                Ok(Ok(event)) => event,
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
                     return Err(AppError::Internal(
-                        params
-                            .pointer("/turn/error/message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Agent stopped")
-                            .into(),
+                        "Agent event stream overflowed. Completed actions are saved".into(),
                     ));
                 }
-                return Ok(());
+                Ok(Err(error)) => return Err(AppError::Internal(error.to_string())),
+                Err(_) => {
+                    return Err(AppError::Internal(
+                        "Agent timed out. Completed actions are saved".into(),
+                    ));
+                }
+            };
+            let params = &event["params"];
+            if params["threadId"] != thread_id {
+                continue;
             }
-            _ => {}
+            if current.is_empty() && !background.is_empty() {
+                let latest = state.agents.get(id).await?;
+                let cancelled = background.iter().all(|event| {
+                    latest["followUps"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|followup| followup["id"] == event["id"])
+                        .is_some_and(|followup| followup["status"] == "cancelled")
+                });
+                if cancelled {
+                    return Err(AppError::Conflict("Follow-up cancelled".into()));
+                }
+            }
+            match event["method"].as_str().unwrap_or_default() {
+                "item/started" | "item/completed" => {
+                    record_native_action(
+                        state,
+                        id,
+                        &thread_id,
+                        &params["item"],
+                        &cwd,
+                        event["method"] == "item/completed",
+                    )
+                    .await?;
+                }
+                "item/tool/requestUserInput" => {
+                    // Questions belong in the messenger; don't leave a native prompt waiting forever.
+                    client
+                        .respond(event["id"].clone(), json!({"answers":{}}))
+                        .await?;
+                }
+                "item/tool/call" => {
+                    let call_id = params["callId"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| event["id"].to_string());
+                    let response = if let Some(previous) = call_results.get(&call_id) {
+                        previous.clone()
+                    } else {
+                        calls += 1;
+                        let result = if calls > 128 {
+                            Err(AppError::Conflict(
+                                "Action limit reached. Ask the user to continue".into(),
+                            ))
+                        } else {
+                            execute_tool(
+                                state,
+                                id,
+                                params["tool"].as_str().unwrap_or_default(),
+                                &params["arguments"],
+                                &call_id,
+                                current,
+                            )
+                            .await
+                        };
+                        let response = match result {
+                            Ok(value) => computer::tool_response(value),
+                            Err(error) => {
+                                json!({"success":false,"contentItems":[{"type":"inputText","text":json!({"error":error.to_string()}).to_string()}]})
+                            }
+                        };
+                        call_results.insert(call_id, response.clone());
+                        response
+                    };
+                    client.respond(event["id"].clone(), response).await?;
+                }
+                "turn/completed" => {
+                    let status = params
+                        .pointer("/turn/status")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if status == "failed" || status == "interrupted" {
+                        return Err(AppError::Internal(
+                            params
+                                .pointer("/turn/error/message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("Agent stopped")
+                                .into(),
+                        ));
+                    }
+                    return Ok(());
+                }
+                _ => {}
+            }
         }
+    };
+    let result = tokio::select! {
+        _ = cancel.wait_for(|stopped| *stopped) => Err(AppError::Conflict("Agent stopped".into())),
+        result = work => result,
+    };
+    // Each agent turn owns its app-server. Interrupt first so foreground commands stop too.
+    let cleanup = async {
+        if result.is_err() {
+            if let Some(turn_id) = turn_id {
+                let _ = client
+                    .request(
+                        "turn/interrupt",
+                        json!({"threadId":thread_id,"turnId":turn_id}),
+                    )
+                    .await;
+            }
+        }
+        client
+            .request(
+                "thread/backgroundTerminals/clean",
+                json!({"threadId":thread_id}),
+            )
+            .await
+    };
+    if !matches!(
+        tokio::time::timeout(Duration::from_secs(5), cleanup).await,
+        Ok(Ok(_))
+    ) {
+        tracing::warn!(
+            agent_id = id,
+            "Unable to clean agent terminals before shutting down Codex"
+        );
     }
+    state.agents.computer.forget(id).await;
+    if let Err(error) = &result {
+        change(state, id, |agent| {
+            for message in agent["messages"].as_array_mut().unwrap() {
+                if let Some(actions) = message["actions"].as_array_mut() {
+                    for action in actions {
+                        if action["status"] == "running" {
+                            action["status"] = json!("failed");
+                            action["result"] = json!(
+                                json!({"error":error.to_string(),"resultUnknown":true}).to_string()
+                            );
+                        }
+                    }
+                }
+            }
+            agent["typing"] = json!(false);
+            Ok(())
+        })
+        .await?;
+    }
+    result
+}
+
+async fn record_native_action(
+    state: &AppState,
+    id: &str,
+    thread_id: &str,
+    item: &Value,
+    cwd: &Path,
+    completed: bool,
+) -> AppResult<()> {
+    let Some(tool) = item["type"].as_str().filter(|kind| {
+        matches!(
+            *kind,
+            "commandExecution" | "fileChange" | "mcpToolCall" | "webSearch" | "imageView"
+        )
+    }) else {
+        return Ok(());
+    };
+    let Some(item_id) = item["id"].as_str() else {
+        return Ok(());
+    };
+    let action_id = format!("{thread_id}:{item_id}");
+    let failed = matches!(
+        item["status"].as_str(),
+        Some("failed" | "declined" | "interrupted")
+    ) || item["exitCode"].as_i64().is_some_and(|code| code != 0)
+        || item.get("error").is_some_and(|error| !error.is_null());
+    let status = if !completed {
+        "running"
+    } else if failed {
+        "failed"
+    } else {
+        "completed"
+    };
+    let mut arguments = item.clone();
+    for key in [
+        "id",
+        "type",
+        "status",
+        "aggregatedOutput",
+        "result",
+        "error",
+        "exitCode",
+        "durationMs",
+    ] {
+        arguments.as_object_mut().unwrap().remove(key);
+    }
+    let directory = item["cwd"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| cwd.to_string_lossy().to_string());
+    let mut action = json!({"id":action_id,"tool":tool,"arguments":arguments,"status":status,"workingDirectory":directory});
+    if completed {
+        action["result"] = json!(item.to_string().chars().take(24_000).collect::<String>());
+    }
+    change(state, id, |agent| {
+        agent["typing"] = json!(false);
+        let assistant_name = agent["profile"]["name"].clone();
+        let messages = agent["messages"].as_array_mut().unwrap();
+        let existing = messages.iter_mut().filter_map(|message| message["actions"].as_array_mut())
+            .flat_map(|actions| actions.iter_mut()).find(|action| action["id"] == action_id);
+        if let Some(existing) = existing {
+            // Replayed started notifications must not downgrade an already completed action.
+            if completed || existing["status"] == "running" { *existing = action; }
+        } else {
+            messages.push(json!({"id":Uuid::new_v4().to_string(),"role":"assistant","content":"",
+                "assistantName":assistant_name,"createdAt":Utc::now().to_rfc3339(),"actions":[action]}));
+        }
+        Ok(())
+    }).await?;
+    Ok(())
 }
 async fn send_agent_reply(
     state: &AppState,
@@ -850,7 +1001,7 @@ async fn execute_tool(
                 "failed"
             });
             action["result"] = json!(match &result {
-                Ok(value) => value.to_string(),
+                Ok(value) => computer::receipt_result(value).to_string(),
                 Err(error) => json!({"error":error.to_string()}).to_string(),
             });
             if let Ok(value) = &result {
@@ -875,6 +1026,9 @@ async fn tool_action(
 ) -> AppResult<Value> {
     let required = |field: &str, limit| text(args, field, limit);
     match name {
+        "computer_status" | "computer_screenshot" | "computer_action" => {
+            state.agents.computer.execute(id, name, args).await
+        }
         "set_typing" => {
             let typing = args["typing"]
                 .as_bool()
@@ -2860,12 +3014,305 @@ supports_websockets = false
         };
         (root, state)
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires an installed Codex CLI; uses a fake desktop, isolated home and loopback inference only"]
+    async fn installed_codex_agent_delivers_computer_screenshot_as_visual_input() {
+        fn has_exec(value: &Value) -> bool {
+            match value {
+                Value::Array(values) => values.iter().any(has_exec),
+                Value::Object(fields) => {
+                    (value["name"] == "exec" && matches!(value["type"].as_str(), Some("function" | "custom")))
+                        || fields.values().any(has_exec)
+                }
+                _ => false,
+            }
+        }
+        fn contains_image(value: &Value) -> bool {
+            match value {
+                Value::Array(values) => values.iter().any(contains_image),
+                Value::Object(fields) => {
+                    value["type"] == "input_image" || fields.values().any(contains_image)
+                }
+                _ => false,
+            }
+        }
+        let (root, mut state) = fixture().await;
+        state.agents.computer = computer::tests::fixture().0;
+        let home = root.path().join("codex-home");
+        tokio::fs::create_dir_all(&home).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let count = Arc::new(AtomicU64::new(0));
+        let app = Router::new().route("/v1/responses", post(move |Json(request): Json<Value>| {
+            let requests = requests.clone();
+            let index = count.fetch_add(1, Ordering::Relaxed);
+            async move {
+                let code_mode = has_exec(&request["tools"]);
+                requests.send(request).unwrap();
+                let item = if index == 0 && code_mode {
+                    json!({"type":"custom_tool_call","id":"fc_screen","call_id":"call_screen",
+                        "namespace":"functions","name":"exec","status":"completed",
+                        "input":"const result = await tools.computer_screenshot({}); text(result);"})
+                } else if index == 0 {
+                    json!({"type":"function_call","id":"fc_screen","call_id":"call_screen",
+                        "name":"computer_screenshot","arguments":"{}","status":"completed"})
+                } else {
+                    json!({"type":"message","id":"msg_screen","role":"assistant","status":"completed",
+                        "content":[{"type":"output_text","text":"Screen observed","annotations":[]}]})
+                };
+                let payload = format!("event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+                    json!({"type":"response.output_item.done","output_index":0,"item":item}),
+                    json!({"type":"response.completed","response":{"id":format!("resp_{index}"),
+                        "object":"response","created_at":1700000000,"status":"completed","output":[item],
+                        "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}));
+                Response::builder().header("content-type","text/event-stream").body(Body::from(payload)).unwrap()
+            }
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::fs::write(home.join("config.toml"), format!(r#"
+model_provider = "boosted_loopback"
+[model_providers.boosted_loopback]
+name = "Boosted screenshot transport test"
+base_url = "http://{address}/v1"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+[features]
+code_mode = true
+"#)).await.unwrap();
+        let client = CodexClient::for_account(&home, true).await.unwrap();
+        let snapshot = state.agents.get("pock").await.unwrap();
+        let (_sender, mut cancel) = watch::channel(false);
+        let result = tokio::time::timeout(Duration::from_secs(30),
+            run_turn_with_client(&state, "pock", &snapshot, &[], &[], &client, &mut cancel)).await;
+        client.shutdown().await;
+        server.abort();
+        result.unwrap().unwrap();
+        let _first = received.try_recv().unwrap();
+        let next = received.try_recv().unwrap();
+        assert!(contains_image(&next["input"]), "Screenshot must reach the model as image content: {}",
+            next["input"].to_string().chars().take(2000).collect::<String>());
+        let agent = state.agents.get("pock").await.unwrap();
+        let actions: Vec<_> = agent["messages"].as_array().unwrap().iter()
+            .filter_map(|message| message["actions"].as_array()).flatten().collect();
+        let action = actions.iter().find(|action| action["tool"] == "computer_screenshot").unwrap();
+        assert_eq!(action["status"], "completed");
+        assert!(!action["result"].as_str().unwrap().contains("base64"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires an installed Codex CLI and Python; uses an isolated home and loopback inference only"]
+    async fn installed_codex_agent_executes_native_tools_and_stops_commands() {
+        fn tool_names(tools: &Value) -> Vec<String> {
+            match tools {
+                Value::Array(values) => values.iter().flat_map(tool_names).collect(),
+                Value::Object(fields) => {
+                    let mut names: Vec<_> = fields.values().flat_map(tool_names).collect();
+                    if matches!(tools["type"].as_str(), Some("function" | "custom")) {
+                        if let Some(name) = tools["name"].as_str() {
+                            names.push(name.to_owned());
+                        }
+                    }
+                    names
+                }
+                _ => Vec::new(),
+            }
+        }
+        let (root, state) = fixture().await;
+        let home = root.path().join("codex-home");
+        tokio::fs::create_dir_all(&home).await.unwrap();
+        let mcp_script = root.path().join("probe.py");
+        tokio::fs::write(&mcp_script, include_str!("../tests/fixtures/agent-mcp.py"))
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let count = Arc::new(AtomicU64::new(0));
+        let directory = root.path().to_string_lossy().to_string();
+        let app = Router::new()
+            .route("/probe", get(|| async { "native-network-ok" }))
+            .route("/v1/responses", post(move |Json(request):Json<Value>| {
+                let requests = requests.clone();
+                let index = count.fetch_add(1, Ordering::Relaxed);
+                let directory = directory.clone();
+                async move {
+                    let names = tool_names(&request);
+                    let code_mode = names.iter().any(|name| name == "exec");
+                    requests.send(request).unwrap();
+                    if index == 6 {
+                        return Response::builder().header("content-type","text/event-stream")
+                            .body(Body::from_stream(futures_util::stream::pending::<Result<String,std::convert::Infallible>>())).unwrap();
+                    }
+                    let (name, args) = match index {
+                        0 | 5 => {
+                            let name = if code_mode { "exec_command".into() } else { names.iter().find(|name| matches!(name.as_str(), "exec_command" | "shell_command" | "shell")).expect("Native shell tool").clone() };
+                            let command = if index == 0 { format!("printf native-shell-ok > command-result.txt; curl --fail --silent http://{address}/probe") }
+                                else { "printf '%s' \"$$\" > command-pid; exec sleep 30".into() };
+                            let args = match name.as_str() {
+                                "exec_command" => json!({"cmd":command,"workdir":directory,"yield_time_ms":1000,"max_output_tokens":1000}),
+                                "shell_command" => json!({"command":command,"workdir":directory,"timeout_ms":10000}),
+                                _ => json!({"command":["sh","-c",command.as_str()],"workdir":directory,"timeout_ms":10000}),
+                            };
+                            (name, args)
+                        }
+                        1 => (if code_mode { "mcp__probe__lookup".into() } else { names.iter().find(|name| name.contains("probe") && name.contains("lookup")).expect("Configured MCP tool").clone() }, json!({"value":"native-mcp-ok"})),
+                        2 => ("set_typing".into(), json!({"typing":true})),
+                        3 => ("send_agent_message".into(), json!({"content":"Shell, network and MCP verified."})),
+                        _ => (String::new(), Value::Null),
+                    };
+                    let item = if name.is_empty() {
+                        json!({"type":"message","id":"msg_probe","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Invisible final output","annotations":[]}]})
+                    } else if code_mode {
+                        json!({"type":"custom_tool_call","id":format!("fc_{index}"),"call_id":format!("call_{index}"),"namespace":"functions","name":"exec","input":format!("text(await tools.{name}({args}));"),"status":"completed"})
+                    } else {
+                        json!({"type":"function_call","id":format!("fc_{index}"),"call_id":format!("call_{index}"),"name":name,"arguments":args.to_string(),"status":"completed"})
+                    };
+                    let completed = json!({"type":"response.completed","response":{"id":format!("resp_{index}"),"object":"response","created_at":1700000000,"status":"completed","output":[item.clone()],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}});
+                    let payload = format!("event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {}\n\n", json!({"type":"response.output_item.done","output_index":0,"item":item}), completed);
+                    Response::builder().header("content-type","text/event-stream").body(Body::from(payload)).unwrap()
+                }
+            }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::fs::write(
+            home.join("config.toml"),
+            format!(
+                r#"
+model_provider = "boosted_loopback"
+web_search = "disabled"
+[features]
+shell_tool = false
+[model_providers.boosted_loopback]
+name = "Boosted disposable native tool test"
+base_url = "http://{address}/v1"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+[mcp_servers.probe]
+command = "python3"
+args = [{}]
+"#,
+                serde_json::to_string(&mcp_script).unwrap()
+            ),
+        )
+        .await
+        .unwrap();
+        let client = CodexClient::for_account(&home, true).await.unwrap();
+        let snapshot = state.agents.get("pock").await.unwrap();
+        let (_sender, mut cancel) = watch::channel(false);
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_turn_with_client(&state, "pock", &snapshot, &[], &[], &client, &mut cancel),
+        )
+        .await;
+        result.unwrap().unwrap();
+        let first = received.try_recv().unwrap();
+        let names = tool_names(&first);
+        assert!(
+            names.iter().any(|name| name == "apply_patch")
+                || first
+                    .to_string()
+                    .contains("declare const tools: { apply_patch"),
+            "Native file tool missing: {names:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("command-result.txt")).unwrap(),
+            "native-shell-ok"
+        );
+        let agent = state.agents.get("pock").await.unwrap();
+        let actions: Vec<_> = agent["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["actions"].as_array())
+            .flatten()
+            .collect();
+        let shell = actions
+            .iter()
+            .find(|action| action["tool"] == "commandExecution")
+            .unwrap();
+        assert_eq!(shell["status"], "completed");
+        assert!(
+            shell["result"]
+                .as_str()
+                .unwrap()
+                .contains("native-network-ok")
+        );
+        let mcp = actions
+            .iter()
+            .find(|action| action["tool"] == "mcpToolCall")
+            .unwrap();
+        assert_eq!(mcp["status"], "completed");
+        assert!(mcp["result"].as_str().unwrap().contains("native-mcp-ok"));
+        let replies: Vec<_> = agent["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| {
+                message["content"]
+                    .as_str()
+                    .is_some_and(|content| !content.is_empty())
+            })
+            .collect();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0]["content"], "Shell, network and MCP verified.");
+        while received.try_recv().is_ok() {}
+        let snapshot = state.agents.get("pock").await.unwrap();
+        let (sender, mut cancel) = watch::channel(false);
+        let stop = async {
+            // The first request starts a long command. The next request means it yielded a session.
+            received.recv().await.unwrap();
+            received.recv().await.unwrap();
+            sender.send(true).unwrap();
+        };
+        let stopped = tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::join!(
+                run_turn_with_client(&state, "pock", &snapshot, &[], &[], &client, &mut cancel),
+                stop
+            )
+        })
+        .await;
+        client.shutdown().await;
+        server.abort();
+        assert!(
+            stopped
+                .unwrap()
+                .0
+                .unwrap_err()
+                .to_string()
+                .contains("Agent stopped")
+        );
+        let pid = std::fs::read_to_string(root.path().join("command-pid")).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .output()
+                .unwrap()
+                .status
+                .success()
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("Stop must terminate the native command process");
+    }
     #[tokio::test]
     async fn restart_preserves_identity_and_recovers_queued_messages_and_commitments() {
         let (_root, state) = fixture().await;
         change(&state,"pock",|a|{
             a["profile"]["name"]=json!("Nova");a["status"]=json!("running");a["typing"]=json!(true);
-            a["messages"]=json!([{"id":"message","role":"user","content":"Continue","delivery":"processing"}]);
+            a["messages"]=json!([
+                {"id":"message","role":"user","content":"Continue","delivery":"processing"},
+                {"id":"receipt","role":"assistant","content":"","actions":[
+                    {"id":"unfinished","tool":"commandExecution","status":"running"},
+                    {"id":"finished","tool":"commandExecution","status":"completed","result":"saved output"}
+                ]}
+            ]);
             a["followUps"]=json!([{"id":"followup","kind":"schedule","status":"processing"}]);Ok(())
         }).await.unwrap();
         let restored = AgentManager::load(&state.db)
@@ -2877,6 +3324,21 @@ supports_websockets = false
         assert_eq!(restored["profile"]["name"], "Nova");
         assert_eq!(restored["status"], "idle");
         assert_eq!(restored["messages"][0]["delivery"], "queued");
+        assert_eq!(restored["messages"][1]["actions"][0]["status"], "failed");
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                restored["messages"][1]["actions"][0]["result"]
+                    .as_str()
+                    .unwrap()
+            )
+            .unwrap()["resultUnknown"],
+            true
+        );
+        assert_eq!(restored["messages"][1]["actions"][1]["status"], "completed");
+        assert_eq!(
+            restored["messages"][1]["actions"][1]["result"],
+            "saved output"
+        );
         assert_eq!(restored["followUps"][0]["status"], "ready");
         assert_eq!(restored["typing"], false);
     }
@@ -3056,39 +3518,54 @@ supports_websockets = false
     }
     #[cfg(unix)]
     #[tokio::test]
-    async fn real_stdio_transport_runs_only_application_tools_and_deduplicates_replies() {
+    async fn real_stdio_transport_enables_native_tools_and_deduplicates_replies() {
         use std::os::unix::fs::PermissionsExt;
-        let (root, state) = fixture().await;
+        let (root, mut state) = fixture().await;
+        state.agents.computer = computer::tests::fixture().0;
         let script = root.path().join("fake-codex");
         std::fs::write(&script,r#"#!/usr/bin/env python3
 import sys,json
 stage=0
-calls=[('update_profile',{'name':'Nova'},'profile'),('send_agent_message',{'content':'Should fail without typing'},'invalid'),('set_typing',{'typing':True},'typing'),('send_agent_message',{'content':'Ready to work.'},'reply'),('send_agent_message',{'content':'Ready to work.'},'reply')]
+calls=[('update_profile',{'name':'Nova'},'profile'),('send_agent_message',{'content':'Should fail without typing'},'invalid'),('set_typing',{'typing':True},'typing'),('send_agent_message',{'content':'Ready to work.'},'reply'),('send_agent_message',{'content':'Ready to work.'},'reply'),('computer_screenshot',{},'screen'),('computer_action',{'action':'click','x':20,'y':10},'click')]
 def emit(v):
  print(json.dumps(v),flush=True)
 def call(i):
  name,args,call_id=calls[i]
+ if name=='computer_action':args['screenshotId']=screenshot_id
  emit({'id':700+i,'method':'item/tool/call','params':{'threadId':'agent-thread','callId':call_id,'tool':name,'arguments':args}})
 for line in sys.stdin:
  m=json.loads(line)
  method=m.get('method')
  if method=='initialize':emit({'id':m['id'],'result':{}})
- elif method=='config/read':emit({'id':m['id'],'result':{'config':{'mcp_servers':{'server.with.dots':{'command':'never-run'}}}}})
  elif method=='thread/start':
   p=m['params']
-  assert p['sandbox']=='read-only' and p['ephemeral'] is True
-  assert p['config']['features.shell_tool'] is False
-  assert p['config']['mcp_servers']['server.with.dots']['enabled'] is False
-  assert len(p['dynamicTools'])==27
+  assert p['sandbox']=='danger-full-access' and p['ephemeral'] is True
+  assert p['approvalPolicy']=='never'
+  assert p['config']['features.shell_tool'] is True
+  assert p['config']['web_search']=='live'
+  assert 'mcp_servers' not in p['config']
+  assert 'features.apply_patch_tool' not in p['config']
+  assert len(p['dynamicTools'])==30
+  assert 'computer-control' in p['developerInstructions']
   emit({'id':m['id'],'result':{'thread':{'id':'agent-thread'}}})
  elif method=='turn/start':
-  assert m['params']['sandboxPolicy']['networkAccess'] is False
+  assert m['params']['sandboxPolicy']=={'type':'dangerFullAccess'}
   emit({'id':m['id'],'result':{'turn':{'id':'turn'}}})
+  for kind,fields in [('commandExecution',{'command':'glab issue list','cwd':'/project','exitCode':0,'aggregatedOutput':'Issue 42'}),('commandExecution',{'command':'missing-cli','exitCode':127,'aggregatedOutput':'command not found'}),('mcpToolCall',{'server':'example','tool':'lookup','arguments':{},'error':{'message':'Access denied'}}),('fileChange',{'changes':[]})]:
+   item={'id':str(len(fields))+kind,'type':kind,'status':'inProgress',**fields}
+   emit({'method':'item/started','params':{'threadId':'agent-thread','item':item}})
+   emit({'method':'item/completed','params':{'threadId':'agent-thread','item':{**item,'status':'completed'}}})
+   emit({'method':'item/started','params':{'threadId':'agent-thread','item':item}})
   emit({'method':'item/agentMessage/delta','params':{'threadId':'agent-thread','delta':'Ordinary output must stay invisible.'}})
   call(0)
+ elif method=='thread/backgroundTerminals/clean':emit({'id':m['id'],'result':{}})
  elif method is None and 'result' in m:
   if stage==1:assert m['result']['success'] is False
   else:assert m['result']['success'] is True
+  if stage==5:
+   content=m['result']['contentItems']
+   screenshot_id=json.loads(content[0]['text'])['screenshotId']
+   assert content[1]['type']=='inputImage' and content[1]['imageUrl'].startswith('data:image/png;base64,')
   stage+=1
   if stage<len(calls):call(stage)
   else:emit({'method':'turn/completed','params':{'threadId':'agent-thread','turn':{'id':'turn','status':'completed'}}})
@@ -3096,7 +3573,8 @@ for line in sys.stdin:
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
         let client = CodexClient::test_process(script, true).await.unwrap();
         let snapshot = state.agents.get("pock").await.unwrap();
-        run_turn_with_client(&state, "pock", &snapshot, &[], &[], &client)
+        let (_sender, mut cancel) = watch::channel(false);
+        run_turn_with_client(&state, "pock", &snapshot, &[], &[], &client, &mut cancel)
             .await
             .unwrap();
         client.shutdown().await;
@@ -3111,5 +3589,98 @@ for line in sys.stdin:
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0]["content"], "Ready to work.");
         assert_eq!(agent["typing"], false);
+        let actions: Vec<_> = agent["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["actions"].as_array())
+            .flatten()
+            .filter(|action| action["id"].as_str().unwrap().starts_with("agent-thread:"))
+            .collect();
+        assert_eq!(actions.len(), 4);
+        assert_eq!(actions[0]["status"], "completed");
+        assert_eq!(actions[0]["workingDirectory"], "/project");
+        assert!(actions[0]["result"].as_str().unwrap().contains("Issue 42"));
+        assert_eq!(actions[1]["status"], "failed");
+        assert_eq!(actions[2]["status"], "failed");
+        assert_eq!(actions[3]["status"], "completed");
+        let screen_action = agent["messages"].as_array().unwrap().iter()
+            .filter_map(|message| message["actions"].as_array()).flatten()
+            .find(|action| action["tool"] == "computer_screenshot").unwrap();
+        assert_eq!(screen_action["status"], "completed");
+        assert!(!screen_action["result"].as_str().unwrap().contains("base64"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stopping_agent_interrupts_turn_and_cleans_native_terminals() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, state) = fixture().await;
+        let script = root.path().join("fake-codex");
+        std::fs::write(&script, r#"#!/usr/bin/env python3
+import sys,json,os
+def emit(v):print(json.dumps(v),flush=True)
+for line in sys.stdin:
+ m=json.loads(line);method=m.get('method')
+ if method=='initialize':emit({'id':m['id'],'result':{}})
+ elif method=='thread/start':emit({'id':m['id'],'result':{'thread':{'id':'agent-thread'}}})
+ elif method=='turn/start':
+  emit({'id':m['id'],'result':{'turn':{'id':'native-turn'}}})
+  emit({'method':'item/started','params':{'threadId':'agent-thread','item':{'id':'command','type':'commandExecution','command':'long-running-command','status':'inProgress'}}})
+ elif method in ['turn/interrupt','thread/backgroundTerminals/clean']:
+  with open(os.path.join(os.environ['CODEX_HOME'],'cleanup.jsonl'),'a') as f:f.write(json.dumps(m)+'\n')
+  emit({'id':m['id'],'result':{}})
+"#).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let client = CodexClient::test_process_with_home(script, Some(root.path()), true)
+            .await
+            .unwrap();
+        let mut notifications = client.subscribe();
+        let snapshot = state.agents.get("pock").await.unwrap();
+        let (sender, mut cancel) = watch::channel(false);
+        let stop = async {
+            loop {
+                let event = notifications.recv().await.unwrap();
+                if event["method"] == "item/started" {
+                    // Wait until the running receipt is persisted before stopping.
+                    loop {
+                        let agent = state.agents.get("pock").await.unwrap();
+                        if agent["messages"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|m| m["actions"].is_array())
+                        {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                    sender.send(true).unwrap();
+                    break;
+                }
+            }
+        };
+        let (result, _) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                run_turn_with_client(&state, "pock", &snapshot, &[], &[], &client, &mut cancel),
+                stop
+            )
+        })
+        .await
+        .unwrap();
+        assert!(result.unwrap_err().to_string().contains("Agent stopped"));
+        client.shutdown().await;
+        let cleanup: Vec<Value> = std::fs::read_to_string(root.path().join("cleanup.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(cleanup[0]["method"], "turn/interrupt");
+        assert_eq!(cleanup[0]["params"]["turnId"], "native-turn");
+        assert_eq!(cleanup[1]["method"], "thread/backgroundTerminals/clean");
+        let agent = state.agents.get("pock").await.unwrap();
+        let action = &agent["messages"][0]["actions"][0];
+        assert_eq!(action["status"], "failed");
+        assert!(serde_json::from_str::<Value>(action["result"].as_str().unwrap()).unwrap()["resultUnknown"].as_bool().unwrap());
     }
 }

@@ -6,7 +6,7 @@ Planning happens in chats. Choose **Plan** in a chat's composer to explore the r
 
 ## Development
 
-Prerequisites: Node 22+, pnpm 10+, Rust 1.85+, Git, and the Codex CLI.
+Prerequisites: Node 22+, pnpm 10+, Rust 1.88+, Git, and the Codex CLI.
 
 ```bash
 pnpm install
@@ -35,6 +35,12 @@ Existing installations migrate automatically. Browser clients retain the current
 ## Agents and provider accounts
 
 Open **Agents** from the workspace rail (or **More → Agents** on mobile). Agents have separate persistent conversations, names, personalities, and avatars, and can manage coding chats across all registered projects. Create additional agents with **New agent**. Update an agent's identity in conversation, upload an avatar from its profile, or ask it to generate one.
+
+Agents can also execute terminal commands, inspect and edit files, run scripts and tests, access the network, search the web, and call MCP tools configured in their selected account's Codex home. They run directly on the Boosted server machine with full host access and no execution approvals. For example, an agent can check GitLab issues through an installed, authenticated `glab`, or GitHub issues through `gh`; no issue-specific tool is required. Install and authenticate service CLIs on that machine. Native tool activity and results appear in the conversation alongside Boosted action receipts. **Stop** interrupts the agent's turn and cleans its terminals; background terminals are also cleaned when the turn finishes. Use coding chats or scheduled follow-ups for work that needs to persist beyond a turn.
+
+All agents also receive the bundled [computer-control skill](server/skills/computer-control/SKILL.md) and native desktop tools. Ask an agent to operate an app: it can inspect displays, take screenshots, click, drag, scroll, type Unicode text, and press keyboard shortcuts. Tools control the selected **Boosted server machine**, including when you connect from a phone or another computer. Screenshots reach the model as images; action history saves only their metadata. Each input requires a recent screenshot, and desktop inputs are serialized across agents. **Stop** cancels pending input and stops multi-step actions between input events; it cannot undo input already delivered.
+
+On macOS, enable **Screen Recording** and **Accessibility** for Boosted under **System Settings → Privacy & Security**. For a headless server launched in a terminal, grant these permissions to the terminal or executable identified by macOS, then restart it. Windows needs an interactive logged-in desktop. Linux desktop control needs an X11 session with `DISPLAY` and `XAUTHORITY` access; Wayland sessions are rejected. A server running without a desktop cannot control the connecting client's screen. Missing permissions and unavailable desktops produce setup errors. Linux source builds also need `pkg-config`, `libclang-dev`, `libxcb1-dev`, `libxrandr-dev`, `libdbus-1-dev`, `libpipewire-0.3-dev`, `libwayland-dev`, `libegl-dev`, `libgbm-dev`, and `libxkbcommon-dev`; headless Linux releases require their corresponding runtime libraries.
 
 Use **Settings → Providers** or the agent panel's provider button to add isolated Codex accounts, sign in with a device code, inspect quotas, and configure each account's model, reasoning, access, speed, personality, and Codex home. Administrators manage provider accounts; authenticated members can use connected accounts and agents. Existing shared Codex task and chat connections continue to work.
 

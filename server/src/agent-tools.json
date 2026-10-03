@@ -625,5 +625,113 @@
       ],
       "additionalProperties": false
     }
+  },
+  {
+    "type": "function",
+    "name": "computer_status",
+    "description": "Inspect the Boosted server's desktop displays, input availability and OS permission setup. This controls the machine running Boosted, not the connecting client's machine.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "computer_screenshot",
+    "description": "Capture a display of the Boosted server desktop as an image. Omit displayId for the primary display. Use returned screenshotId and screenshot-pixel coordinates for one computer_action within 60 seconds. Capture again after each input to verify its effect.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "displayId": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
+    "name": "computer_action",
+    "description": "Perform one input on the Boosted server desktop using your latest screenshotId. Each input consumes the screenshot and invalidates other agents\u2019 screenshots. Coordinates refer to the returned screenshot image, not native screen pixels. click/move/scroll require x,y; drag also needs endX,endY; type needs text; key needs modifier-first keys. Scroll values are wheel steps, positive down/right. Take a fresh screenshot to verify the result.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "screenshotId": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "click",
+            "move",
+            "drag",
+            "scroll",
+            "type",
+            "key"
+          ]
+        },
+        "x": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "endX": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "endY": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "button": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "middle"
+          ]
+        },
+        "clickCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2
+        },
+        "scrollX": {
+          "type": "integer",
+          "minimum": -20,
+          "maximum": 20
+        },
+        "scrollY": {
+          "type": "integer",
+          "minimum": -20,
+          "maximum": 20
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "maxItems": 5
+        }
+      },
+      "required": [
+        "screenshotId",
+        "action"
+      ],
+      "additionalProperties": false
+    }
   }
 ]
