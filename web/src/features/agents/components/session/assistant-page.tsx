@@ -18,9 +18,9 @@ const labels: Record<string, string> = {
   watch_chat: "Watch coding run", schedule_follow_up: "Schedule follow-up", list_follow_ups: "Read follow-ups", cancel_follow_up: "Cancel follow-up",
   get_profile: "Read assistant profile", update_profile: "Update name and personality",
   generate_avatar: "Generate avatar",
-  list_workspaces: "Read projects", list_chats: "Read chats", read_chat: "Read conversation",
-  list_accounts: "Check provider capacity", create_chat: "Create chat", send_message: "Send instructions",
-  stop_chat: "Stop chat", move_chat: "Move chat to another account", set_failover: "Update quota recovery",
+  list_workspaces: "Read projects", list_chats: "Read chats", read_chat: "Read conversation", read_run: "Read coding run",
+  list_accounts: "Check provider capacity", list_models: "Read Codex models", set_chat_model: "Switch chat model", create_chat: "Create chat", send_message: "Send instructions",
+  stop_chat: "Stop chat", stop_run: "Stop coding run", set_chat_access: "Change chat access", clear_chat: "Clear conversation", delete_chat: "Delete conversation", move_chat: "Move chat to another account", set_failover: "Update quota recovery",
   fork_chat: "Fork conversation", rename_chat: "Rename chat",
 }
 const suggestions = [
@@ -45,7 +45,6 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
   const attachmentsRef = useRef<AssistantAttachment[]>([])
   const attachmentQueue = useRef(Promise.resolve())
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const endRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const followRef = useRef(true)
   const requestId = useRef(0)
@@ -114,8 +113,21 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
   }, [shell.chatAccounts, refreshKey])
 
   useEffect(() => {
-    if (followRef.current) endRef.current?.scrollIntoView({ block: "end" })
+    const scroller = scrollRef.current
+    if (followRef.current && scroller) scroller.scrollTop = scroller.scrollHeight
   }, [state, outbox])
+
+  useEffect(() => {
+    const scroller = scrollRef.current
+    if (!scroller || typeof ResizeObserver === "undefined") return
+    // Keep the latest reply visible when the keyboard resizes the transcript, without
+    // scrolling its ancestors or interrupting someone reading older messages.
+    const observer = new ResizeObserver(() => {
+      if (followRef.current) scroller.scrollTop = scroller.scrollHeight
+    })
+    observer.observe(scroller)
+    return () => observer.disconnect()
+  }, [])
 
   const dispatchMessage = (message: AssistantPendingMessage) => {
     const operation = sendQueue.current.then(async () => {
@@ -135,7 +147,7 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
   const retryMessage = (message: AssistantPendingMessage) => {
     setOutbox((current) => current.map((pending) => pending.id === message.id ? { ...pending, localDelivery: "sending", sendError: undefined } : pending))
     void dispatchMessage(message)
-    textareaRef.current?.focus()
+    textareaRef.current?.focus({ preventScroll: true })
   }
 
   const send = async (message = draft) => {
@@ -157,7 +169,7 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
       attachmentsRef.current = []
       setAttachments([])
     }
-    textareaRef.current?.focus()
+    textareaRef.current?.focus({ preventScroll: true })
     await dispatchMessage(pending)
   }
 
@@ -200,7 +212,7 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
         onGenerateAvatar={() => void send("Design an original avatar that fits your name and personality. Use generate_avatar to save it as your profile picture.")}
         onEditProfile={() => {
           setDraft((current) => current || "I'd like to update your name and personality.")
-          textareaRef.current?.focus()
+          textareaRef.current?.focus({ preventScroll: true })
         }}
       />
 
@@ -215,7 +227,7 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
               <h2 className="text-2xl font-medium tracking-tight">What should we work on?</h2>
               <p className="mt-3 max-w-lg text-sm leading-6 text-muted-foreground">Direct work across all your projects in one conversation. Start Codex chats, check progress, and keep several projects moving at once.</p>
               <div className="mt-8 grid gap-3 sm:grid-cols-3">
-                {suggestions.map(({ icon: Icon, label, prompt }) => <button className="rounded-2xl border border-border p-4 text-left transition-colors hover:bg-accent" key={label} type="button" onClick={() => { setDraft(prompt); textareaRef.current?.focus() }}><Icon className="mb-4 size-4 text-muted-foreground" /><span className="text-[13px] font-medium">{label}</span><p className="mt-2 text-xs leading-5 text-muted-foreground">{label === "Start a task" ? "Create a chat and give it a job." : label === "Keep work moving" ? "See progress and available capacity." : "Continue with another account."}</p></button>)}
+                {suggestions.map(({ icon: Icon, label, prompt }) => <button className="rounded-2xl border border-border p-4 text-left transition-colors hover:bg-accent" key={label} type="button" onClick={() => { setDraft(prompt); textareaRef.current?.focus({ preventScroll: true }) }}><Icon className="mb-4 size-4 text-muted-foreground" /><span className="text-[13px] font-medium">{label}</span><p className="mt-2 text-xs leading-5 text-muted-foreground">{label === "Start a task" ? "Create a chat and give it a job." : label === "Keep work moving" ? "See progress and available capacity." : "Continue with another account."}</p></button>)}
               </div>
             </div>
           ) : null}
@@ -242,7 +254,6 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
             ))}
           </div>
           {running && state?.typing ? <div aria-label={`${assistantName} is typing`} className="mt-3 flex items-center gap-2 px-4 text-xs text-muted-foreground" role="status"><span>{assistantName} is typing</span><span aria-hidden="true" className="animate-pulse tracking-widest motion-reduce:animate-none">•••</span></div> : null}
-          <div ref={endRef} />
         </div>
       </div>
 

@@ -74,8 +74,10 @@ export interface CodexPendingRequest {
   params: Record<string, unknown> & { questions?: CodexQuestion[] };
 }
 
+export type CodexCollaborationMode = "default" | "plan";
+
 export interface CodexChatThread {
-  runtimeDefaults?: { model?: string; reasoningEffort?: string; accessMode?: CodexAccessOption["id"]; approvalPolicy?: string; serviceTier?: string };
+  runtimeDefaults?: { model?: string; reasoningEffort?: string; accessMode?: CodexAccessOption["id"]; approvalPolicy?: string; serviceTier?: string; collaborationMode?: CodexCollaborationMode };
   chat: CodexChat;
   messages: CodexChatMessage[];
 }

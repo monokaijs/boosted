@@ -10,6 +10,7 @@ import type {
   CodexAttachment,
   CodexOptions,
   CodexAccessOption,
+  CodexCollaborationMode,
   CodexPendingRequest,
   GitStatus,
   Health,
@@ -165,7 +166,7 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   codexChats: (cwd: string) => request<CodexChat[]>(`/codex/chats${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ""}`),
   createCodexChat: (cwd: string, model?: string) => request<CodexChat>("/codex/chats", json("POST", { cwd, model })),
   codexChat: (id: string) => request<CodexChatThread>(`/codex/chats/${encodeURIComponent(id)}`),
-  sendCodexMessage: (id: string, message: string, clientMessageId: string, options: { model: string; reasoningEffort: string; accessMode: CodexAccessOption["id"]; approvalPolicy?: string; attachmentIds?: string[] }) => request<CodexTurnStart>(`/codex/chats/${encodeURIComponent(id)}/messages`, json("POST", { message, clientMessageId, ...options })),
+  sendCodexMessage: (id: string, message: string, clientMessageId: string, options: { model: string; reasoningEffort: string; accessMode: CodexAccessOption["id"]; approvalPolicy?: string; attachmentIds?: string[]; collaborationMode?: CodexCollaborationMode }) => request<CodexTurnStart>(`/codex/chats/${encodeURIComponent(id)}/messages`, json("POST", { message, clientMessageId, ...options })),
   codexApprovals: (id: string) => request<CodexPendingRequest[]>(`/codex/chats/${encodeURIComponent(id)}/approvals`),
   answerCodexApproval: (id: string, requestId: string, decision: "accept" | "decline") => request<void>(`/codex/chats/${encodeURIComponent(id)}/approvals/${encodeURIComponent(requestId)}`, json("POST", { decision })),
   answerCodexQuestions: (id: string, requestId: string, answers: Record<string, { answers: string[] }>) => request<void>(`/codex/chats/${encodeURIComponent(id)}/approvals/${encodeURIComponent(requestId)}`, json("POST", { answers })),
@@ -185,7 +186,6 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   projectFiles: (projectId: string, path = "") => request<FileEntry[]>(`/projects/${projectId}/files?path=${encodeURIComponent(path)}`),
   readProjectFile: (projectId: string, path: string) => request<FileContent>(`/projects/${projectId}/file?path=${encodeURIComponent(path)}`),
   projectBranches: (projectId: string) => request<string[]>(`/projects/${projectId}/git/branches`),
-  createProjectTerminal: (projectId: string) => request<{ id: string }>(`/projects/${projectId}/terminals`, json("POST")),
   uploadTaskAttachment: (file: File) => {
     const form = new FormData();
     form.append("file", file);
@@ -223,7 +223,6 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   gitUnstage: (taskId: string, paths: string[]) => request<GitStatus>(`/tasks/${taskId}/git/unstage`, json("POST", { paths })),
   gitDiscard: (taskId: string, paths: string[]) => request<GitStatus>(`/tasks/${taskId}/git/discard`, json("POST", { paths })),
   gitCommit: (taskId: string, message: string) => request<{ commit: string }>(`/tasks/${taskId}/git/commit`, json("POST", { message })),
-  createTerminal: (taskId: string) => request<{ id: string }>(`/tasks/${taskId}/terminals`, json("POST")),
   };
 
   function webSocket(path: string) {

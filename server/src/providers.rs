@@ -8,6 +8,8 @@ pub(crate) struct ProviderManager {
     clients: Arc<Mutex<HashMap<String, CodexClient>>>,
     chat_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     account_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    #[cfg(test)]
+    test_program: Option<PathBuf>,
 }
 impl ProviderManager {
     pub fn new(home: PathBuf) -> Self {
@@ -16,6 +18,15 @@ impl ProviderManager {
             clients: Default::default(),
             chat_locks: Default::default(),
             account_locks: Default::default(),
+            #[cfg(test)]
+            test_program: None,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn test_with_program(home: PathBuf, program: PathBuf) -> Self {
+        Self {
+            test_program: Some(program),
+            ..Self::new(home)
         }
     }
     pub async fn chat_lock(&self, id: &str) -> Arc<Mutex<()>> {
@@ -36,6 +47,11 @@ impl ProviderManager {
     }
     pub async fn client(&self, db: &Database, id: &str) -> AppResult<CodexClient> {
         let account = document(db, "accounts", id).await?;
+        if account["providerId"] != "codex" {
+            return Err(AppError::BadRequest(
+                "This account is not a Codex provider".into(),
+            ));
+        }
         let home = account_home(self, &account)?;
         let mut clients = self.clients.lock().await;
         if let Some(client) = clients.get(id) {
@@ -43,6 +59,14 @@ impl ProviderManager {
         }
         tokio::fs::create_dir_all(&home).await?;
         private_directory(&home).await?;
+        #[cfg(test)]
+        let client = match &self.test_program {
+            Some(program) => {
+                CodexClient::test_process_with_home(program.clone(), Some(&home), false).await?
+            }
+            None => CodexClient::for_account(&home, false).await?,
+        };
+        #[cfg(not(test))]
         let client = CodexClient::for_account(&home, false).await?;
         clients.insert(id.into(), client.clone());
         Ok(client)
@@ -378,6 +402,15 @@ pub(crate) async fn limits(state: &AppState, id: &str) -> AppResult<Value> {
     Ok(json!({"rateLimits":result["rateLimits"],"raw":result}))
 }
 pub(crate) async fn client_for_thread(state: &AppState, id: &str) -> AppResult<CodexClient> {
+    match document(&state.db, "deleted-chats", id).await {
+        Ok(_) => {
+            return Err(AppError::NotFound(
+                "This Codex conversation was deleted".into(),
+            ));
+        }
+        Err(AppError::NotFound(_)) => {}
+        Err(error) => return Err(error),
+    }
     match document(&state.db, "provider-chats", id).await {
         Ok(chat) => match chat["accountId"].as_str() {
             Some(account_id) => state.providers.client(&state.db, account_id).await,

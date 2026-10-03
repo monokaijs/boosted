@@ -769,7 +769,7 @@ export function SettingsPage({ section, onSectionChange, onClose }: { section: S
     <p className="settings-sidebar-scope">{projectId ? "Workspace settings apply to the open repository." : "Open a workspace to configure repository settings."}</p>
   </>;
   return <section className="settings-page" aria-label="Settings">
-    <aside className="settings-sidebar">{navigation}</aside>
+    <aside className="settings-sidebar immersive-panel">{navigation}</aside>
     <div className="settings-main" ref={scrollRef}>
       <div className="settings-mobile-controls"><Button variant="ghost" size="sm" onClick={onClose}><ArrowLeft />Workspace</Button><Button variant="ghost" size="sm" aria-label="Browse settings sections" onClick={() => setNavigationOpen(true)}><Menu />Sections</Button></div>
       <div className="settings-page-heading"><h1 ref={headingRef} tabIndex={-1}>{selected.label === "General" ? "Workspace" : selected.label}</h1><p>{sectionDescriptions[section]}</p></div>
@@ -785,6 +785,6 @@ export function SettingsPage({ section, onSectionChange, onClose }: { section: S
         {section === "codex" && (projectId ? <CodexSettings /> : <div className="settings-content"><p className="settings-empty">Open a workspace to configure Codex instructions and MCP servers.</p></div>)}
       </div>
     </div>
-    <Dialog open={navigationOpen} onOpenChange={setNavigationOpen}><DialogContent className="settings-navigation-drawer"><DialogHeader className="sr-only"><DialogTitle>Settings sections</DialogTitle><DialogDescription>Choose a settings section.</DialogDescription></DialogHeader>{navigation}</DialogContent></Dialog>
+    <Dialog open={navigationOpen} onOpenChange={setNavigationOpen}><DialogContent className="settings-navigation-drawer immersive-panel"><DialogHeader className="sr-only"><DialogTitle>Settings sections</DialogTitle><DialogDescription>Choose a settings section.</DialogDescription></DialogHeader>{navigation}</DialogContent></Dialog>
   </section>;
 }

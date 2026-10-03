@@ -22,13 +22,13 @@ function TreeEntry({ source, entry, depth, onSelect, selected }: { source: FileS
   const [open, setOpen] = useState(false);
   if (entry.kind === "directory") return (
     <>
-      <button className="flex h-7 w-full items-center gap-1 truncate pr-2 text-left text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground" style={{ paddingLeft: 8 + depth * 14 }} onClick={() => setOpen(!open)}>
+      <button className="file-tree-entry flex h-7 w-full items-center gap-1 truncate pr-2 text-left text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground" style={{ paddingLeft: 8 + depth * 14 }} onClick={() => setOpen(!open)}>
         {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}{open ? <FolderOpen className="size-3.5" /> : <Folder className="size-3.5" />}<span className="truncate">{entry.name}</span>
       </button>
       {open && <Directory source={source} path={entry.path} depth={depth + 1} onSelect={onSelect} selected={selected} />}
     </>
   );
-  return <button className={cn("flex h-7 w-full items-center gap-1.5 truncate pr-2 text-left text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground", selected === entry.path && "bg-accent text-foreground")} style={{ paddingLeft: 24 + depth * 14 }} onClick={() => onSelect(entry.path)}><File className="size-3.5" /><span className="truncate">{entry.name}</span></button>;
+  return <button className={cn("file-tree-entry flex h-7 w-full items-center gap-1.5 truncate pr-2 text-left text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground", selected === entry.path && "bg-accent text-foreground")} style={{ paddingLeft: 24 + depth * 14 }} onClick={() => onSelect(entry.path)}><File className="size-3.5" /><span className="truncate">{entry.name}</span></button>;
 }
 
 export function FilesPanel() {

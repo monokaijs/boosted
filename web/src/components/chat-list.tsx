@@ -60,7 +60,7 @@ export function ChatList({ activeChatId, onNewChat, onOpenProject, onClose }: { 
     </button>;
   }
 
-  return <section className="chat-list" aria-label="Chats">
+  return <section className="chat-list immersive-panel" aria-label="Chats">
     <header className="chat-list-header"><button className="chat-list-row chat-new" aria-label="New chat" onClick={onNewChat}><MessageSquarePlus /><span>New chat</span><kbd>⌘ N</kbd></button><Button variant="ghost" size="icon-sm" aria-label="Search chats" aria-expanded={searchOpen} onClick={() => { if (searchOpen) setSearch(""); setSearchOpen(!searchOpen); }}><Search /></Button><Button variant="ghost" size="icon-sm" aria-label="Open project" onClick={onOpenProject}><FolderPlus /></Button><Button variant="ghost" size="icon-sm" className="chat-list-mobile-close" aria-label="Close chats" onClick={onClose}><X /></Button></header>
     {searchOpen && <label className="chat-search"><Search /><input autoFocus aria-label="Search chats" placeholder="Search chats" value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") { setSearch(""); setSearchOpen(false); } }} /><button aria-label="Close search" onClick={() => { setSearch(""); setSearchOpen(false); }}><X /></button></label>}
     <div className="chat-list-scroll">

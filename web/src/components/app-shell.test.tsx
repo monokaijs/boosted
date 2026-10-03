@@ -25,9 +25,7 @@ vi.mock("@/components/panels/codex-chat-panel", () => ({ CodexChatPanel: ({ thre
 vi.mock("@/components/panels/editor-panel", () => ({ EditorPanel: () => <p>Editor content</p> }));
 vi.mock("@/components/panels/files-panel", () => ({ FilesPanel: () => <p>Files content</p> }));
 vi.mock("@/components/panels/git-panel", () => ({ GitPanel: () => <p>Changes content</p> }));
-vi.mock("@/components/panels/plan-panel", () => ({ PlanPanel: () => <p>Plan content</p> }));
 vi.mock("@/components/panels/taskboard-panel", () => ({ TaskboardPanel: () => <h1>Task board content</h1> }));
-vi.mock("@/components/panels/terminal-panel", () => ({ TerminalPanel: () => <p>Terminal content</p> }));
 
 import { AppShell } from "./app-shell";
 
@@ -61,6 +59,29 @@ beforeEach(() => {
 });
 
 describe("page navigation and conversations", () => {
+  it("opens agents from the mobile bar, switches agents, and returns to the current chat", async () => {
+    localStorage.setItem("boosted.selected-agent.test-machine", "sage");
+    useAppStore.setState({ selectedCodexChatId: "old" });
+    renderShell();
+    await screen.findByRole("button", { name: "Expand Alpha" });
+    const mobile = within(screen.getByRole("navigation", { name: "Mobile navigation" }));
+    expect(mobile.getAllByRole("button")[0]).toHaveAccessibleName("Agents");
+    goTo("Settings");
+    fireEvent.click(mobile.getByRole("button", { name: "Agents" }));
+    expect(await screen.findByText("Agent conversation sage")).toBeInTheDocument();
+    expect(mobile.getByRole("button", { name: "Agents" })).toHaveAttribute("aria-current", "page");
+    expect(mobile.getByRole("button", { name: "Home" })).not.toHaveAttribute("aria-current");
+    expect(screen.getByRole("region", { name: "Agents page" })).toBeInTheDocument();
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Switch agent" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Pock" }));
+    expect(await screen.findByText("Agent conversation pock")).toBeInTheDocument();
+    expect(localStorage.getItem("boosted.selected-agent.test-machine")).toBe("pock");
+    fireEvent.click(mobile.getByRole("button", { name: "Home" }));
+    expect(await screen.findByText("Conversation old")).toBeInTheDocument();
+    expect(mobile.getByRole("button", { name: "Agents" })).not.toHaveAttribute("aria-current");
+    expect(mobile.getByRole("button", { name: "Home" })).toHaveAttribute("aria-current", "page");
+  });
+
   it("opens the chosen agent from another page and keeps the avatar selection in sync", async () => {
     renderShell();
     const agents = await screen.findByRole("navigation", { name: "Agents" });
@@ -165,17 +186,17 @@ describe("page navigation and conversations", () => {
     act(() => window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: "git" })));
     expect(screen.queryByText("Files content")).not.toBeInTheDocument();
     expect(screen.getByText("Changes content")).toBeInTheDocument();
-    act(() => window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: "terminal" })));
-    const terminal = await screen.findByText("Terminal content");
-    const terminalPage = terminal.closest(".tool-panel-slot") as HTMLElement;
-    expect(terminalPage).not.toHaveAttribute("hidden");
+    expect(within(panel).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Files", "Changes", "Close project tools"]);
+    for (const removed of ["plan", "terminal"]) {
+      act(() => window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: removed })));
+      act(() => window.dispatchEvent(new CustomEvent("boosted:toggle-panel", { detail: removed })));
+      expect(within(panel).getByText("Changes content")).toBeInTheDocument();
+    }
     fireEvent.click(within(panel).getByRole("button", { name: "Close project tools" }));
-    expect(panel).toHaveAttribute("hidden");
+    expect(screen.queryByRole("complementary", { name: "Project tools panel" })).not.toBeInTheDocument();
     expect(screen.getByText("Conversation old")).toBeInTheDocument();
-    act(() => window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: "terminal" })));
-    expect(panel).not.toHaveAttribute("hidden");
-    expect(screen.getByText("Terminal content")).toBe(terminal);
-    expect(screen.getByText("Conversation old")).toBeInTheDocument();
+    act(() => window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: "files" })));
+    expect(screen.getByText("Files content")).toBeInTheDocument();
     act(() => window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", { detail: { threadId: "old", split: true } })));
     await screen.findByText("Conversation old");
     act(() => window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", { detail: { threadId: "new", split: true } })));

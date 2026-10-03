@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Bot, ChevronDown, FolderOpen, LogOut, MessagesSquare, Ellipsis, Files, GitBranch, ListChecks, TerminalSquare, Plus, X } from "lucide-react";
+import { ArrowLeft, Bot, ChevronDown, FolderOpen, LogOut, MessagesSquare, Ellipsis, Files, GitBranch, Plus, X } from "lucide-react";
 import { openProvidersEvent } from "@/features/agents/agents-panel";
 import { AgentAvatar } from "@/features/agents/components/session/agent-avatar";
 import { apiClient } from "@/features/agents/lib/api-client";
@@ -15,7 +15,6 @@ import { ChatList } from "@/components/chat-list";
 import { ProjectsPage, ScheduledPage } from "@/components/app-pages";
 import { FilesPanel } from "@/components/panels/files-panel";
 import { GitPanel } from "@/components/panels/git-panel";
-import { PlanPanel } from "@/components/panels/plan-panel";
 import { NewChatPanel, TaskPanel } from "@/components/panels/chat-panel";
 import { TaskboardPanel } from "@/components/panels/taskboard-panel";
 import { EditorPanel } from "@/components/panels/editor-panel";
@@ -29,12 +28,9 @@ import { formatUpdateProgress, useAppUpdateState } from "@/lib/updater";
 
 const CodexChatPanel = lazy(() => import("@/components/panels/codex-chat-panel").then((module) => ({ default: module.CodexChatPanel })));
 const AgentsPanel = lazy(() => import("@/features/agents/agents-panel").then((module) => ({ default: module.AgentsPanel })));
-const TerminalPanel = lazy(() => import("@/components/panels/terminal-panel").then((module) => ({ default: module.TerminalPanel })));
 const tools = [
   { id: "files", label: "Files", icon: Files },
   { id: "git", label: "Changes", icon: GitBranch },
-  { id: "plan", label: "Plan", icon: ListChecks },
-  { id: "terminal", label: "Terminal", icon: TerminalSquare },
 ] as const;
 type ContentView = "chat" | "task" | "editor" | "agents";
 type ToolView = typeof tools[number]["id"];
@@ -50,7 +46,6 @@ export function AppShell() {
   const [view, setView] = useState<ContentView>("chat");
   const [toolView, setToolView] = useState<ToolView>();
   const [selectedAgentId, setSelectedAgentId] = useState(() => localStorage.getItem(`boosted.selected-agent.${profileId}`) ?? "pock");
-  const [terminalStarted, setTerminalStarted] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [newTaskDialogOpen, setNewTaskDialogOpen] = useState(false);
   const projectId = useAppStore((state) => state.selectedProjectId);
@@ -81,6 +76,7 @@ export function AppShell() {
   const openAgent = useCallback((id: string) => {
     selectAgent(id);
     setView("agents");
+    setToolView(undefined);
     goTo("home");
   }, [selectAgent, goTo]);
 
@@ -121,7 +117,7 @@ export function AppShell() {
   useEffect(() => {
     function showContent(id: string, toggle = false) {
       const tool = tools.find((entry) => entry.id === id);
-      if (tool) { setToolView((active) => toggle && active === tool.id ? undefined : tool.id); if (tool.id === "terminal") setTerminalStarted(true); goTo("home"); return; }
+      if (tool) { setToolView((active) => toggle && active === tool.id ? undefined : tool.id); goTo("home"); return; }
       if (id === "taskboard") { setView("chat"); goTo("tasks"); }
       else if (id === "task") { setView("task"); goTo("tasks"); }
       else if (id === "chat") newChat();
@@ -166,24 +162,30 @@ export function AppShell() {
   return <main className="app-frame" data-page={page} data-chats-open={mobileChatsOpen}>
     <header className="shell-titlebar"><img src="/favicon.svg" alt="" /><span>Boosted</span><span className="shell-titlebar-section">{current.label}</span>{appUpdate.phase === "downloading" && <span className="shell-update">Updating{formatUpdateProgress(appUpdate) !== undefined ? ` ${formatUpdateProgress(appUpdate)}%` : "…"}</span>}<div className="shell-machine"><MachineSwitcher onManage={() => goTo("settings")} /></div></header>
     <section className="content-surface" aria-label="Content">
-    <section className="main-surface" aria-label={`${current.label} page`}>
+    <section className="main-surface" aria-label={`${page === "home" && view === "agents" ? "Agents" : current.label} page`}>
       <header className="main-surface-header" hidden={page === "settings"}>
-        {page === "home" && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Project tools"><Ellipsis /></Button></DropdownMenuTrigger><DropdownMenuContent align="start"><DropdownMenuLabel>Project tools</DropdownMenuLabel>{tools.map(({ id, label, icon: Icon }) => <DropdownMenuItem key={id} onClick={() => { setToolView(id); if (id === "terminal") setTerminalStarted(true); }}><Icon />{label}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>}
-        <span className="main-page-label">{current.label}</span>
+        {page === "home" && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Project tools"><Ellipsis /></Button></DropdownMenuTrigger><DropdownMenuContent align="start"><DropdownMenuLabel>Project tools</DropdownMenuLabel>{tools.map(({ id, label, icon: Icon }) => <DropdownMenuItem key={id} onClick={() => { setToolView(id); }}><Icon />{label}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>}
+        {page === "home" && view === "agents" ? <DropdownMenu>
+          <DropdownMenuTrigger asChild><button className="agent-switcher" aria-label="Switch agent">
+            {selectedAgent ? <AgentAvatar name={selectedAgent.profile.name} avatar={selectedAgent.profile.avatar} className="size-6 text-[10px]" /> : <Bot />}
+            <span>{selectedAgent?.profile.name ?? "Agents"}</span><ChevronDown />
+          </button></DropdownMenuTrigger>
+          <DropdownMenuContent align="start"><DropdownMenuLabel>Agents</DropdownMenuLabel>{agents.data?.map((agent) => <DropdownMenuItem key={agent.id} onClick={() => openAgent(agent.id)}>
+            <AgentAvatar name={agent.profile.name} avatar={agent.profile.avatar} className="size-6 text-[10px]" /><span>{agent.profile.name}</span>
+          </DropdownMenuItem>)}</DropdownMenuContent>
+        </DropdownMenu> : <span className="main-page-label">{current.label}</span>}
         <div className="main-header-actions">
-          {project && <DropdownMenu><DropdownMenuTrigger asChild><button className="project-context"><FolderOpen /><span>{project.name}</span><ChevronDown /></button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Project</DropdownMenuLabel>{projects.data?.map((entry) => <DropdownMenuItem key={entry.id} onClick={() => { useAppStore.getState().selectProject(entry); setView("chat"); }}><FolderOpen />{entry.name}</DropdownMenuItem>)}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => setProjectDialogOpen(true)}><Plus />Open project</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
+          {project && !(page === "home" && view === "agents") && <DropdownMenu><DropdownMenuTrigger asChild><button className="project-context"><FolderOpen /><span>{project.name}</span><ChevronDown /></button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Project</DropdownMenuLabel>{projects.data?.map((entry) => <DropdownMenuItem key={entry.id} onClick={() => { useAppStore.getState().selectProject(entry); setView("chat"); }}><FolderOpen />{entry.name}</DropdownMenuItem>)}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => setProjectDialogOpen(true)}><Plus />Open project</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
           {page === "home" && <Button variant="ghost" size="icon-sm" aria-label="Agents" title="Agents" onClick={() => setView(view === "agents" ? "chat" : "agents")}><Bot /></Button>}
           <Button className="mobile-chats-toggle" variant="ghost" size="icon-sm" aria-label="Show chats" aria-expanded={mobileChatsOpen} onClick={() => setMobileChatsOpen(!mobileChatsOpen)}><MessagesSquare /></Button>
         </div>
       </header>
       <div className="workspace-body" data-tools-open={toolsOpen}>
-      {(toolView || terminalStarted) && <aside className="workspace-tools" aria-label="Project tools panel" hidden={!toolsOpen}>
-        <header className="workspace-tools-header"><nav aria-label="Project tool panels">{tools.map(({ id, label, icon: Icon }) => <Tooltip key={id}><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" aria-label={label} aria-pressed={toolView === id} onClick={() => { setToolView(id); if (id === "terminal") setTerminalStarted(true); }}><Icon /></Button></TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>)}</nav><Button variant="ghost" size="icon-sm" aria-label="Close project tools" onClick={() => setToolView(undefined)}><X /></Button></header>
+      {toolView && <aside className="workspace-tools immersive-panel" aria-label="Project tools panel" hidden={!toolsOpen}>
+        <header className="workspace-tools-header"><nav aria-label="Project tool panels">{tools.map(({ id, label, icon: Icon }) => <Tooltip key={id}><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" aria-label={label} aria-pressed={toolView === id} onClick={() => { setToolView(id); }}><Icon /></Button></TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>)}</nav><Button variant="ghost" size="icon-sm" aria-label="Close project tools" onClick={() => setToolView(undefined)}><X /></Button></header>
         <div className="workspace-tools-content"><Suspense fallback={<div className="empty-state">Loading…</div>}>
           {toolView === "files" && <FilesPanel key={projectId ?? "empty"} />}
           {toolView === "git" && <GitPanel key={taskId ?? "empty"} />}
-          {toolView === "plan" && <PlanPanel key={taskId ?? "empty"} />}
-          {terminalStarted && <div className="tool-panel-slot" hidden={toolView !== "terminal"}><TerminalPanel /></div>}
         </Suspense></div>
       </aside>}
       {toolsOpen && <button className="mobile-tools-scrim" aria-label="Dismiss project tools" onClick={() => setToolView(undefined)} />}
@@ -214,7 +216,10 @@ export function AppShell() {
       </>}
       <DropdownMenu><DropdownMenuTrigger asChild><button className="account-avatar" aria-label="Account menu">{user?.username.slice(0, 2).toUpperCase() ?? "B"}</button></DropdownMenuTrigger><DropdownMenuContent side="left" align="end"><DropdownMenuLabel>{user?.username ?? "Boosted"}</DropdownMenuLabel><DropdownMenuItem onClick={() => goTo("settings")}>Settings</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void logout()}><LogOut />Sign out</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
     </div>
-    <nav className="mobile-page-navigation" aria-label="Mobile navigation">{navigation}</nav>
+    <nav className="mobile-page-navigation" aria-label="Mobile navigation">
+      <button type="button" className="destination" aria-label="Agents" aria-current={page === "home" && view === "agents" ? "page" : undefined} onClick={() => { setView("agents"); setToolView(undefined); goTo("home"); }}><Bot /><span>Agents</span></button>
+      {navigation}
+    </nav>
     {mobileChatsOpen && <button className="mobile-chat-scrim" aria-label="Dismiss chats" onClick={() => setMobileChatsOpen(false)} />}
     <OpenProjectDialog open={projectDialogOpen} onOpenChange={setProjectDialogOpen} />
     <NewTaskDialog open={newTaskDialogOpen} onOpenChange={setNewTaskDialogOpen} />

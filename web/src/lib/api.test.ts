@@ -23,7 +23,7 @@ describe("Boosted API client", () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("https://boosted.example/api/v1/projects");
     expect((init?.headers as Headers).get("Authorization")).toBe("Bearer machine-token");
-    expect(api.webSocket("/terminals/terminal-a/ws")).toBe("wss://boosted.example/api/v1/terminals/terminal-a/ws");
+    expect(api.webSocket("/ws")).toBe("wss://boosted.example/api/v1/ws");
     expect(client().webSocket("/ws")).toBe("ws://machine.lan:4782/api/v1/ws");
   });
 

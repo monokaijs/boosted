@@ -4,6 +4,7 @@ import { Bot, Check, CheckCircle2, ChevronDown, ChevronRight, CircleStop, Downlo
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Badge } from "@/components/ui/badge";
+import { CodexModeSelect } from "@/components/assistant-ui/codex-mode-select";
 import { WorkspaceFileProvider, workspaceFileMarkdownComponents, workspaceMarkdownUrlTransform } from "@/components/assistant-ui/workspace-file-markdown";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -12,7 +13,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import { taskStatusMeta } from "@/lib/status";
-import type { CodexAccessOption, TaskEvent } from "@/lib/types";
+import type { CodexAccessOption, CodexCollaborationMode, TaskEvent } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 function textPayload(event: TaskEvent) {
@@ -84,6 +85,7 @@ export function NewChatPanel() {
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState(() => localStorage.getItem(machinePreferenceKey("boosted.codex.model")) ?? "");
   const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem(machinePreferenceKey("boosted.codex.effort")) ?? "");
+  const [collaborationMode, setCollaborationMode] = useState<CodexCollaborationMode>(() => localStorage.getItem(machinePreferenceKey("boosted.codex.mode")) === "plan" ? "plan" : "default");
   const [accessMode, setAccessMode] = useState<CodexAccessOption["id"]>(() => {
     const stored = localStorage.getItem(machinePreferenceKey("boosted.codex.access"));
     return stored === "workspaceWrite" || stored === "readOnly" ? stored : "fullAccess";
@@ -142,7 +144,7 @@ export function NewChatPanel() {
   const create = useMutation({
     mutationFn: async () => {
       const chat = await api.createCodexChat(project!.repoPath, model);
-      await api.sendCodexMessage(chat.id, prompt.trim(), crypto.randomUUID(), { model, reasoningEffort, accessMode });
+      await api.sendCodexMessage(chat.id, prompt.trim(), crypto.randomUUID(), { model, reasoningEffort, accessMode, collaborationMode });
       return chat;
     },
     onSuccess: (chat) => {
@@ -190,6 +192,7 @@ export function NewChatPanel() {
               />
               <div className="new-task-footer">
                 <span className="new-task-plus" aria-hidden="true"><Plus /></span>
+                <CodexModeSelect value={collaborationMode} onChange={(mode) => { setCollaborationMode(mode); localStorage.setItem(machinePreferenceKey("boosted.codex.mode"), mode); }} disabled={create.isPending} />
                 <span className="context-divider" />
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild><button type="button" className="new-task-option new-task-model-option"><Bot className="size-3.5" /><span className="max-w-40 truncate">{selectedModel?.displayName ?? (codexOptions.isLoading ? "Loading Codex…" : "Codex")}</span><ChevronDown /></button></DropdownMenuTrigger>
@@ -288,7 +291,20 @@ export function TaskPanel() {
         <div className="mx-auto max-w-3xl py-3">
           {task.data && <section className="mb-4 rounded-lg border border-border bg-background/25 p-4"><div className="aui-markdown text-xs"><ReactMarkdown components={workspaceFileMarkdownComponents} remarkPlugins={[remarkGfm]} urlTransform={workspaceMarkdownUrlTransform}>{task.data.description}</ReactMarkdown></div>{task.data.source && <a className="mt-3 inline-flex items-center gap-1.5 text-[11px] capitalize text-primary hover:underline" href={task.data.source.externalUrl} target="_blank" rel="noreferrer">Imported from {task.data.source.provider} · {task.data.source.externalId}<ExternalLink className="size-3" /></a>}{task.data.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{task.data.attachments.map((attachment) => <Button key={attachment.id} type="button" variant="secondary" size="sm" onClick={() => void api.downloadTaskAttachment(task.data!.id, attachment)}><Paperclip />{attachment.name}<Download /></Button>)}</div>}</section>}
           {task.data?.status === "queued" && <div className="mb-4 grid gap-2 rounded-lg border border-border bg-background/25 p-4"><div className="flex items-center gap-2 text-xs font-medium"><Sparkles className="size-4 text-primary" />Ready to plan</div><p className="text-xs leading-5 text-muted-foreground">Start planning to let Codex inspect the repository and turn this task into concrete steps. You can answer any follow-up questions here.</p></div>}
-          {task.data?.plan && <section className="mb-4 rounded-lg border border-border bg-background/25 p-3"><div className="mb-2 flex items-center gap-2"><ListChecks className="size-4 text-muted-foreground" /><h2 className="text-xs font-medium">Plan · revision {task.data.plan.revision}</h2>{task.data.status === "ready" && <Button className="ml-auto" size="sm" onClick={() => approve.mutate()} disabled={approve.isPending}>{approve.isPending ? <LoaderCircle className="animate-spin" /> : <Play />}Approve and run</Button>}</div>{task.data.plan.explanation && <p className="mb-2 text-xs leading-5 text-muted-foreground">{task.data.plan.explanation}</p>}<ol className="grid gap-1.5">{task.data.plan.steps.map((step, index) => <li key={`${step.step}-${index}`} className="flex gap-2 text-xs leading-5"><span className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border border-border text-[9px] text-muted-foreground">{step.status === "completed" ? <Check className="size-2.5 text-success" /> : index + 1}</span><span className={cn(step.status === "completed" && "text-muted-foreground line-through")}>{step.step}</span></li>)}</ol>{approve.error && <p className="mt-2 text-xs text-destructive">{approve.error.message}</p>}</section>}
+          {task.data?.plan && <section className="mb-4 rounded-lg border border-border bg-background/25 p-3" aria-label="Task plan">
+            <div className="mb-2 flex items-center gap-2">
+              <ListChecks className="size-4 text-muted-foreground" /><h2 className="text-xs font-medium">Plan · revision {task.data.plan.revision}</h2>
+              {task.data.status === "ready" && <Button className="ml-auto" size="sm" onClick={() => approve.mutate()} disabled={approve.isPending}>{approve.isPending ? <LoaderCircle className="animate-spin" /> : <Play />}Approve and run</Button>}
+            </div>
+            {task.data.plan.explanation && <p className="selectable-text mb-2 text-xs leading-5 text-muted-foreground">{task.data.plan.explanation}</p>}
+            {task.data.plan.markdown && <div className="aui-markdown selectable-text mb-3 text-xs"><ReactMarkdown components={workspaceFileMarkdownComponents} remarkPlugins={[remarkGfm]} urlTransform={workspaceMarkdownUrlTransform}>{task.data.plan.markdown}</ReactMarkdown></div>}
+            <ol className="grid gap-1.5">{task.data.plan.steps.map((step, index) => <li key={`${step.step}-${index}`} className="flex gap-2 text-xs leading-5" aria-current={step.status === "in_progress" ? "step" : undefined}>
+              <span className={cn("mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border text-[9px]", step.status === "completed" ? "border-success/30 bg-success/10 text-success" : step.status === "in_progress" ? "border-primary/40 bg-primary/10 text-primary" : "border-border text-muted-foreground")}>{step.status === "completed" ? <Check className="size-2.5" /> : index + 1}</span>
+              <span className={cn("selectable-text", step.status === "completed" && "text-muted-foreground line-through")}>{step.step}</span>
+            </li>)}</ol>
+            {task.data.plan.approvedAt && task.data.status !== "ready" && <p className="mt-3 flex items-center gap-1.5 text-[11px] text-success"><Check className="size-3" />Plan approved</p>}
+            {approve.error && <p className="mt-2 text-xs text-destructive">{approve.error.message}</p>}
+          </section>}
           <div className="mb-1 flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground"><span>Task chat</span><span className="h-px flex-1 bg-border" /></div>
           {ordered.length === 0 && events.isLoading && <div className="py-16 text-center text-xs text-muted-foreground">Loading conversation…</div>}
           {ordered.map((event) => <TimelineEvent key={event.id} event={event} />)}

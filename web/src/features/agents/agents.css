@@ -24,16 +24,11 @@
   max-height: calc(100dvh - 32px - var(--safe-area-inset-top, 0px) - var(--safe-area-inset-bottom, 0px));
 }
 
-.dark .assistant-profile-panel {
-  --popover: #2c2c2c;
-  --popover-foreground: #eeeeee;
-}
-
 .assistant-message-reply {
   background-color: var(--assistant-message-background, var(--card));
 }
 
-.dark .assistant-conversation { --assistant-message-background: #262626; }
+.dark .assistant-conversation { --assistant-message-background: var(--surface-raised); }
 
 .assistant-message-user,
 .assistant-message-send {

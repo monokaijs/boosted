@@ -2,7 +2,6 @@ import { lazy, StrictMode, Suspense, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LoaderCircle, RefreshCw, Server } from "lucide-react";
-import "@xterm/xterm/css/xterm.css";
 import "./index.css";
 import "./app-shell.css";
 import { TooltipProvider } from "@/components/ui/tooltip";

@@ -167,6 +167,7 @@ pub struct CodexMessageCreate {
     pub service_tier: Option<String>,
     pub approval_policy: Option<String>,
     pub access_mode: Option<String>,
+    pub collaboration_mode: Option<String>,
     #[serde(default)]
     pub attachment_ids: Vec<String>,
 }

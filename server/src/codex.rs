@@ -169,12 +169,21 @@ impl CodexClient {
 
     #[cfg(test)]
     pub(crate) async fn test_process(program: PathBuf, dynamic_tools: bool) -> AppResult<Self> {
+        Self::test_process_with_home(program, None, dynamic_tools).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_process_with_home(
+        program: PathBuf,
+        home: Option<&std::path::Path>,
+        dynamic_tools: bool,
+    ) -> AppResult<Self> {
         Self::spawn_with_home(
             &CodexCommand {
                 program,
                 path: None,
             },
-            None,
+            home,
             dynamic_tools,
         )
         .await

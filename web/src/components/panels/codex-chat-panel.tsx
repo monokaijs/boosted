@@ -15,6 +15,7 @@ import { ArrowDown, Bot, ChevronDown, ChevronRight, Image, LoaderCircle, Message
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { CodexMessageText } from "@/components/assistant-ui/codex-message-content";
 import { CodexQuestionForm } from "@/components/assistant-ui/codex-question-form";
+import { CodexModeSelect } from "@/components/assistant-ui/codex-mode-select";
 import { CodexAsyncQuestionProvider, CodexAsyncQuestions } from "@/components/assistant-ui/codex-async-questions";
 import { codexQuestionReply, parseCodexMessage } from "@/lib/codex-message-format";
 import { WorkspaceFileProvider } from "@/components/assistant-ui/workspace-file-markdown";
@@ -24,7 +25,7 @@ import { api } from "@/lib/api";
 import { appendCodexDelta, upsertCodexMessage } from "@/lib/codex-chat-state";
 import { chatActivity } from "@/lib/codex-chat-status";
 import { machinePreferenceKey, useAppStore } from "@/lib/store";
-import type { CodexAccessOption, CodexAttachment, CodexChatMessage, CodexChatThread, CodexLiveEvent } from "@/lib/types";
+import type { CodexAccessOption, CodexAttachment, CodexChatMessage, CodexChatThread, CodexCollaborationMode, CodexLiveEvent } from "@/lib/types";
 
 function UserMessage() {
   return (
@@ -112,6 +113,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
   const [error, setError] = useState<string>();
   const [model, setModel] = useState(() => thread.runtimeDefaults?.model ?? localStorage.getItem(machinePreferenceKey("boosted.codex.model")) ?? thread.chat.model ?? "");
   const [reasoningEffort, setReasoningEffort] = useState(() => thread.runtimeDefaults?.reasoningEffort ?? localStorage.getItem(machinePreferenceKey("boosted.codex.effort")) ?? "");
+  const [collaborationMode, setCollaborationMode] = useState<CodexCollaborationMode>(() => thread.runtimeDefaults?.collaborationMode === "plan" ? "plan" : "default");
   const [accessMode, setAccessMode] = useState<CodexAccessOption["id"]>(() => {
     const stored = thread.runtimeDefaults?.accessMode ?? localStorage.getItem(machinePreferenceKey("boosted.codex.access"));
     return stored === "workspaceWrite" || stored === "readOnly" ? stored : "fullAccess";
@@ -185,7 +187,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
     setIsRunning(true);
     setError(undefined);
     try {
-      const started = await api.sendCodexMessage(thread.chat.id, text, clientMessageId, { model, reasoningEffort, accessMode, approvalPolicy: accessMode === thread.runtimeDefaults?.accessMode ? thread.runtimeDefaults?.approvalPolicy : "never", attachmentIds: attachments.map((attachment) => attachment.id) });
+      const started = await api.sendCodexMessage(thread.chat.id, text, clientMessageId, { model, reasoningEffort, accessMode, collaborationMode, approvalPolicy: accessMode === thread.runtimeDefaults?.accessMode ? thread.runtimeDefaults?.approvalPolicy : "never", attachmentIds: attachments.map((attachment) => attachment.id) });
       setAttachments([]);
       if (started.threadId !== thread.chat.id) {
         selectCodexChat(started.threadId);
@@ -204,7 +206,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
       setError(cause instanceof Error ? cause.message : "Unable to send message.");
       throw cause;
     }
-  }, [accessMode, attachments, model, queryClient, reasoningEffort, selectCodexChat, thread.chat.id, thread.chat.title]);
+  }, [accessMode, attachments, collaborationMode, model, queryClient, reasoningEffort, selectCodexChat, thread.chat.id, thread.chat.title, thread.runtimeDefaults?.accessMode, thread.runtimeDefaults?.approvalPolicy]);
 
   const uploadFiles = useCallback(async (incoming: File[]) => {
     const availableSlots = Math.max(0, 4 - attachments.length);
@@ -296,7 +298,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
     parseCodexMessage(message.content).flatMap((part) => part.type === "question-reply" ? part.replies.flatMap((reply) => reply.questionItemId ? [reply.questionItemId] : []) : []),
   )), [messages]);
   const replyToQuestions = useCallback(async (messageId: string, questions: NonNullable<CodexChatMessage["questions"]>, answers: Record<string, { answers: string[] }>) => {
-    const started = await api.sendCodexMessage(thread.chat.id, codexQuestionReply(messageId, questions, answers), createClientMessageId(), { model, reasoningEffort, accessMode });
+    const started = await api.sendCodexMessage(thread.chat.id, codexQuestionReply(messageId, questions, answers), createClientMessageId(), { model, reasoningEffort, accessMode, collaborationMode, approvalPolicy: accessMode === thread.runtimeDefaults?.accessMode ? thread.runtimeDefaults?.approvalPolicy : "never" });
     setIsRunning(true);
     if (started.threadId !== thread.chat.id) {
       selectCodexChat(started.threadId);
@@ -304,7 +306,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
     }
     void queryClient.invalidateQueries({ queryKey: ["codex-chat", started.threadId] });
     void queryClient.invalidateQueries({ queryKey: ["codex-chats"] });
-  }, [accessMode, model, queryClient, reasoningEffort, selectCodexChat, thread.chat.id, thread.chat.title]);
+  }, [accessMode, collaborationMode, model, queryClient, reasoningEffort, selectCodexChat, thread.chat.id, thread.chat.title, thread.runtimeDefaults?.accessMode, thread.runtimeDefaults?.approvalPolicy]);
   const runtime = useExternalStoreRuntime({
     messages: assistantMessages,
     convertMessage: passthroughMessage,
@@ -338,6 +340,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
                 <div className="codex-composer-controls mt-1 flex h-7 items-center gap-1 text-[10px] text-muted-foreground">
                   <input ref={fileInputRef} className="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={uploadImages} />
                   <Button type="button" variant="ghost" size="icon-sm" className="size-6" title={supportsImages ? "Attach images" : "Selected model does not support images"} disabled={!supportsImages || attachments.length >= 4 || isRunning || isUploading} onClick={() => fileInputRef.current?.click()}>{isUploading ? <LoaderCircle className="animate-spin" /> : <Plus />}</Button>
+                  <CodexModeSelect value={collaborationMode} onChange={setCollaborationMode} disabled={isRunning} />
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild><button type="button" className="new-task-option codex-model-option" aria-label="Codex model and reasoning"><Bot className="size-3.5" /><span className="max-w-40 truncate">{selectedModel?.displayName ?? (codexOptions.isLoading ? "Loading Codex…" : "Codex")}</span>{reasoningEffort && <span className="codex-effort-label capitalize text-muted-foreground">· {reasoningEffort}</span>}<ChevronDown /></button></DropdownMenuTrigger>
                     <DropdownMenuContent align="start" side="top" className="w-80 max-w-[calc(100vw-1rem)]">

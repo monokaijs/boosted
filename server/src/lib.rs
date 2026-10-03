@@ -12,7 +12,6 @@ mod integrations;
 mod models;
 mod process;
 mod providers;
-mod terminal;
 pub mod updater;
 
 use axum::{
@@ -64,7 +63,6 @@ use crate::{
     db::Database,
     error::{AppError, AppResult},
     models::*,
-    terminal::TerminalManager,
 };
 
 #[derive(Clone, Debug)]
@@ -148,7 +146,6 @@ struct AppState {
     providers: providers::ProviderManager,
     agents: agents::AgentManager,
     codex: CodexManager,
-    terminals: TerminalManager,
     live: broadcast::Sender<LiveEvent>,
     sequence: Arc<AtomicU64>,
     pending_inputs: Arc<RwLock<HashMap<String, PendingInput>>>,
@@ -276,7 +273,6 @@ pub async fn run_with_updater(
         ),
         db,
         codex,
-        terminals: TerminalManager::default(),
         live,
         sequence: Arc::new(AtomicU64::new(1)),
         pending_inputs: Arc::new(RwLock::new(HashMap::new())),
@@ -337,8 +333,7 @@ fn router(
         .route("/setup", get(setup_state))
         .route("/setup/admin", post(create_admin))
         .route("/auth/login", post(login))
-        .route("/ws", get(live_ws))
-        .route("/terminals/{id}/ws", get(terminal_ws));
+        .route("/ws", get(live_ws));
     let protected = Router::new()
         .route("/providers", get(providers::list_providers))
         .route(
@@ -426,7 +421,6 @@ fn router(
         .route("/projects/{id}/files", get(list_project_files))
         .route("/projects/{id}/file", get(read_project_file))
         .route("/projects/{id}/git/branches", get(list_project_branches))
-        .route("/projects/{id}/terminals", post(create_project_terminal))
         .route(
             "/projects/{id}/integrations",
             get(list_integrations).post(create_integration),
@@ -472,7 +466,6 @@ fn router(
         .route("/tasks/{id}/git/unstage", post(git_unstage))
         .route("/tasks/{id}/git/discard", post(git_discard))
         .route("/tasks/{id}/git/commit", post(git_commit))
-        .route("/tasks/{id}/terminals", post(create_terminal))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -1329,8 +1322,18 @@ async fn list_codex_chats(
     .await?
     .into_iter()
     .collect::<HashSet<_>>();
-    chats.retain(|chat| !task_thread_ids.contains(&chat.id));
+    let deleted_thread_ids = providers::documents(&state.db, "deleted-chats")
+        .await?
+        .into_iter()
+        .filter_map(|entry| entry["id"].as_str().map(str::to_owned))
+        .collect::<HashSet<_>>();
+    chats.retain(|chat| {
+        !task_thread_ids.contains(&chat.id) && !deleted_thread_ids.contains(&chat.id)
+    });
     for metadata in providers::documents(&state.db, "provider-chats").await? {
+        if metadata["archived"] == true {
+            continue;
+        }
         if query.cwd.as_deref().is_some_and(|cwd| {
             !cwd.is_empty() && metadata["workingDirectory"].as_str() != Some(cwd)
         }) {
@@ -1501,6 +1504,15 @@ async fn send_codex_message(
 ) -> AppResult<(StatusCode, Json<CodexTurnStart>)> {
     let chat_lock = state.providers.chat_lock(&requested_thread_id).await;
     let _chat_guard = chat_lock.lock().await;
+    send_codex_message_locked(&state, requested_thread_id, input).await
+}
+
+// The caller holds ProviderManager::chat_lock for this thread.
+async fn send_codex_message_locked(
+    state: &AppState,
+    requested_thread_id: String,
+    input: CodexMessageCreate,
+) -> AppResult<(StatusCode, Json<CodexTurnStart>)> {
     let message = input.message.trim().to_string();
     if message.is_empty() && input.attachment_ids.is_empty() {
         return Err(AppError::BadRequest(
@@ -1511,6 +1523,20 @@ async fn send_codex_message(
         return Err(AppError::BadRequest(
             "a message can include at most 4 images".into(),
         ));
+    }
+    let runtime_defaults = providers::runtime_defaults(state, &requested_thread_id).await?;
+    let collaboration_mode = input
+        .collaboration_mode
+        .as_deref()
+        .or_else(|| {
+            runtime_defaults
+                .as_ref()?
+                .get("collaborationMode")?
+                .as_str()
+        })
+        .unwrap_or("default");
+    if !matches!(collaboration_mode, "default" | "plan") {
+        return Err(AppError::BadRequest("Invalid collaboration mode".into()));
     }
     let active_turn_id = state
         .active_codex_turns
@@ -1582,6 +1608,7 @@ async fn send_codex_message(
     let requested_model = input
         .model
         .as_deref()
+        .or_else(|| resumed.get("model").and_then(Value::as_str))
         .or_else(|| resumed.pointer("/thread/model").and_then(Value::as_str))
         .unwrap_or(&codex_options.default_model);
     let selected_model = codex_options
@@ -1678,7 +1705,15 @@ async fn send_codex_message(
                 "sandboxPolicy": sandbox_policy,
                 "model": selected_model.model,
                 "effort": reasoning_effort,
-                "serviceTier": service_tier
+                "serviceTier": service_tier,
+                "collaborationMode": {
+                    "mode": collaboration_mode,
+                    "settings": {
+                        "model": selected_model.model,
+                        "reasoning_effort": reasoning_effort,
+                        "developer_instructions": null
+                    }
+                }
             }),
         )
         .await?;
@@ -1693,7 +1728,8 @@ async fn send_codex_message(
         "chat-runtime",
         &json!({
             "id": thread_id, "model": selected_model.model, "reasoningEffort": reasoning_effort,
-            "accessMode": access_mode, "serviceTier": service_tier, "approvalPolicy": approval_policy
+            "accessMode": access_mode, "serviceTier": service_tier, "approvalPolicy": approval_policy,
+            "collaborationMode": collaboration_mode
         }),
     )
     .await?;
@@ -1713,6 +1749,10 @@ async fn send_codex_message(
         .write()
         .await
         .remove(&requested_thread_id);
+    if let Ok(mut metadata) = providers::document(&state.db, "provider-chats", &thread_id).await {
+        metadata["dispatchPaused"] = json!(false);
+        providers::save_document(&state.db, "provider-chats", &metadata).await?;
+    }
     state.emit(
         "codex.event",
         json!({ "threadId": thread_id, "turnId": turn_id, "method": "turn/started" }),
@@ -1904,6 +1944,8 @@ async fn stop_codex_turn(
     State(state): State<AppState>,
     AxumPath(thread_id): AxumPath<String>,
 ) -> AppResult<StatusCode> {
+    let chat_lock = state.providers.chat_lock(&thread_id).await;
+    let _chat_guard = chat_lock.lock().await;
     let turn_id = state
         .active_codex_turns
         .read()
@@ -2012,18 +2054,6 @@ async fn list_project_branches(
 ) -> AppResult<Json<Vec<String>>> {
     let project = state.db.project(&id).await?;
     Ok(Json(git::branches(Path::new(&project.repo_path)).await?))
-}
-
-async fn create_project_terminal(
-    State(state): State<AppState>,
-    AxumPath(id): AxumPath<String>,
-) -> AppResult<(StatusCode, Json<Value>)> {
-    let project = state.db.project(&id).await?;
-    let session = state
-        .terminals
-        .create(Path::new(&project.repo_path))
-        .await?;
-    Ok((StatusCode::CREATED, Json(json!({"id":session.id}))))
 }
 
 async fn create_project(
@@ -2900,18 +2930,6 @@ async fn git_commit(
     refresh_diff_stats(&state, &id).await?;
     Ok(Json(json!({"commit":commit})))
 }
-async fn create_terminal(
-    State(state): State<AppState>,
-    AxumPath(id): AxumPath<String>,
-) -> AppResult<(StatusCode, Json<Value>)> {
-    let task = state.db.task(&id).await?;
-    let session = state
-        .terminals
-        .create(Path::new(&task.worktree_path))
-        .await?;
-    Ok((StatusCode::CREATED, Json(json!({"id":session.id}))))
-}
-
 async fn live_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_live_ws(socket, state))
 }
@@ -2933,48 +2951,6 @@ async fn handle_live_ws(mut socket: WebSocket, state: AppState) {
     let mut events = state.live.subscribe();
     loop {
         tokio::select! { event=events.recv()=>match event {Ok(event)=>{if sender.send(WsMessage::Text(serde_json::to_string(&event).unwrap_or_default().into())).await.is_err(){break}},Err(broadcast::error::RecvError::Lagged(_))=>continue,Err(_)=>break}, incoming=receiver.next()=>if incoming.is_none(){break} }
-    }
-}
-
-async fn terminal_ws(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-    AxumPath(id): AxumPath<String>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_terminal_ws(socket, state, id))
-}
-
-async fn handle_terminal_ws(mut socket: WebSocket, state: AppState, id: String) {
-    let Some(Ok(WsMessage::Text(auth_message))) = socket.recv().await else {
-        return;
-    };
-    let Ok(value) = serde_json::from_str::<Value>(&auth_message) else {
-        return;
-    };
-    let Some(token) = value.get("token").and_then(Value::as_str) else {
-        return;
-    };
-    if authenticate(&state.db, token).await.is_err() {
-        let _ = socket.send(WsMessage::Close(None)).await;
-        return;
-    }
-    let Ok(session) = state.terminals.get(&id).await else {
-        return;
-    };
-    if let (Some(cols), Some(rows)) = (
-        value.get("cols").and_then(Value::as_u64),
-        value.get("rows").and_then(Value::as_u64),
-    ) {
-        let _ = session.resize(cols as u16, rows as u16);
-    }
-    let snapshot = session.snapshot();
-    if !snapshot.is_empty() {
-        let _ = socket.send(WsMessage::Binary(snapshot.into())).await;
-    }
-    let (mut sender, mut receiver) = socket.split();
-    let mut output = session.subscribe();
-    loop {
-        tokio::select! {chunk=output.recv()=>match chunk{Ok(chunk)=>if sender.send(WsMessage::Binary(chunk.into())).await.is_err(){break},Err(broadcast::error::RecvError::Lagged(_))=>continue,Err(_)=>break},incoming=receiver.next()=>match incoming{Some(Ok(WsMessage::Text(text)))=>if let Ok(message)=serde_json::from_str::<Value>(&text){match message.get("type").and_then(Value::as_str){Some("input")=>if let Some(data)=message.get("data").and_then(Value::as_str){let _=session.write(data.as_bytes());},Some("resize")=>{let cols=message.get("cols").and_then(Value::as_u64).unwrap_or(120)as u16;let rows=message.get("rows").and_then(Value::as_u64).unwrap_or(30)as u16;let _=session.resize(cols,rows);},_=>{}}},Some(Ok(_))=>{},_=>break}}
     }
 }
 

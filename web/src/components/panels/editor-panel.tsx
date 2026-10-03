@@ -89,7 +89,7 @@ export function EditorPanel() {
                 value={content}
                 onChange={(value) => { if (editable) { setContent(value ?? ""); setDirty(true); } }}
                 onMount={(editor, monaco) => editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current())}
-                theme="vs-dark"
+                theme="boosted-dark"
                 options={{
                   readOnly: !editable,
                   minimap: { enabled: false },

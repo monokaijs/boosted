@@ -2,6 +2,8 @@
 
 Boosted is a local-first, multi-user coding workspace with a task board, task-specific Codex planning conversations, and separate general Codex chats. It ships one Vite + React frontend as an installable Progressive Web App (PWA) and a Tauri desktop shell.
 
+Planning happens in chats. Choose **Plan** in a chat's composer to explore the repository, answer questions, and refine a plan, then switch to **Chat** to implement it. Task chats also show plan revisions, progress, and approval controls. Project tools contain Files and Changes.
+
 ## Development
 
 Prerequisites: Node 22+, pnpm 10+, Rust 1.85+, Git, and the Codex CLI.
@@ -16,7 +18,7 @@ The browser client uses its current origin; during Vite development, `/api` and 
 
 Desktop development automatically serves the live Vite frontend through port 4782, including hot reload, so remote browsers receive the same UI as the desktop. The headless development command above enables the same behavior (`BOOSTED_WEB_DEV_URL` is the environment equivalent). Vite stays on loopback port 5173; remote browsers only need the backend port. Release desktop and backend builds use the same bundled `web/dist` assets.
 
-The first browser visit creates the administrator. The admin then creates member accounts. All authenticated users share projects, tasks, terminals, and host-level execution access; only the first user can manage accounts and the shared Codex connection.
+The first browser visit creates the administrator. The admin then creates member accounts. All authenticated users share projects, tasks, chats, and host-level execution access; only the first user can manage accounts and the shared Codex connection.
 
 > Boosted currently starts Codex with full host access, matching the selected product policy. Only expose the server to trusted users, and put remote access behind your own authenticated TLS proxy or tunnel.
 
@@ -71,7 +73,7 @@ pnpm build
 pnpm preview
 ```
 
-The PWA precaches the application shell and prompts before activating a newly downloaded version, so an open workspace is never silently replaced. The shell can launch without a network connection, but project data, authentication, terminals, and Codex features still require access to a running Boosted server and are deliberately not cached.
+The PWA precaches the application shell and prompts before activating a newly downloaded version, so an open workspace is never silently replaced. The shell can launch without a network connection, but project data, authentication, and Codex features still require access to a running Boosted server and are deliberately not cached.
 
 System notifications can be enabled under **Settings → Notifications**. Preferences are stored separately for each saved Boosted machine and browser. Users can choose background-only or always-on delivery and independently configure task, Codex chat, and integration sync events. Notification clicks focus Boosted and open the related task or Codex chat when available. Because notifications are driven by the authenticated live connection, the PWA must still be open or running in the background; a fully closed browser does not receive push notifications.
 
