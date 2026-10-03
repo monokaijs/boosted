@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   updateState: { phase: "idle", supported: true, currentVersion: "0.4.0", downloadedBytes: 0, supportReason: undefined as string | undefined },
   checkAndInstallAppUpdate: vi.fn(),
   refreshAppUpdateAvailability: vi.fn(),
+  refreshWebApp: vi.fn(),
+  isTauriRuntime: vi.fn(),
   integrations: vi.fn(),
   discoverIntegrationTargets: vi.fn(),
   createIntegration: vi.fn(),
@@ -16,6 +18,8 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/api", () => ({ api: mocks }));
+vi.mock("@/lib/web-update", () => ({ refreshWebApp: mocks.refreshWebApp }));
+vi.mock("@/lib/runtime", () => ({ isTauriRuntime: mocks.isTauriRuntime }));
 vi.mock("@/lib/updater", () => ({
   useAppUpdateState: () => mocks.updateState,
   formatUpdateProgress: () => undefined,
@@ -206,6 +210,8 @@ describe("application updates", () => {
     mocks.updateState.phase = "idle";
     mocks.updateState.supported = true;
     mocks.updateState.supportReason = undefined;
+    mocks.refreshWebApp.mockReset().mockResolvedValue(undefined);
+    mocks.isTauriRuntime.mockReturnValue(false);
   });
 
   it("uses one action for the app, backend, and web UI", () => {
@@ -231,6 +237,7 @@ describe("application updates", () => {
     render(<ApplicationSettings />);
     expect(screen.getByRole("button", { name: "Updating…" })).toBeDisabled();
     expect(screen.getByRole("status")).toHaveTextContent("Restarting Boosted…");
+    expect(screen.getByRole("button", { name: "Force update UI" })).toBeDisabled();
   });
 
   it("explains manual installations and disables their update action", () => {
@@ -240,5 +247,48 @@ describe("application updates", () => {
     render(<ApplicationSettings />);
     expect(screen.getByText("Development build")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Update Boosted" })).toBeDisabled();
+  });
+
+  it("lets members refresh the PWA UI even when server updates are unsupported", async () => {
+    mocks.appState.user.role = "member";
+    mocks.updateState.phase = "unsupported";
+    mocks.updateState.supported = false;
+    render(<ApplicationSettings />);
+    fireEvent.click(screen.getByRole("button", { name: "Force update UI" }));
+    await waitFor(() => expect(mocks.refreshWebApp).toHaveBeenCalledOnce());
+    expect(mocks.refreshWebApp).toHaveBeenCalledWith();
+    expect(mocks.checkAndInstallAppUpdate).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Force update UI" })).toBeEnabled());
+  });
+
+  it("prevents duplicate UI refreshes and server updates while refreshing", async () => {
+    let finish!: () => void;
+    mocks.refreshWebApp.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    render(<ApplicationSettings />);
+    fireEvent.click(screen.getByRole("button", { name: "Force update UI" }));
+    const button = screen.getByRole("button", { name: "Refreshing UI…" });
+    expect(button).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Update Boosted" })).toBeDisabled();
+    fireEvent.click(button);
+    expect(mocks.refreshWebApp).toHaveBeenCalledOnce();
+    finish();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Force update UI" })).toBeEnabled());
+  });
+
+  it("shows UI update failures and lets the user retry", async () => {
+    mocks.refreshWebApp.mockRejectedValueOnce(new Error("The web app update did not finish. Try again."));
+    render(<ApplicationSettings />);
+    fireEvent.click(screen.getByRole("button", { name: "Force update UI" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("The web app update did not finish. Try again.");
+    fireEvent.click(screen.getByRole("button", { name: "Force update UI" }));
+    await waitFor(() => expect(mocks.refreshWebApp).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Force update UI" })).toBeEnabled());
+  });
+
+  it("does not offer a PWA refresh in the desktop shell", () => {
+    mocks.isTauriRuntime.mockReturnValue(true);
+    render(<ApplicationSettings />);
+    expect(screen.queryByRole("button", { name: "Force update UI" })).not.toBeInTheDocument();
   });
 });

@@ -1,9 +1,9 @@
 //! Persistent PockCode agents using native, isolated Codex app-server sessions.
 use super::*;
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use providers::{document, documents, save_document, text};
 use std::time::Duration;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{watch, Mutex};
 
 const DEFAULT_PERSONALITY: &str =
     "Friendly, clear, and concise. Be practical about coding work and explain blockers directly.";
@@ -12,13 +12,16 @@ pub(crate) struct AgentManager {
     states: Arc<Mutex<HashMap<String, Value>>>,
     workers: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     computer: computer::ComputerControl,
+    prefer_direct: Arc<Mutex<HashSet<String>>>,
 }
 impl AgentManager {
     pub async fn load(db: &Database) -> AppResult<Self> {
         let manager = Self::default();
         for mut agent in documents(db, "agents").await? {
             agent["status"] = json!("idle");
-            agent["typing"] = json!(false);
+            agent["activeGroupId"] = Value::Null;
+            agent["activity"] = Value::Null;
+            agent.as_object_mut().unwrap().remove("typing");
             if let Some(messages) = agent["messages"].as_array_mut() {
                 for message in messages {
                     if message["delivery"] == "processing" {
@@ -55,6 +58,36 @@ impl AgentManager {
         }
         Ok(manager)
     }
+    pub(crate) async fn reserve_group(
+        &self,
+        id: &str,
+    ) -> AppResult<Option<(watch::Sender<bool>, watch::Receiver<bool>)>> {
+        let agent = self.get(id).await?;
+        let direct_pending = agent["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["delivery"] == "queued")
+            || agent["followUps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["status"] == "ready");
+        if direct_pending && self.prefer_direct.lock().await.contains(id) {
+            return Ok(None);
+        }
+        let mut workers = self.workers.lock().await;
+        if workers.contains_key(id) {
+            return Ok(None);
+        }
+        let (sender, receiver) = watch::channel(false);
+        workers.insert(id.into(), sender.clone());
+        Ok(Some((sender, receiver)))
+    }
+    pub(crate) async fn release_group(&self, id: &str) {
+        self.workers.lock().await.remove(id);
+        self.prefer_direct.lock().await.insert(id.into());
+    }
     pub async fn uses_account(&self, id: &str) -> bool {
         self.states
             .lock()
@@ -62,7 +95,7 @@ impl AgentManager {
             .values()
             .any(|a| a["status"] == "running" && a["accountId"] == id)
     }
-    async fn get(&self, id: &str) -> AppResult<Value> {
+    pub(crate) async fn get(&self, id: &str) -> AppResult<Value> {
         self.states
             .lock()
             .await
@@ -73,7 +106,7 @@ impl AgentManager {
 }
 fn new_agent(id: String, name: String, personality: String) -> Value {
     let now = Utc::now().to_rfc3339();
-    json!({"id":id,"createdAt":now,"updatedAt":now,"profile":{"name":name,"personality":personality},"messages":[],"followUps":[],"status":"idle","typing":false,"accountId":null,"error":null})
+    json!({"id":id,"createdAt":now,"updatedAt":now,"profile":{"name":name,"personality":personality},"messages":[],"followUps":[],"status":"idle","activity":null,"accountId":null,"error":null})
 }
 async fn change<F>(state: &AppState, id: &str, update: F) -> AppResult<Value>
 where
@@ -98,6 +131,41 @@ where
     *current = next.clone();
     state.emit("assistant.updated", next.clone());
     Ok(next)
+}
+fn activity_after_actions(agent: &Value) -> Value {
+    let working = agent["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["actions"].as_array())
+        .flatten()
+        .any(|action| action["status"] == "running");
+    json!(if working { "working" } else { "thinking" })
+}
+async fn set_activity(state: &AppState, id: &str, activity: Option<&str>) -> AppResult<()> {
+    if let Some(context) = groups::context() {
+        return groups::activity(state, &context, activity).await;
+    }
+    let states = state.agents.states.lock().await;
+    let agent = states
+        .get(id)
+        .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
+    let next = if activity == Some("thinking") {
+        activity_after_actions(agent)
+    } else {
+        json!(activity)
+    };
+    // Reasoning/text deltas can be frequent; publish only activity transitions.
+    if agent["activity"] == next {
+        return Ok(());
+    }
+    drop(states);
+    change(state, id, |agent| {
+        agent["activity"] = next;
+        Ok(())
+    })
+    .await?;
+    Ok(())
 }
 pub(crate) async fn list_agents(State(state): State<AppState>) -> Json<Vec<Value>> {
     let mut agents:Vec<_> = state.agents.states.lock().await.values().map(|a| json!({"id":a["id"],"profile":a["profile"],"status":a["status"],"accountId":a["accountId"],"createdAt":a["createdAt"],"updatedAt":a["updatedAt"]})).collect();
@@ -176,8 +244,10 @@ pub(crate) async fn stop_agent(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> AppResult<Json<Value>> {
-    if let Some(sender) = state.agents.workers.lock().await.get(&id) {
-        let _ = sender.send(true);
+    if !groups::agent_active(&state, &id).await {
+        if let Some(sender) = state.agents.workers.lock().await.get(&id) {
+            let _ = sender.send(true);
+        }
     }
     Ok(Json(
         change(&state, &id, |agent| {
@@ -186,7 +256,7 @@ pub(crate) async fn stop_agent(
                     message["delivery"] = json!("cancelled");
                 }
             }
-            agent["typing"] = json!(false);
+            agent["activity"] = Value::Null;
             Ok(())
         })
         .await?,
@@ -253,7 +323,7 @@ fn validate_image(value: &str) -> AppResult<Vec<u8>> {
     }
     Ok(bytes)
 }
-fn validate_attachments(value: Option<&Value>) -> AppResult<()> {
+pub(crate) fn validate_attachments(value: Option<&Value>) -> AppResult<()> {
     let Some(value) = value else { return Ok(()) };
     let attachments = value
         .as_array()
@@ -321,8 +391,10 @@ async fn start_worker(state: AppState, id: String) -> AppResult<()> {
     }
     let (sender, receiver) = watch::channel(false);
     workers.insert(id.clone(), sender);
+    state.agents.prefer_direct.lock().await.remove(&id);
     change(&state, &id, |a| {
         a["status"] = json!("running");
+        a["activity"] = json!("thinking");
         a["error"] = Value::Null;
         Ok(())
     })
@@ -332,7 +404,7 @@ async fn start_worker(state: AppState, id: String) -> AppResult<()> {
         let result = run_queue(&state, &id, receiver).await;
         let _ = change(&state, &id, |a| {
             a["status"] = json!("idle");
-            a["typing"] = json!(false);
+            a["activity"] = Value::Null;
             if let Err(error) = &result {
                 a["error"] = json!(error.to_string());
                 for message in a["messages"].as_array_mut().unwrap() {
@@ -370,6 +442,19 @@ async fn run_queue(state: &AppState, id: &str, mut cancel: watch::Receiver<bool>
                 if f["status"] == "ready" {
                     f["status"] = json!("processing");
                 }
+            }
+            if a["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["delivery"] == "processing")
+                || a["followUps"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|followup| followup["status"] == "processing")
+            {
+                a["activity"] = json!("thinking");
             }
             Ok(())
         })
@@ -426,7 +511,7 @@ async fn run_queue(state: &AppState, id: &str, mut cancel: watch::Receiver<bool>
                     account_id = next;
                     change(state, id, |a| {
                         a["accountId"] = json!(account_id);
-                        a["typing"] = json!(false);
+                        a["activity"] = json!("thinking");
                         Ok(())
                     })
                     .await?;
@@ -451,9 +536,9 @@ async fn run_queue(state: &AppState, id: &str, mut cancel: watch::Receiver<bool>
                         followup["lastDeliveredAt"] = json!(Utc::now().to_rfc3339());
                         if let Some(minutes) = followup["intervalMinutes"].as_i64() {
                             followup["status"] = json!("waiting");
-                            followup["dueAt"] = json!(
-                                (Utc::now() + chrono::Duration::minutes(minutes)).to_rfc3339()
-                            );
+                            followup["dueAt"] = json!((Utc::now()
+                                + chrono::Duration::minutes(minutes))
+                            .to_rfc3339());
                         } else {
                             followup["status"] = json!("completed");
                         }
@@ -467,9 +552,12 @@ async fn run_queue(state: &AppState, id: &str, mut cancel: watch::Receiver<bool>
         })
         .await?;
         result?;
+        if groups::pending(state, id).await? {
+            return Ok(());
+        }
     }
 }
-async fn choose_account(
+pub(crate) async fn choose_account(
     state: &AppState,
     requested: Option<&str>,
     excluded: &HashSet<String>,
@@ -524,7 +612,7 @@ fn remaining_capacity(limits: &Value) -> f64 {
         .reduce(f64::min)
         .unwrap_or(0.0)
 }
-async fn run_turn(
+pub(crate) async fn run_turn(
     state: &AppState,
     id: &str,
     snapshot: &Value,
@@ -535,7 +623,7 @@ async fn run_turn(
 ) -> AppResult<()> {
     let account = document(&state.db, "accounts", account_id).await?;
     let home = providers::account_home(&state.providers, &account)?;
-    let client = CodexClient::for_account(&home, true).await?;
+    let client = state.providers.agent_client(&home).await?;
     let result =
         run_turn_with_client(state, id, snapshot, current, background, &client, cancel).await;
     client.shutdown().await;
@@ -554,20 +642,56 @@ async fn run_turn_with_client(
     if *cancel.borrow() {
         return Err(AppError::Conflict("Agent stopped".into()));
     }
+    set_activity(state, id, Some("thinking")).await?;
     let mut notifications = client.subscribe();
-    let tools: Value = serde_json::from_str(include_str!("agent-tools.json"))?;
-    let cwd = state
+    let mut tools: Value = serde_json::from_str(include_str!("agent-tools.json"))?;
+    let group_context = groups::context();
+    if let Some(context) = &group_context {
+        tools = groups::tools(tools, &context.purpose);
+    }
+    let mut cwd = state
         .providers
         .home
         .parent()
         .unwrap_or(&state.providers.home)
         .join("assistant-runtime")
         .join(id);
+    if group_context.is_some() {
+        if let Some(directory) = snapshot["groupContext"]["assignment"]["workingDirectory"]
+            .as_str()
+            .or(snapshot["groupContext"]["group"]["workingDirectory"].as_str())
+        {
+            cwd = PathBuf::from(directory);
+        }
+    }
     tokio::fs::create_dir_all(&cwd).await?;
+    let coordination = group_context
+        .as_ref()
+        .is_some_and(|c| c.purpose == "message");
+    let group_instructions = if group_context.is_some() {
+        include_str!("group-instructions.txt")
+    } else {
+        ""
+    };
+    let access = if coordination {
+        "read-only"
+    } else {
+        "danger-full-access"
+    };
+    let sandbox_policy = if coordination {
+        json!({"type":"readOnly","networkAccess":true})
+    } else {
+        json!({"type":"dangerFullAccess"})
+    };
+    let reply_instructions = if group_context.is_some() {
+        "Send public group replies through send_group_message. To ask a peer for a response, use request_group_peers once with the actual message and exact recipient IDs; it both posts the message and wakes the peers. Its content is visible to everyone, not a private instruction."
+    } else {
+        "Send user-facing replies through send_agent_message."
+    };
     let thread = client.request("thread/start", json!({
-        "cwd":cwd, "ephemeral":true, "approvalPolicy":"never", "sandbox":"danger-full-access",
-        "baseInstructions":include_str!("agent-instructions.txt"),
-        "developerInstructions":format!("Use Boosted application tools and native Codex tools to carry out the user's requested work on this server. Shell, filesystem, network, web search, configured MCP tools and host desktop tools are available. Resolve project paths before working in a repository. Send user-facing replies through send_agent_message.\n\n{}", include_str!("../skills/computer-control/SKILL.md")),
+        "cwd":cwd, "ephemeral":true, "approvalPolicy":"never", "sandbox":access,
+        "baseInstructions":format!("{}\n\n{}", include_str!("agent-instructions.txt"), group_instructions),
+        "developerInstructions":format!("Use Boosted application tools and native Codex tools to carry out the user's requested work on this server. Shell, filesystem, network, web search, configured MCP tools and host desktop tools are available. Resolve project paths before working in a repository. {reply_instructions}\n\n{}", include_str!("../skills/computer-control/SKILL.md")),
         "dynamicTools":tools,
         "config":{"features.shell_tool":true,"features.multi_agent":false,"web_search":"live"}
     })).await?;
@@ -593,16 +717,14 @@ async fn run_turn_with_client(
         .rev()
         .map(|mut message| {
             if let Some(content) = message["content"].as_str() {
-                message["content"] = json!(
-                    content
-                        .chars()
-                        .rev()
-                        .take(8000)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect::<String>()
-                );
+                message["content"] = json!(content
+                    .chars()
+                    .rev()
+                    .take(8000)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<String>());
             }
             if let Some(attachments) = message["attachments"].as_array_mut() {
                 for attachment in attachments {
@@ -663,10 +785,17 @@ async fn run_turn_with_client(
         "savedProfile":model_profile,"currentTime":Utc::now().to_rfc3339(),
         "userTimeZone":snapshot["timeZone"].as_str().unwrap_or("UTC"),
         "conversationHistory":history,"currentUserMessages":current.iter()
+            .filter(|message| group_context.is_none() || message["senderType"] == "user")
             .map(|message|json!({"id":message["id"],"content":message["content"]})).collect::<Vec<_>>(),
+        "currentGroupMessages":current.iter()
+            .filter(|message| group_context.is_some() && message["senderType"].is_string())
+            .map(|message|json!({"id":message["id"],"content":message["content"],
+                "senderType":message["senderType"],"senderId":message["senderId"],
+                "senderName":message["senderName"],"recipientIds":message["recipientIds"],
+                "kind":message["kind"]})).collect::<Vec<_>>(),
         "originalUserMessages":original_messages,"backgroundEvents":background,
         "availableImages":available_images,"attachmentContext":attachment_context,
-        "workingDirectory":cwd,
+        "workingDirectory":cwd,"groupContext":snapshot["groupContext"],
         "recoveryInstructions":"Inspect saved successful actions and already sent replies. Never repeat them after a retry or server restart."
     });
     let mut input = vec![json!({"type":"text","text":prompt.to_string()})];
@@ -675,7 +804,7 @@ async fn run_turn_with_client(
         .request(
             "turn/start",
             json!({"threadId":thread_id,"input":input,
-        "approvalPolicy":"never","sandboxPolicy":{"type":"dangerFullAccess"}}),
+        "approvalPolicy":"never","sandboxPolicy":sandbox_policy}),
         )
         .await?;
     let turn_id = turn.pointer("/turn/id").and_then(Value::as_str);
@@ -717,16 +846,41 @@ async fn run_turn_with_client(
                 }
             }
             match event["method"].as_str().unwrap_or_default() {
+                "turn/started"
+                | "item/reasoning/summaryTextDelta"
+                | "item/reasoning/summaryPartAdded"
+                | "item/reasoning/textDelta" => {
+                    set_activity(state, id, Some("thinking")).await?;
+                }
+                "item/agentMessage/delta" => {
+                    set_activity(state, id, Some("responding")).await?;
+                }
                 "item/started" | "item/completed" => {
-                    record_native_action(
-                        state,
-                        id,
-                        &thread_id,
-                        &params["item"],
-                        &cwd,
-                        event["method"] == "item/completed",
-                    )
-                    .await?;
+                    let completed = event["method"] == "item/completed";
+                    match params["item"]["type"].as_str() {
+                        Some("reasoning") => {
+                            set_activity(state, id, Some("thinking")).await?;
+                        }
+                        Some("agentMessage") if !completed => {
+                            set_activity(state, id, Some("responding")).await?;
+                        }
+                        Some("dynamicToolCall") if !completed => {
+                            let activity = if params["item"]["tool"] == "send_agent_message" {
+                                "responding"
+                            } else {
+                                "working"
+                            };
+                            set_activity(state, id, Some(activity)).await?;
+                        }
+                        Some("dynamicToolCall")
+                            if params["item"]["tool"] != "send_agent_message" =>
+                        {
+                            set_activity(state, id, Some("thinking")).await?;
+                        }
+                        _ => {}
+                    }
+                    record_native_action(state, id, &thread_id, &params["item"], &cwd, completed)
+                        .await?;
                 }
                 "item/tool/requestUserInput" => {
                     // Questions belong in the messenger; don't leave a native prompt waiting forever.
@@ -770,6 +924,7 @@ async fn run_turn_with_client(
                     client.respond(event["id"].clone(), response).await?;
                 }
                 "turn/completed" => {
+                    set_activity(state, id, None).await?;
                     let status = params
                         .pointer("/turn/status")
                         .and_then(Value::as_str)
@@ -793,6 +948,7 @@ async fn run_turn_with_client(
         _ = cancel.wait_for(|stopped| *stopped) => Err(AppError::Conflict("Agent stopped".into())),
         result = work => result,
     };
+    let activity_result = set_activity(state, id, None).await;
     // Each agent turn owns its app-server. Interrupt first so foreground commands stop too.
     let cleanup = async {
         if result.is_err() {
@@ -823,24 +979,27 @@ async fn run_turn_with_client(
     }
     state.agents.computer.forget(id).await;
     if let Err(error) = &result {
-        change(state, id, |agent| {
-            for message in agent["messages"].as_array_mut().unwrap() {
-                if let Some(actions) = message["actions"].as_array_mut() {
-                    for action in actions {
-                        if action["status"] == "running" {
-                            action["status"] = json!("failed");
-                            action["result"] = json!(
-                                json!({"error":error.to_string(),"resultUnknown":true}).to_string()
-                            );
+        if group_context.is_none() {
+            change(state, id, |agent| {
+                for message in agent["messages"].as_array_mut().unwrap() {
+                    if let Some(actions) = message["actions"].as_array_mut() {
+                        for action in actions {
+                            if action["status"] == "running" {
+                                action["status"] = json!("failed");
+                                action["result"] =
+                                    json!(json!({"error":error.to_string(),"resultUnknown":true})
+                                        .to_string());
+                            }
                         }
                     }
                 }
-            }
-            agent["typing"] = json!(false);
-            Ok(())
-        })
-        .await?;
+                agent["activity"] = Value::Null;
+                Ok(())
+            })
+            .await?;
+        }
     }
+    activity_result?;
     result
 }
 
@@ -897,8 +1056,10 @@ async fn record_native_action(
     if completed {
         action["result"] = json!(item.to_string().chars().take(24_000).collect::<String>());
     }
+    if let Some(context) = groups::context() {
+        return groups::receipt(state, &context, action).await;
+    }
     change(state, id, |agent| {
-        agent["typing"] = json!(false);
         let assistant_name = agent["profile"]["name"].clone();
         let messages = agent["messages"].as_array_mut().unwrap();
         let existing = messages.iter_mut().filter_map(|message| message["actions"].as_array_mut())
@@ -910,6 +1071,7 @@ async fn record_native_action(
             messages.push(json!({"id":Uuid::new_v4().to_string(),"role":"assistant","content":"",
                 "assistantName":assistant_name,"createdAt":Utc::now().to_rfc3339(),"actions":[action]}));
         }
+        agent["activity"] = activity_after_actions(agent);
         Ok(())
     }).await?;
     Ok(())
@@ -920,6 +1082,9 @@ async fn send_agent_reply(
     content: &str,
     current: &[Value],
 ) -> AppResult<Value> {
+    if let Some(context) = groups::context() {
+        return groups::reply(state, &context, content).await;
+    }
     let message_id = Uuid::new_v4().to_string();
     let agent=change(state,id,|agent| {
         let follow_up_ids:Vec<_>=agent["followUps"].as_array().unwrap().iter().filter(|f|f["status"]=="processing").map(|f|f["id"].clone()).collect();
@@ -927,7 +1092,7 @@ async fn send_agent_reply(
             "assistantName":agent["profile"]["name"],"createdAt":Utc::now().to_rfc3339(),
             "inReplyTo":current.iter().map(|message|message["id"].clone()).collect::<Vec<_>>(),"followUpIds":follow_up_ids});
         agent["messages"].as_array_mut().unwrap().push(reply);
-        agent["typing"]=json!(false);Ok(())
+        agent["activity"]=Value::Null;Ok(())
     }).await?;
     state.emit("assistant.message",json!({"agentId":id,"messageId":message_id,"assistantName":agent["profile"]["name"],"content":content,"proactive":current.is_empty()}));
     Ok(json!({"messageId":message_id}))
@@ -940,6 +1105,9 @@ async fn execute_tool(
     call_id: &str,
     current: &[Value],
 ) -> AppResult<Value> {
+    if let Some(context) = groups::context() {
+        return groups::execute_tool(state, &context, name, args, call_id, current).await;
+    }
     let specs: Value = serde_json::from_str(include_str!("agent-tools.json"))?;
     let spec = specs
         .as_array()
@@ -980,10 +1148,10 @@ async fn execute_tool(
             }
         }
     }
-    let conversational = matches!(name, "set_typing" | "send_agent_message");
+    let conversational = name == "send_agent_message";
     let receipt_id = Uuid::new_v4().to_string();
     if !conversational {
-        change(state,id,|a|{a["typing"]=json!(false);let assistant_name=a["profile"]["name"].clone();a["messages"].as_array_mut().unwrap().push(json!({"id":receipt_id,"role":"assistant","content":"","assistantName":assistant_name,"createdAt":Utc::now().to_rfc3339(),"actions":[{"id":call_id,"tool":name,"arguments":args,"status":"running"}]}));Ok(())}).await?;
+        change(state,id,|a|{a["activity"]=json!("working");let assistant_name=a["profile"]["name"].clone();a["messages"].as_array_mut().unwrap().push(json!({"id":receipt_id,"role":"assistant","content":"","assistantName":assistant_name,"createdAt":Utc::now().to_rfc3339(),"actions":[{"id":call_id,"tool":name,"arguments":args,"status":"running"}]}));Ok(())}).await?;
     }
     let result = tool_action(state, id, name, args, current).await;
     if !conversational {
@@ -1011,13 +1179,14 @@ async fn execute_tool(
                     }
                 }
             }
+            a["activity"] = activity_after_actions(a);
             Ok(())
         })
         .await?;
     }
     result
 }
-async fn tool_action(
+pub(crate) async fn tool_action(
     state: &AppState,
     id: &str,
     name: &str,
@@ -1029,21 +1198,7 @@ async fn tool_action(
         "computer_status" | "computer_screenshot" | "computer_action" => {
             state.agents.computer.execute(id, name, args).await
         }
-        "set_typing" => {
-            let typing = args["typing"]
-                .as_bool()
-                .ok_or_else(|| AppError::BadRequest("typing is required".into()))?;
-            change(state, id, |a| {
-                a["typing"] = json!(typing);
-                Ok(())
-            })
-            .await?;
-            Ok(json!({"typing":typing}))
-        }
         "send_agent_message" => {
-            if state.agents.get(id).await?["typing"] != true {
-                return Err(AppError::Conflict("Call set_typing(true) before composing each message, then retry send_agent_message".into()));
-            }
             send_agent_reply(state, id, &required("content", 1200)?, current).await
         }
         "get_profile" => {
@@ -1085,15 +1240,13 @@ async fn tool_action(
                 json!({"name":agent["profile"]["name"],"avatarUpdated":true,"format":"svg","width":512,"height":512}),
             )
         }
-        "list_workspaces" => Ok(json!(
-            state
-                .db
-                .projects()
-                .await?
-                .iter()
-                .map(|p| json!({"id":p.id,"name":p.name,"path":p.repo_path}))
-                .collect::<Vec<_>>()
-        )),
+        "list_workspaces" => Ok(json!(state
+            .db
+            .projects()
+            .await?
+            .iter()
+            .map(|p| json!({"id":p.id,"name":p.name,"path":p.repo_path}))
+            .collect::<Vec<_>>())),
         "list_chats" => {
             let Json(chats) = list_codex_chats(
                 State(state.clone()),
@@ -1314,7 +1467,8 @@ async fn tool_action(
                 .and_then(Value::as_str)
                 .ok_or_else(|| AppError::Internal("Codex returned no thread".into()))?
                 .to_owned();
-            let chat = json!({"id":chat_id,"title":title,"accountId":account_id,"workingDirectory":directory,"autoRotateAccount":args["autoRotateAccount"].as_bool().unwrap_or(false),"runtimeDefaults":defaults,"createdAt":Utc::now().to_rfc3339()});
+            let mut chat = json!({"id":chat_id,"title":title,"accountId":account_id,"workingDirectory":directory,"autoRotateAccount":args["autoRotateAccount"].as_bool().unwrap_or(false),"runtimeDefaults":defaults,"createdAt":Utc::now().to_rfc3339()});
+            groups::attach_chat(state, &mut chat).await?;
             save_document(&state.db, "provider-chats", &chat).await?;
             state
                 .started_codex_threads
@@ -1494,11 +1648,9 @@ async fn tool_action(
             let chat_lock = state.providers.chat_lock(&chat_id).await;
             let _guard = chat_lock.lock().await;
             let mut chat = chat_metadata(state, &chat_id).await?;
-            chat["autoRotateAccount"] = json!(
-                args["enabled"]
-                    .as_bool()
-                    .ok_or_else(|| AppError::BadRequest("enabled is required".into()))?
-            );
+            chat["autoRotateAccount"] = json!(args["enabled"]
+                .as_bool()
+                .ok_or_else(|| AppError::BadRequest("enabled is required".into()))?);
             save_document(&state.db, "provider-chats", &chat).await?;
             Ok(json!({"chatId":chat_id,"chat":chat}))
         }
@@ -1600,6 +1752,14 @@ async fn tool_action(
     }
 }
 async fn add_followup(state: &AppState, id: &str, mut followup: Value) -> AppResult<Value> {
+    if groups::context().is_some() {
+        if followup["kind"] != "run" {
+            return Err(AppError::Conflict(
+                "Group scheduling is not available".into(),
+            ));
+        }
+        return groups::watch_child(state, &followup).await;
+    }
     followup["id"] = json!(Uuid::new_v4().to_string());
     followup["createdAt"] = json!(Utc::now().to_rfc3339());
     followup["status"] = json!("waiting");
@@ -1790,7 +1950,7 @@ async fn cancel_queued_run(state: &AppState, queued: &Value) -> AppResult<()> {
     .await
 }
 
-async fn stop_chat(state: &AppState, chat_id: &str) -> AppResult<Value> {
+pub(crate) async fn stop_chat(state: &AppState, chat_id: &str) -> AppResult<Value> {
     let chat_lock = state.providers.chat_lock(chat_id).await;
     let _guard = chat_lock.lock().await;
     let mut chat = chat_metadata(state, chat_id).await?;
@@ -1869,6 +2029,7 @@ async fn dispatch_chat_locked(
     agent_id: &str,
     current: &[Value],
 ) -> AppResult<Value> {
+    let _group_guard = groups::dispatch_guard(state, chat_id).await?;
     if document(&state.db, "provider-chats", chat_id)
         .await
         .ok()
@@ -2083,6 +2244,7 @@ pub(crate) async fn scheduler(state: AppState) {
     }
 }
 async fn tick(state: &AppState) -> AppResult<()> {
+    groups::tick(state).await?;
     recover_coding_runs(state).await?;
     for queued in documents(&state.db, "chat-queue").await? {
         let chat_id = queued["chatId"].as_str().unwrap_or_default();
@@ -2238,7 +2400,7 @@ pub(crate) async fn record_outcome(
     Ok(())
 }
 
-fn quota_error(message: &str) -> bool {
+pub(crate) fn quota_error(message: &str) -> bool {
     let message = message.to_lowercase();
     [
         "usage_limit_reached",
@@ -2401,12 +2563,10 @@ mod tests {
         assert_eq!(models["models"][1]["model"], "exact-beta");
         let run = coding_chat(&root, &state, "Do the coding task").await;
         assert_eq!(run["status"], "RUNNING");
-        assert!(
-            run["chatId"]
-                .as_str()
-                .unwrap()
-                .starts_with("selected-provider-home-")
-        );
+        assert!(run["chatId"]
+            .as_str()
+            .unwrap()
+            .starts_with("selected-provider-home-"));
         let log = rpc_log(&home);
         assert!(log.iter().all(|m| m["home"] == json!(home)));
         let started = log.iter().find(|m| m["method"] == "thread/start").unwrap();
@@ -2495,32 +2655,24 @@ mod tests {
     async fn coding_creation_validates_before_mutation_and_reports_partial_dispatch_failure() {
         let (root, state, home) = coding_fixture().await;
         let base = json!({"workingDirectory":root.path(),"accountId":"account","title":"Test"});
-        assert!(
-            coding_tool(&state, "create_chat", base.clone())
-                .await
-                .is_err()
-        );
+        assert!(coding_tool(&state, "create_chat", base.clone())
+            .await
+            .is_err());
         let mut args = base;
         args["prompt"] = json!(" ");
-        assert!(
-            coding_tool(&state, "create_chat", args.clone())
-                .await
-                .is_err()
-        );
+        assert!(coding_tool(&state, "create_chat", args.clone())
+            .await
+            .is_err());
         args["prompt"] = json!("Do work");
         args["model"] = json!("unavailable-exact-model");
-        assert!(
-            coding_tool(&state, "create_chat", args.clone())
-                .await
-                .is_err()
-        );
+        assert!(coding_tool(&state, "create_chat", args.clone())
+            .await
+            .is_err());
         args["model"] = json!("exact-beta");
         args["reasoningEffort"] = json!("high");
-        assert!(
-            coding_tool(&state, "create_chat", args.clone())
-                .await
-                .is_err()
-        );
+        assert!(coding_tool(&state, "create_chat", args.clone())
+            .await
+            .is_err());
         assert!(!rpc_log(&home).iter().any(|m| m["method"] == "thread/start"));
         args["reasoningEffort"] = json!("low");
         args["prompt"] = json!("REJECT_RUN");
@@ -2578,15 +2730,13 @@ mod tests {
         .unwrap();
         assert_eq!(inspected["status"], "inProgress");
         let log = rpc_log(&home);
-        assert!(
-            log.iter()
-                .any(|m| m["method"] == "thread/goal/set" && m["params"]["status"] == "paused")
-        );
-        assert!(
-            log.iter()
-                .any(|m| m["method"] == "thread/backgroundTerminals/clean"
-                    && m["params"]["threadId"] == first["chatId"])
-        );
+        assert!(log
+            .iter()
+            .any(|m| m["method"] == "thread/goal/set" && m["params"]["status"] == "paused"));
+        assert!(log
+            .iter()
+            .any(|m| m["method"] == "thread/backgroundTerminals/clean"
+                && m["params"]["threadId"] == first["chatId"]));
         assert_eq!(
             log.iter().filter(|m| m["method"] == "initialize").count(),
             1
@@ -2598,11 +2748,9 @@ mod tests {
         let (root, state, home) = coding_fixture().await;
         let run = coding_chat(&root, &state, "First task").await;
         let args = json!({"chatId":run["chatId"],"model":"exact-alpha","reasoningEffort":"high"});
-        assert!(
-            coding_tool(&state, "set_chat_model", args.clone())
-                .await
-                .is_err()
-        );
+        assert!(coding_tool(&state, "set_chat_model", args.clone())
+            .await
+            .is_err());
         coding_tool(
             &state,
             "stop_run",
@@ -2619,15 +2767,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(inspected["status"], "interrupted");
-        assert!(
-            coding_tool(
-                &state,
-                "read_run",
-                json!({"chatId":run["chatId"],"runId":"another-chat-run"})
-            )
-            .await
-            .is_err()
-        );
+        assert!(coding_tool(
+            &state,
+            "read_run",
+            json!({"chatId":run["chatId"],"runId":"another-chat-run"})
+        )
+        .await
+        .is_err());
         coding_tool(
             &state,
             "set_chat_access",
@@ -2678,15 +2824,13 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            coding_tool(
-                &state,
-                "stop_run",
-                json!({"chatId":chat_id,"runId":"stale-run"})
-            )
-            .await
-            .is_err()
-        );
+        assert!(coding_tool(
+            &state,
+            "stop_run",
+            json!({"chatId":chat_id,"runId":"stale-run"})
+        )
+        .await
+        .is_err());
         coding_tool(
             &state,
             "stop_run",
@@ -2779,16 +2923,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(rejected.to_string().contains("forked history"));
-        assert!(
-            document(&state.db, "provider-chats", original)
-                .await
-                .is_ok()
-        );
-        assert!(
-            document(&state.db, "deleted-chats", original)
-                .await
-                .is_err()
-        );
+        assert!(document(&state.db, "provider-chats", original)
+            .await
+            .is_ok());
+        assert!(document(&state.db, "deleted-chats", original)
+            .await
+            .is_err());
         coding_tool(
             &state,
             "watch_chat",
@@ -2830,18 +2970,14 @@ mod tests {
             .await
             .unwrap();
         assert!(document(&state.db, "provider-chats", new_id).await.is_err());
-        assert!(
-            !state
-                .started_codex_threads
-                .read()
-                .await
-                .contains_key(new_id)
-        );
-        assert!(
-            coding_tool(&state, "read_chat", json!({"chatId":new_id}))
-                .await
-                .is_err()
-        );
+        assert!(!state
+            .started_codex_threads
+            .read()
+            .await
+            .contains_key(new_id));
+        assert!(coding_tool(&state, "read_chat", json!({"chatId":new_id}))
+            .await
+            .is_err());
         assert!(
             coding_tool(&state, "read_chat", json!({"chatId":fork["chatId"]}))
                 .await
@@ -2853,16 +2989,12 @@ mod tests {
         coding_tool(&state, "delete_chat", json!({"chatId":original}))
             .await
             .unwrap();
-        assert!(
-            document(&state.db, "provider-chats", original)
-                .await
-                .is_err()
-        );
-        assert!(
-            !rpc_log(&home)
-                .iter()
-                .any(|m| m["method"] == "thread/rollback")
-        );
+        assert!(document(&state.db, "provider-chats", original)
+            .await
+            .is_err());
+        assert!(!rpc_log(&home)
+            .iter()
+            .any(|m| m["method"] == "thread/rollback"));
     }
     #[cfg(unix)]
     #[tokio::test]
@@ -3001,6 +3133,7 @@ supports_websockets = false
         let state = AppState {
             db,
             agents,
+            groups: groups::GroupManager::default(),
             providers: providers::ProviderManager::new(root.path().join("accounts")),
             codex: CodexManager::test_unavailable(),
             live,
@@ -3023,7 +3156,8 @@ supports_websockets = false
             match value {
                 Value::Array(values) => values.iter().any(has_exec),
                 Value::Object(fields) => {
-                    (value["name"] == "exec" && matches!(value["type"].as_str(), Some("function" | "custom")))
+                    (value["name"] == "exec"
+                        && matches!(value["type"].as_str(), Some("function" | "custom")))
                         || fields.values().any(has_exec)
                 }
                 _ => false,
@@ -3072,7 +3206,10 @@ supports_websockets = false
             }
         }));
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        tokio::fs::write(home.join("config.toml"), format!(r#"
+        tokio::fs::write(
+            home.join("config.toml"),
+            format!(
+                r#"
 model_provider = "boosted_loopback"
 [model_providers.boosted_loopback]
 name = "Boosted screenshot transport test"
@@ -3082,23 +3219,45 @@ requires_openai_auth = false
 supports_websockets = false
 [features]
 code_mode = true
-"#)).await.unwrap();
+"#
+            ),
+        )
+        .await
+        .unwrap();
         let client = CodexClient::for_account(&home, true).await.unwrap();
         let snapshot = state.agents.get("pock").await.unwrap();
         let (_sender, mut cancel) = watch::channel(false);
-        let result = tokio::time::timeout(Duration::from_secs(30),
-            run_turn_with_client(&state, "pock", &snapshot, &[], &[], &client, &mut cancel)).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_turn_with_client(&state, "pock", &snapshot, &[], &[], &client, &mut cancel),
+        )
+        .await;
         client.shutdown().await;
         server.abort();
         result.unwrap().unwrap();
         let _first = received.try_recv().unwrap();
         let next = received.try_recv().unwrap();
-        assert!(contains_image(&next["input"]), "Screenshot must reach the model as image content: {}",
-            next["input"].to_string().chars().take(2000).collect::<String>());
+        assert!(
+            contains_image(&next["input"]),
+            "Screenshot must reach the model as image content: {}",
+            next["input"]
+                .to_string()
+                .chars()
+                .take(2000)
+                .collect::<String>()
+        );
         let agent = state.agents.get("pock").await.unwrap();
-        let actions: Vec<_> = agent["messages"].as_array().unwrap().iter()
-            .filter_map(|message| message["actions"].as_array()).flatten().collect();
-        let action = actions.iter().find(|action| action["tool"] == "computer_screenshot").unwrap();
+        let actions: Vec<_> = agent["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["actions"].as_array())
+            .flatten()
+            .collect();
+        let action = actions
+            .iter()
+            .find(|action| action["tool"] == "computer_screenshot")
+            .unwrap();
         assert_eq!(action["status"], "completed");
         assert!(!action["result"].as_str().unwrap().contains("base64"));
     }
@@ -3144,12 +3303,12 @@ code_mode = true
                     let names = tool_names(&request);
                     let code_mode = names.iter().any(|name| name == "exec");
                     requests.send(request).unwrap();
-                    if index == 6 {
+                    if index == 5 {
                         return Response::builder().header("content-type","text/event-stream")
                             .body(Body::from_stream(futures_util::stream::pending::<Result<String,std::convert::Infallible>>())).unwrap();
                     }
                     let (name, args) = match index {
-                        0 | 5 => {
+                        0 | 4 => {
                             let name = if code_mode { "exec_command".into() } else { names.iter().find(|name| matches!(name.as_str(), "exec_command" | "shell_command" | "shell")).expect("Native shell tool").clone() };
                             let command = if index == 0 { format!("printf native-shell-ok > command-result.txt; curl --fail --silent http://{address}/probe") }
                                 else { "printf '%s' \"$$\" > command-pid; exec sleep 30".into() };
@@ -3161,8 +3320,7 @@ code_mode = true
                             (name, args)
                         }
                         1 => (if code_mode { "mcp__probe__lookup".into() } else { names.iter().find(|name| name.contains("probe") && name.contains("lookup")).expect("Configured MCP tool").clone() }, json!({"value":"native-mcp-ok"})),
-                        2 => ("set_typing".into(), json!({"typing":true})),
-                        3 => ("send_agent_message".into(), json!({"content":"Shell, network and MCP verified."})),
+                        2 => ("send_agent_message".into(), json!({"content":"Shell, network and MCP verified."})),
                         _ => (String::new(), Value::Null),
                     };
                     let item = if name.is_empty() {
@@ -3236,12 +3394,10 @@ args = [{}]
             .find(|action| action["tool"] == "commandExecution")
             .unwrap();
         assert_eq!(shell["status"], "completed");
-        assert!(
-            shell["result"]
-                .as_str()
-                .unwrap()
-                .contains("native-network-ok")
-        );
+        assert!(shell["result"]
+            .as_str()
+            .unwrap()
+            .contains("native-network-ok"));
         let mcp = actions
             .iter()
             .find(|action| action["tool"] == "mcpToolCall")
@@ -3278,14 +3434,12 @@ args = [{}]
         .await;
         client.shutdown().await;
         server.abort();
-        assert!(
-            stopped
-                .unwrap()
-                .0
-                .unwrap_err()
-                .to_string()
-                .contains("Agent stopped")
-        );
+        assert!(stopped
+            .unwrap()
+            .0
+            .unwrap_err()
+            .to_string()
+            .contains("Agent stopped"));
         let pid = std::fs::read_to_string(root.path().join("command-pid")).unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
             while std::process::Command::new("kill")
@@ -3305,7 +3459,7 @@ args = [{}]
     async fn restart_preserves_identity_and_recovers_queued_messages_and_commitments() {
         let (_root, state) = fixture().await;
         change(&state,"pock",|a|{
-            a["profile"]["name"]=json!("Nova");a["status"]=json!("running");a["typing"]=json!(true);
+            a["profile"]["name"]=json!("Nova");a["status"]=json!("running");a["typing"]=json!(true);a["activity"]=json!("working");
             a["messages"]=json!([
                 {"id":"message","role":"user","content":"Continue","delivery":"processing"},
                 {"id":"receipt","role":"assistant","content":"","actions":[
@@ -3340,7 +3494,8 @@ args = [{}]
             "saved output"
         );
         assert_eq!(restored["followUps"][0]["status"], "ready");
-        assert_eq!(restored["typing"], false);
+        assert_eq!(restored["activity"], Value::Null);
+        assert!(restored.get("typing").is_none());
     }
     #[tokio::test]
     async fn duplicate_delivery_is_idempotent_while_agent_is_running() {
@@ -3374,17 +3529,15 @@ args = [{}]
     #[tokio::test]
     async fn followups_validate_timezones_and_survive_cancellation() {
         let (_root, state) = fixture().await;
-        assert!(
-            tool_action(
-                &state,
-                "pock",
-                "schedule_follow_up",
-                &json!({"instructions":"Check progress","dueAt":"2027-01-01T10:00:00"}),
-                &[]
-            )
-            .await
-            .is_err()
-        );
+        assert!(tool_action(
+            &state,
+            "pock",
+            "schedule_follow_up",
+            &json!({"instructions":"Check progress","dueAt":"2027-01-01T10:00:00"}),
+            &[]
+        )
+        .await
+        .is_err());
         assert!(tool_action(&state,"pock","schedule_follow_up",&json!({"instructions":"Check progress","dueAt":"2099-01-01T10:00:00Z","intervalMinutes":0}),&[]).await.is_err());
         let followup=tool_action(&state,"pock","schedule_follow_up",&json!({"instructions":"Check progress","dueAt":"2099-01-01T10:00:00+07:00","intervalMinutes":60}),&[]).await.unwrap();
         let _ = cancel_followup(
@@ -3403,31 +3556,32 @@ args = [{}]
         assert_eq!(restored["followUps"][0]["intervalMinutes"], 60);
     }
     #[tokio::test]
-    async fn messages_require_typing_and_application_tools_reject_unexpected_fields() {
+    async fn messages_send_immediately_and_application_tools_reject_unexpected_fields() {
         let (_root, state) = fixture().await;
-        assert!(
-            tool_action(
-                &state,
-                "pock",
-                "send_agent_message",
-                &json!({"content":"Hello"}),
-                &[]
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            execute_tool(
-                &state,
-                "pock",
-                "update_profile",
-                &json!({"name":"Nova","shell":"rm"}),
-                "call",
-                &[]
-            )
-            .await
-            .is_err()
-        );
+        let reply = execute_tool(
+            &state,
+            "pock",
+            "send_agent_message",
+            &json!({"content":"Hello"}),
+            "reply",
+            &[],
+        )
+        .await
+        .unwrap();
+        let agent = state.agents.get("pock").await.unwrap();
+        assert_eq!(agent["messages"][0]["id"], reply["messageId"]);
+        assert_eq!(agent["messages"][0]["content"], "Hello");
+        assert_eq!(agent["activity"], Value::Null);
+        assert!(execute_tool(
+            &state,
+            "pock",
+            "update_profile",
+            &json!({"name":"Nova","shell":"rm"}),
+            "call",
+            &[]
+        )
+        .await
+        .is_err());
         assert!(
             execute_tool(&state, "pock", "shell", &json!({}), "call", &[])
                 .await
@@ -3522,11 +3676,12 @@ args = [{}]
         use std::os::unix::fs::PermissionsExt;
         let (root, mut state) = fixture().await;
         state.agents.computer = computer::tests::fixture().0;
+        let mut updates = state.live.subscribe();
         let script = root.path().join("fake-codex");
         std::fs::write(&script,r#"#!/usr/bin/env python3
 import sys,json
 stage=0
-calls=[('update_profile',{'name':'Nova'},'profile'),('send_agent_message',{'content':'Should fail without typing'},'invalid'),('set_typing',{'typing':True},'typing'),('send_agent_message',{'content':'Ready to work.'},'reply'),('send_agent_message',{'content':'Ready to work.'},'reply'),('computer_screenshot',{},'screen'),('computer_action',{'action':'click','x':20,'y':10},'click')]
+calls=[('update_profile',{'name':'Nova'},'profile'),('send_agent_message',{'content':'Ready to work.'},'reply'),('send_agent_message',{'content':'Ready to work.'},'reply'),('computer_screenshot',{},'screen'),('computer_action',{'action':'click','x':20,'y':10},'click')]
 def emit(v):
  print(json.dumps(v),flush=True)
 def call(i):
@@ -3545,12 +3700,17 @@ for line in sys.stdin:
   assert p['config']['web_search']=='live'
   assert 'mcp_servers' not in p['config']
   assert 'features.apply_patch_tool' not in p['config']
-  assert len(p['dynamicTools'])==30
+  assert len(p['dynamicTools'])==29
+  assert all(t['name']!='set_typing' for t in p['dynamicTools'])
   assert 'computer-control' in p['developerInstructions']
   emit({'id':m['id'],'result':{'thread':{'id':'agent-thread'}}})
  elif method=='turn/start':
   assert m['params']['sandboxPolicy']=={'type':'dangerFullAccess'}
   emit({'id':m['id'],'result':{'turn':{'id':'turn'}}})
+  emit({'method':'item/agentMessage/delta','params':{'threadId':'other-thread','delta':'Ignore this activity.'}})
+  emit({'method':'item/started','params':{'threadId':'agent-thread','item':{'id':'reason','type':'reasoning'}}})
+  for _ in range(10):
+   emit({'method':'item/reasoning/summaryTextDelta','params':{'threadId':'agent-thread','itemId':'reason','delta':'Thinking'}})
   for kind,fields in [('commandExecution',{'command':'glab issue list','cwd':'/project','exitCode':0,'aggregatedOutput':'Issue 42'}),('commandExecution',{'command':'missing-cli','exitCode':127,'aggregatedOutput':'command not found'}),('mcpToolCall',{'server':'example','tool':'lookup','arguments':{},'error':{'message':'Access denied'}}),('fileChange',{'changes':[]})]:
    item={'id':str(len(fields))+kind,'type':kind,'status':'inProgress',**fields}
    emit({'method':'item/started','params':{'threadId':'agent-thread','item':item}})
@@ -3560,9 +3720,8 @@ for line in sys.stdin:
   call(0)
  elif method=='thread/backgroundTerminals/clean':emit({'id':m['id'],'result':{}})
  elif method is None and 'result' in m:
-  if stage==1:assert m['result']['success'] is False
-  else:assert m['result']['success'] is True
-  if stage==5:
+  assert m['result']['success'] is True
+  if stage==3:
    content=m['result']['contentItems']
    screenshot_id=json.loads(content[0]['text'])['screenshotId']
    assert content[1]['type']=='inputImage' and content[1]['imageUrl'].startswith('data:image/png;base64,')
@@ -3588,7 +3747,19 @@ for line in sys.stdin:
             .collect();
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0]["content"], "Ready to work.");
-        assert_eq!(agent["typing"], false);
+        assert_eq!(agent["activity"], Value::Null);
+        let mut activities = Vec::new();
+        while let Ok(update) = updates.try_recv() {
+            if update.topic == "assistant.updated" {
+                activities.push(update.data["activity"].clone());
+            }
+        }
+        // Startup is visible without a model tool call; repeated reasoning deltas and
+        // other threads do not publish redundant or unrelated activity updates.
+        assert_eq!(activities[0], "thinking");
+        assert_eq!(activities[1], "working");
+        assert!(activities.contains(&json!("responding")));
+        assert_eq!(activities.last(), Some(&Value::Null));
         let actions: Vec<_> = agent["messages"]
             .as_array()
             .unwrap()
@@ -3604,9 +3775,14 @@ for line in sys.stdin:
         assert_eq!(actions[1]["status"], "failed");
         assert_eq!(actions[2]["status"], "failed");
         assert_eq!(actions[3]["status"], "completed");
-        let screen_action = agent["messages"].as_array().unwrap().iter()
-            .filter_map(|message| message["actions"].as_array()).flatten()
-            .find(|action| action["tool"] == "computer_screenshot").unwrap();
+        let screen_action = agent["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["actions"].as_array())
+            .flatten()
+            .find(|action| action["tool"] == "computer_screenshot")
+            .unwrap();
         assert_eq!(screen_action["status"], "completed");
         assert!(!screen_action["result"].as_str().unwrap().contains("base64"));
     }
@@ -3679,8 +3855,42 @@ for line in sys.stdin:
         assert_eq!(cleanup[0]["params"]["turnId"], "native-turn");
         assert_eq!(cleanup[1]["method"], "thread/backgroundTerminals/clean");
         let agent = state.agents.get("pock").await.unwrap();
+        assert_eq!(agent["activity"], Value::Null);
         let action = &agent["messages"][0]["actions"][0];
         assert_eq!(action["status"], "failed");
-        assert!(serde_json::from_str::<Value>(action["result"].as_str().unwrap()).unwrap()["resultUnknown"].as_bool().unwrap());
+        assert!(
+            serde_json::from_str::<Value>(action["result"].as_str().unwrap()).unwrap()
+                ["resultUnknown"]
+                .as_bool()
+                .unwrap()
+        );
     }
+}
+
+pub(crate) async fn set_group_status(
+    state: &AppState,
+    id: &str,
+    context: Option<&groups::GroupContext>,
+) -> AppResult<()> {
+    change(state, id, |a| {
+        a["status"] = json!(if context.is_some() { "running" } else { "idle" });
+        a["activity"] = if context.is_some() {
+            json!("thinking")
+        } else {
+            Value::Null
+        };
+        a["activeGroupId"] = json!(context.map(|c| &c.group_id));
+        Ok(())
+    })
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn set_group_account(state: &AppState, id: &str, account: &str) -> AppResult<()> {
+    change(state, id, |a| {
+        a["accountId"] = json!(account);
+        Ok(())
+    })
+    .await?;
+    Ok(())
 }

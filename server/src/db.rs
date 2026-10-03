@@ -7,7 +7,7 @@ use crate::{
 };
 use chrono::Utc;
 use serde_json::Value;
-use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 use std::path::Path;
 
 #[derive(Clone)]
@@ -42,6 +42,7 @@ impl Database {
             sqlx::query(statement).execute(&self.pool).await?;
         }
         sqlx::query("CREATE TABLE IF NOT EXISTS feature_documents (namespace TEXT NOT NULL, id TEXT NOT NULL, content_json TEXT NOT NULL, PRIMARY KEY(namespace,id))").execute(&self.pool).await?;
+        crate::groups::migrate(self).await?;
         Ok(())
     }
 

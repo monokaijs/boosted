@@ -48,6 +48,16 @@ Agent conversations support queued messages, images and files, action receipts l
 
 The conversation and provider UI, agent instructions, tool definitions, and conversation-state helpers are ported from PockCode. Their runtime is implemented in Rust using Boosted's authenticated API, SQLite storage, and live event stream; no Node sidecar is required by the desktop or headless binaries.
 
+## Group chats
+
+Use **New group** to choose at least two existing agents and give each one or more roles: leader, developer, reviewer, researcher, or designer. Role selectors sit beside each participant; optional responsibilities define their scope. Each group has exactly one leader. Normal chat messages go to the leader, who delegates work, receives specialist replies and task results, and reports back to you. Use mentions to address specialists or explicitly select Everyone to broadcast. Only the leader can create assignments. Tell the leader in chat to change roles or add/remove existing agents, for example “Add Alice as developer and reviewer” or “Make Coral the leader.” Changes are saved and declared in the conversation. Agents with unfinished work, pending reviews, or active turns cannot be removed. Agents with the reviewer role are preferred for independent reviews, and an agent cannot review their own work.
+
+Project assignments use the existing registered checkout and can run concurrently. The group task panel shows ownership, declared shared files, dependencies, verification, native tool receipts, and associated coding chats. Preserve your existing changes when assigning work: agents share the checkout rather than receiving isolated branches. Completion requires another peer’s review; changed file snapshots require a fresh review.
+
+**Stop** pauses group dispatch and interrupts its owned turns and coding runs. Queued work and receipts remain available. **Resume** explicitly continues work after inspection. Server restarts leave unfinished groups stopped until you resume them. Failed or blocked assignments have individual Retry controls. Groups schedule up to four concurrent executions and 32 automatic turns per human request; **Continue** grants another exchange budget.
+
+Groups follow the existing shared workspace access policy. Group activity stays separate from agents’ direct conversations. Human-attention messages use the existing agent notification preference and open the related group; routine peer exchanges stay in the conversation. Task-board integration and scheduled group reminders are not included.
+
 ## Issue integrations
 
 Install GitLab or Huly under **Settings → Integrations**. After connection details are entered, Boosted discovers the accessible projects, groups, and workspaces and presents them as a searchable multi-select. GitLab discovery uses the supplied access token and the instance's REST API, following pagination so paths or numeric IDs do not need to be copied from GitLab manually.
@@ -92,6 +102,8 @@ npx boosted-cli
 ```
 
 Or install it globally and run `boosted-cli`. The npm launcher downloads and caches the native CLI for Linux x64, macOS Intel/Apple Silicon, or Windows x64. The CLI has the web app embedded, so it does not need a desktop environment or WebKit. The server host still needs Git and the Codex CLI.
+
+Linux release binaries are built on Ubuntu 24.04 and require glibc 2.39 or newer plus the computer-control runtime libraries listed above. For Linux source builds, use Ubuntu 24.04 or a distribution with compatible PipeWire development headers; Ubuntu 22.04's stock headers are too old for the screen-capture bindings.
 
 No data-directory argument is required. Boosted stores its database, uploads, and managed worktrees in the platform application-data directory by default (`BOOSTED_DATA_DIR` remains available when a custom location is needed).
 

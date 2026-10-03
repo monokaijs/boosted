@@ -33,7 +33,7 @@ export interface PwaNotificationContent {
   body: string;
   tag: string;
   data: {
-    kind: "agent" | "task" | "codex" | "integration";
+    kind: "agent" | "group" | "task" | "codex" | "integration";
     id: string;
     url: string;
   };
@@ -133,6 +133,7 @@ function eventData(event: LiveEvent) {
 
 export function notificationEventId(event: LiveEvent): NotificationEventId | undefined {
   const data = eventData(event);
+  if (event.topic === "group.attention") return "agentMessage";
   if (event.topic === "assistant.message") return "agentMessage";
   if (event.topic === "task.created") return "taskCreated";
   if (event.topic === "task.updated") {
@@ -164,6 +165,12 @@ export async function buildNotificationForEvent(event: LiveEvent, api: BoostedAp
   if (!selectedEvent) return undefined;
   const data = eventData(event);
 
+  if (selectedEvent === "agentMessage" && event.topic === "group.attention") {
+    if (typeof data.groupId !== "string" || typeof data.content !== "string") return undefined;
+    return { event: selectedEvent, title: String(data.senderName ?? "Group"), body: data.content.slice(0, 240),
+      tag: "boosted:" + api.profileId + ":group:" + String(data.id ?? data.groupId),
+      data: { kind: "group", id: data.groupId, url: notificationUrl("group", data.groupId) } };
+  }
   if (selectedEvent === "agentMessage") {
     if (typeof data.agentId !== "string" || typeof data.content !== "string") return undefined;
     return { event: selectedEvent, title: String(data.assistantName ?? "Agent"), body: data.content.slice(0, 240),

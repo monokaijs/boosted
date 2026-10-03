@@ -1,23 +1,27 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { createPortal } from "react-dom";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAppStore } from "@/lib/store";
 import type { CodexChat, Project } from "@/lib/types";
+import { CreateAgentDialog } from "@/features/agents/components/session/create-agent-dialog";
+import type { SessionShellState } from "@/features/agents/components/session/session-shell";
 
 const apiMock = vi.hoisted(() => {
   const values = new Map<string, string>();
   vi.stubGlobal("localStorage", { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key), clear: () => values.clear() });
-  return { projects: vi.fn(), codexChats: vi.fn(), logout: vi.fn(), agents: vi.fn() };
+  return { projects: vi.fn(), codexChats: vi.fn(), logout: vi.fn(), agents: vi.fn(), featureRequest: vi.fn(), createAgent: vi.fn() };
 });
 vi.mock("@/lib/api", () => ({ api: apiMock, setToken: vi.fn() }));
-vi.mock("@/lib/api-context", () => ({ useBoostedApiClient: () => ({ profileId: "test-machine" }) }));
+vi.mock("@/lib/api-context", () => ({ useBoostedApiClient: () => ({ profileId: "test-machine", featureRequest: apiMock.featureRequest, projects: apiMock.projects }) }));
 vi.mock("@/features/agents/lib/api-client", () => ({ apiClient: { assistant: { list: apiMock.agents } } }));
 vi.mock("@/hooks/use-live-events", () => ({ useLiveEvents() {} }));
 vi.mock("@/hooks/use-notification-navigation", () => ({ useNotificationNavigation() {} }));
 vi.mock("@/lib/updater", () => ({ useAppUpdateState: () => ({ phase: "idle" }), formatUpdateProgress: () => undefined }));
-vi.mock("@/features/agents/agents-panel", () => ({ openProvidersEvent: "boosted:open-providers", AgentsPanel: ({ selectedId, selectAgent }: { selectedId: string; selectAgent(id: string): void }) => <><p>Agent conversation {selectedId}</p><button onClick={() => selectAgent("pock")}>Switch to Pock</button></> }));
-vi.mock("@/components/settings-page", () => ({ SettingsPage: () => <h1>Settings page content</h1> }));
+vi.mock("@/features/agents/agents-panel", () => ({ openProvidersEvent: "boosted:open-providers", AgentsPanel: ({ selectedId, selectAgent, createAgentOpen, onCreateAgentOpenChange }: { selectedId: string; selectAgent(id: string): void; createAgentOpen: boolean; onCreateAgentOpenChange(open: boolean): void }) => <><p>Agent conversation {selectedId}</p><button onClick={() => selectAgent("pock")}>Switch to Pock</button><CreateAgentDialog shell={{ createAgent: apiMock.createAgent } as unknown as SessionShellState} open={createAgentOpen} onOpenChange={onCreateAgentOpenChange} /></> }));
+vi.mock("@/features/groups/group-panel", () => ({ GroupPanel: ({ groupId, headerTarget }: { groupId: string; headerTarget?: HTMLElement | null }) => <>{headerTarget && createPortal(<h1>Build team</h1>, headerTarget)}<p>Group conversation {groupId}</p></> }));
+vi.mock("@/components/settings-page", () => ({ SettingsPage: ({ onClose }: { onClose(): void }) => <><h1>Settings page content</h1><button onClick={onClose}>Close settings</button></> }));
 vi.mock("@/components/create-dialogs", () => ({ ForcePasswordDialog: () => null, NewTaskDialog: () => null, OpenProjectDialog: () => null }));
 vi.mock("@/components/machine-manager", () => ({ MachineSwitcher: () => <span>Test machine</span> }));
 vi.mock("@/components/panels/chat-panel", () => ({ NewChatPanel: () => <h1>Start a conversation</h1>, TaskPanel: () => <p>Task detail content</p> }));
@@ -47,11 +51,14 @@ function goTo(name: string) { fireEvent.click(within(screen.getByRole("navigatio
 afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubGlobal("innerWidth", 1024);
   window.history.replaceState(null, "", "/");
   localStorage.clear();
-  useAppStore.setState({ selectedProjectId: "alpha", selectedCodexChatId: undefined, selectedTaskId: undefined, openFilePath: undefined, taskDrawerOpen: false, activeMachineId: undefined });
+  useAppStore.setState({ selectedProjectId: "alpha", selectedGroupId: undefined, selectedCodexChatId: undefined, selectedTaskId: undefined, openFilePath: undefined, taskDrawerOpen: false, activeMachineId: undefined });
   apiMock.projects.mockResolvedValue(projects);
   apiMock.codexChats.mockResolvedValue([...chats, chats[0]]);
+  apiMock.featureRequest.mockResolvedValue([]);
+  apiMock.createAgent.mockResolvedValue(undefined);
   apiMock.agents.mockResolvedValue([
     { id: "pock", profile: { name: "Pock" } },
     { id: "sage", profile: { name: "Sage", avatar: "/sage.png" } },
@@ -59,34 +66,114 @@ beforeEach(() => {
 });
 
 describe("page navigation and conversations", () => {
-  it("opens agents from the mobile bar, switches agents, and returns to the current chat", async () => {
+  it("keeps navigation clickable while the agent selector is open", async () => {
+    renderShell();
+    fireEvent.click(await within(await screen.findByRole("navigation", { name: "Agents" })).findByRole("button", { name: "Pock" }));
+    const trigger = screen.getByRole("button", { name: "Switch agent" });
+    expect(fireEvent.mouseDown(trigger, { button: 0 })).toBe(false);
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    const sage = await screen.findByRole("menuitem", { name: "Sage" });
+    expect(fireEvent.mouseDown(sage, { button: 0 })).toBe(false);
+    expect(document.body.style.pointerEvents).not.toBe("none");
+
+    const settings = within(screen.getByRole("navigation", { name: "Primary navigation" })).getByRole("button", { name: "Settings" });
+    fireEvent.pointerDown(settings, { button: 0, ctrlKey: false, pointerType: "mouse" });
+    fireEvent.click(settings);
+    expect(await screen.findByText("Settings page content")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    expect(document.body.style.pointerEvents).not.toBe("none");
+  });
+
+  it("opens mobile Chats as a page and gives agent and chat conversations the full screen", async () => {
+    vi.stubGlobal("innerWidth", 393);
     localStorage.setItem("boosted.selected-agent.test-machine", "sage");
     useAppStore.setState({ selectedCodexChatId: "old" });
     renderShell();
-    await screen.findByRole("button", { name: "Expand Alpha" });
     const mobile = within(screen.getByRole("navigation", { name: "Mobile navigation" }));
-    expect(mobile.getAllByRole("button")[0]).toHaveAccessibleName("Agents");
-    goTo("Settings");
-    fireEvent.click(mobile.getByRole("button", { name: "Agents" }));
+    expect(mobile.getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Chats", "Scheduled", "Projects", "Tasks", "Settings"]);
+    expect(screen.getByRole("heading", { name: "Chats" })).toBeInTheDocument();
+    expect(screen.queryByText("Conversation old")).not.toBeInTheDocument();
+    fireEvent.click(mobile.getByRole("button", { name: "Settings" }));
+    expect(await screen.findByText("Settings page content")).toBeInTheDocument();
+    fireEvent.click(mobile.getByRole("button", { name: "Chats" }));
+    fireEvent.click(await within(screen.getByRole("navigation", { name: "Agents" })).findByRole("button", { name: "Sage" }));
     expect(await screen.findByText("Agent conversation sage")).toBeInTheDocument();
-    expect(mobile.getByRole("button", { name: "Agents" })).toHaveAttribute("aria-current", "page");
-    expect(mobile.getByRole("button", { name: "Home" })).not.toHaveAttribute("aria-current");
-    expect(screen.getByRole("region", { name: "Agents page" })).toBeInTheDocument();
+    expect(screen.getByRole("main")).toHaveAttribute("data-mobile-chat-open", "true");
+    expect(screen.queryByRole("navigation", { name: "Mobile navigation" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "Navigation and chats" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Test machine")).not.toBeVisible();
     fireEvent.pointerDown(screen.getByRole("button", { name: "Switch agent" }), { button: 0, ctrlKey: false });
     fireEvent.click(await screen.findByRole("menuitem", { name: "Pock" }));
     expect(await screen.findByText("Agent conversation pock")).toBeInTheDocument();
     expect(localStorage.getItem("boosted.selected-agent.test-machine")).toBe("pock");
-    fireEvent.click(mobile.getByRole("button", { name: "Home" }));
+    fireEvent.click(screen.getByRole("button", { name: "Back to chats" }));
+    expect(screen.getByRole("navigation", { name: "Mobile navigation" })).toBeInTheDocument();
+    expect(screen.getByRole("main")).toHaveAttribute("data-mobile-chat-open", "false");
+    fireEvent.click(await within(screen.getByRole("region", { name: "Recent" })).findByRole("button", { name: "Older alpha chat" }));
     expect(await screen.findByText("Conversation old")).toBeInTheDocument();
-    expect(mobile.getByRole("button", { name: "Agents" })).not.toHaveAttribute("aria-current");
-    expect(mobile.getByRole("button", { name: "Home" })).toHaveAttribute("aria-current", "page");
+    const back = screen.getByRole("button", { name: "Back to chats" });
+    expect(back.nextElementSibling).toHaveTextContent("Older alpha chat");
+    expect(screen.getByRole("main")).toHaveAttribute("data-mobile-chat-open", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Back to chats" }));
+    expect(mobile.getByRole("button", { name: "Chats" })).toHaveAttribute("aria-current", "page");
+    expect(useAppStore.getState().selectedCodexChatId).toBe("old");
+  });
+
+  it("keeps mobile tabs available on each page and opens new chats full screen", async () => {
+    vi.stubGlobal("innerWidth", 393);
+    renderShell();
+    const mobile = within(screen.getByRole("navigation", { name: "Mobile navigation" }));
+    for (const [tab, content] of [["Scheduled", "Scheduled work is coming"], ["Projects", "A home for your code and conversations."], ["Tasks", "Task board content"], ["Settings", "Settings page content"]]) {
+      fireEvent.click(mobile.getByRole("button", { name: tab }));
+      expect(await screen.findByText(content)).toBeInTheDocument();
+      expect(mobile.getByRole("button", { name: tab })).toHaveAttribute("aria-current", "page");
+      expect(screen.queryByRole("complementary", { name: "Navigation and chats" })).not.toBeInTheDocument();
+    }
+    fireEvent.click(mobile.getByRole("button", { name: "Chats" }));
+    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+    expect(screen.getByText("Start a conversation")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Back to chats" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Mobile navigation" })).not.toBeInTheDocument();
+    act(() => { window.history.replaceState(null, "", "/#chats"); window.dispatchEvent(new HashChangeEvent("hashchange")); });
+    expect(screen.getByRole("heading", { name: "Chats" })).toBeInTheDocument();
+    expect(screen.queryByText("Start a conversation")).not.toBeInTheDocument();
+  });
+
+  it("returns to the mobile chat list when closing Settings", async () => {
+    vi.stubGlobal("innerWidth", 393);
+    renderShell();
+    fireEvent.click(within(screen.getByRole("navigation", { name: "Mobile navigation" })).getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    expect(screen.getByRole("heading", { name: "Chats" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Mobile navigation" })).toBeInTheDocument();
+    expect(screen.queryByText("Start a conversation")).not.toBeInTheDocument();
+  });
+
+  it("opens mobile group and notification conversations and restores the desktop layout on resize", async () => {
+    vi.stubGlobal("innerWidth", 393);
+    apiMock.featureRequest.mockResolvedValue([{ id: "team", name: "Build team", memberIds: ["pock", "sage"] }]);
+    renderShell();
+    fireEvent.click(await screen.findByRole("button", { name: "Build team" }));
+    expect(await screen.findByText("Group conversation team")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Back to chats" }).nextElementSibling).toContainElement(screen.getByRole("heading", { name: "Build team" }));
+    expect(screen.getByRole("main")).toHaveAttribute("data-mobile-chat-open", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Back to chats" }));
+    act(() => window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", { detail: { threadId: "new" } })));
+    expect(await screen.findByText("Conversation new")).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Mobile navigation" })).not.toBeInTheDocument();
+    act(() => { vi.stubGlobal("innerWidth", 1200); window.dispatchEvent(new Event("resize")); });
+    expect(screen.getByRole("navigation", { name: "Primary navigation" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "Navigation and chats" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Back to chats" })).not.toBeInTheDocument();
   });
 
   it("opens the chosen agent from another page and keeps the avatar selection in sync", async () => {
     renderShell();
     const agents = await screen.findByRole("navigation", { name: "Agents" });
     const sage = await within(agents).findByRole("button", { name: "Sage" });
-    expect(within(agents).getAllByRole("button")).toHaveLength(2);
+    expect(within(agents).getAllByRole("button")).toHaveLength(3);
+    expect(screen.getByRole("region", { name: "Chats" })).toContainElement(agents);
+    expect(document.querySelector(".navigation-rail")).not.toContainElement(agents);
     expect(sage.querySelector("img")).toHaveAttribute("src", "/sage.png");
     expect(within(agents).getByRole("button", { name: "Pock" })).toHaveTextContent("P");
     expect(screen.getByRole("separator")).toBeInTheDocument();
@@ -104,6 +191,35 @@ describe("page navigation and conversations", () => {
     act(() => window.dispatchEvent(new CustomEvent("boosted:select-agent", { detail: "sage" })));
     expect(await screen.findByText("Agent conversation sage")).toBeInTheDocument();
     expect(sage).toHaveAttribute("aria-current", "page");
+  });
+
+  it("opens agent creation from the chat list even without any existing agents", async () => {
+    apiMock.agents.mockResolvedValue([]);
+    renderShell();
+    fireEvent.click(await screen.findByRole("button", { name: "New agent" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "New agent" }));
+    fireEvent.change(dialog.getByRole("textbox", { name: "Name" }), { target: { value: "Nova" } });
+    fireEvent.click(dialog.getByRole("button", { name: "Create agent" }));
+    await waitFor(() => expect(apiMock.createAgent).toHaveBeenCalledWith({ name: "Nova", personality: undefined }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("shows stacked participant avatars beside group names and only highlights the visible group", async () => {
+    apiMock.featureRequest.mockResolvedValue([{ id: "team", name: "Build team", memberIds: ["pock", "sage"] }]);
+    renderShell();
+    const groups = within(screen.getByRole("region", { name: "Groups" }));
+    const team = await groups.findByRole("button", { name: "Build team" });
+    const participants = within(team).getByRole("img", { name: "Participants: Pock, Sage" });
+    expect(participants.querySelectorAll(".agent-avatar")).toHaveLength(2);
+    expect(participants.querySelector("img")).toHaveAttribute("src", "/sage.png");
+    fireEvent.click(team);
+    expect(await screen.findByText("Group conversation team")).toBeInTheDocument();
+    expect(team).toHaveAttribute("aria-current", "true");
+    goTo("Projects");
+    expect(team).not.toHaveAttribute("aria-current");
+    fireEvent.click(within(screen.getByRole("navigation", { name: "Agents" })).getByRole("button", { name: "Pock" }));
+    expect(await screen.findByText("Agent conversation pock")).toBeInTheDocument();
+    expect(team).not.toHaveAttribute("aria-current");
   });
 
   it("highlights only the visible current chat and clears the highlight on other pages", async () => {

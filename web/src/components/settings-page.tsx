@@ -13,6 +13,8 @@ import { formatDuration, formatExactNumber, formatPercent, formatWindowDuration,
 import { defaultNotificationSettings, notificationEventDefinitions, notificationPermission, readNotificationSettings, requestNotificationPermission, showTestNotification, writeNotificationSettings, type PwaNotificationSettings } from "@/lib/notifications";
 import { useMachineStore } from "@/lib/machines";
 import { useAppStore } from "@/lib/store";
+import { isTauriRuntime } from "@/lib/runtime";
+import { refreshWebApp } from "@/lib/web-update";
 import type { CodexRateLimitWindow, Integration, IntegrationDiscoveryTarget } from "@/lib/types";
 import { checkAndInstallAppUpdate, formatUpdateProgress, refreshAppUpdateAvailability, useAppUpdateState } from "@/lib/updater";
 import { cn, relativeTime } from "@/lib/utils";
@@ -186,12 +188,25 @@ function NotificationSettings() {
 
 export function ApplicationSettings() {
   const update = useAppUpdateState();
+  const [refreshingUi, setRefreshingUi] = useState(false);
+  const [uiUpdateError, setUiUpdateError] = useState<string>();
   const user = useAppStore((state) => state.user);
   const machineId = useMachineStore((state) => state.activeId);
   const isAdmin = user?.role === "admin";
   useEffect(() => { void refreshAppUpdateAvailability(); }, [machineId]);
   const progress = formatUpdateProgress(update);
   const busy = ["checking", "downloading", "installing", "restarting"].includes(update.phase);
+  async function forceUpdateUi() {
+    setRefreshingUi(true);
+    setUiUpdateError(undefined);
+    try {
+      await refreshWebApp();
+    } catch (error) {
+      setUiUpdateError(error instanceof Error ? error.message : "The UI update failed. Try again.");
+    } finally {
+      setRefreshingUi(false);
+    }
+  }
   const status = update.phase === "unsupported"
     ? update.supportReason ?? "This installation requires a manual update."
     : update.phase === "checking"
@@ -212,13 +227,19 @@ export function ApplicationSettings() {
     <SettingsSection title="Software updates" description="One update for the selected machine: the app, backend, and web UI. Boosted restarts and refreshes this window when ready.">
       <SettingsGroup>
         <SettingsRow label="Installed version" description={update.lastCheckedAt ? `Last checked ${relativeTime(update.lastCheckedAt)} ago` : "Updates are checked on this machine."}><code>{update.currentVersion ?? "Reading version…"}</code></SettingsRow>
-        <SettingsRow label="Update Boosted" description="Update the app, backend, and browser UI together."><Button size="sm" disabled={!isAdmin || busy || (!update.supported && update.phase !== "error")} onClick={() => void checkAndInstallAppUpdate()}>{busy ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}{busy ? "Updating…" : "Update Boosted"}</Button></SettingsRow>
+        <SettingsRow label="Update Boosted" description="Update the app, backend, and browser UI together."><Button size="sm" disabled={!isAdmin || busy || refreshingUi || (!update.supported && update.phase !== "error")} onClick={() => void checkAndInstallAppUpdate()}>{busy ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}{busy ? "Updating…" : "Update Boosted"}</Button></SettingsRow>
       </SettingsGroup>
       <div role="status" aria-live="polite" className="settings-note">{status}</div>
       {progress !== undefined && <progress className="settings-progress" aria-label="Update download progress" value={progress} max={100} />}
       {update.error && <p role="alert" className="settings-error">{update.error}</p>}
       <p className="settings-note">{isAdmin ? "Your projects and settings are kept." : "Only an administrator can update Boosted."}</p>
     </SettingsSection>
+    {!isTauriRuntime() && <SettingsSection title="Browser UI" description="Refresh the UI in this browser or installed PWA using the latest version available from its server.">
+      <SettingsGroup>
+        <SettingsRow label="Force update UI" description="Check for a new UI and reload this window. Save any unsent edits first."><Button size="sm" variant="secondary" disabled={refreshingUi || busy} onClick={() => void forceUpdateUi()}>{refreshingUi ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}{refreshingUi ? "Refreshing UI…" : "Force update UI"}</Button></SettingsRow>
+      </SettingsGroup>
+      {uiUpdateError && <p role="alert" className="settings-error">{uiUpdateError}</p>}
+    </SettingsSection>}
   </div>;
 }
 

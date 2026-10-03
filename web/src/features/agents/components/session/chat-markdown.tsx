@@ -1,4 +1,4 @@
-import { createElement, type ComponentPropsWithoutRef } from "react"
+import { createElement, memo, useMemo, type ComponentPropsWithoutRef } from "react"
 import ReactMarkdown, { type Components, defaultUrlTransform } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { cn } from "@/lib/utils"
@@ -11,24 +11,28 @@ type MarkdownContentProps = {
   scopeKey?: string | null
 }
 
-export function MarkdownContent({
+const remarkPlugins = [remarkGfm]
+const urlTransform = (url: string) => localFileLike(url) ? url : defaultUrlTransform(url)
+
+export const MarkdownContent = memo(function MarkdownContent({
   animateChanges,
   compact,
   content,
   openFileLink,
 }: MarkdownContentProps) {
+  const components = useMemo(() => markdownComponents(openFileLink), [openFileLink])
   return (
     <div className={cn("chat-markdown min-w-0 max-w-full text-[13px]", compact && "leading-5", animateChanges && "chat-markdown-streaming")}>
       <ReactMarkdown
-        components={markdownComponents(openFileLink)}
-        remarkPlugins={[remarkGfm]}
-        urlTransform={(url) => localFileLike(url) ? url : defaultUrlTransform(url)}
+        components={components}
+        remarkPlugins={remarkPlugins}
+        urlTransform={urlTransform}
       >
         {content}
       </ReactMarkdown>
     </div>
   )
-}
+})
 
 function markdownComponents(openFileLink?: (href: string) => boolean): Components {
   return {

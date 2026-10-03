@@ -2,13 +2,28 @@ import * as React from "react";
 import * as SelectPrimitive from "@radix-ui/react-select";
 import { Check, ChevronDown, ChevronUp } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger } from "./dropdown-menu";
+
+const selectTriggerStyles = "flex h-8 w-full items-center justify-between gap-2 rounded-md border border-input bg-transparent px-2.5 py-1 text-xs shadow-xs outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&>span]:truncate";
 
 const Select = SelectPrimitive.Root;
 const SelectGroup = SelectPrimitive.Group;
 const SelectValue = SelectPrimitive.Value;
 
 function SelectTrigger({ className, children, ...props }: React.ComponentProps<typeof SelectPrimitive.Trigger>) {
-  return <SelectPrimitive.Trigger className={cn("flex h-8 w-full items-center justify-between gap-2 rounded-md border border-input bg-transparent px-2.5 py-1 text-xs shadow-xs outline-none transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:pointer-events-none disabled:opacity-50 [&>span]:truncate", className)} {...props}>{children}<SelectPrimitive.Icon asChild><ChevronDown className="size-3.5 shrink-0 text-muted-foreground" /></SelectPrimitive.Icon></SelectPrimitive.Trigger>;
+  return <SelectPrimitive.Trigger className={cn(selectTriggerStyles, className)} {...props}>{children}<SelectPrimitive.Icon asChild><ChevronDown className="size-3.5 shrink-0 text-muted-foreground" /></SelectPrimitive.Icon></SelectPrimitive.Trigger>;
+}
+
+function MultiSelect({ value, onValueChange, options, ariaLabel, disabled, className, minSelected = 0 }: {
+  value: string[]; onValueChange(value: string[]): void; options: { value: string; label: string }[];
+  ariaLabel: string; disabled?: boolean; className?: string; minSelected?: number;
+}) {
+  const labels = value.map((selected) => options.find((option) => option.value === selected)?.label ?? selected).join(', ');
+  return <DropdownMenu><DropdownMenuTrigger asChild><button type="button" aria-label={ariaLabel} disabled={disabled} className={cn(selectTriggerStyles, className)} title={labels}>
+    <span>{labels || 'Select roles'}</span><ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+  </button></DropdownMenuTrigger><DropdownMenuContent className="z-[70]" align="end">
+    {options.map((option) => <DropdownMenuCheckboxItem key={option.value} checked={value.includes(option.value)} disabled={value.includes(option.value) && value.length <= minSelected} onSelect={(event) => event.preventDefault()} onCheckedChange={(checked) => onValueChange(checked ? [...value, option.value] : value.filter((selected) => selected !== option.value))}>{option.label}</DropdownMenuCheckboxItem>)}
+  </DropdownMenuContent></DropdownMenu>;
 }
 
 function SelectScrollUpButton({ className, ...props }: React.ComponentProps<typeof SelectPrimitive.ScrollUpButton>) {
@@ -35,4 +50,4 @@ function SelectSeparator({ className, ...props }: React.ComponentProps<typeof Se
   return <SelectPrimitive.Separator className={cn("-mx-1 my-1 h-px bg-border", className)} {...props} />;
 }
 
-export { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue };
+export { MultiSelect, Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue };

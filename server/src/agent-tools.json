@@ -1,25 +1,8 @@
 [
   {
     "type": "function",
-    "name": "set_typing",
-    "description": "Show or clear your typing indicator in this agent conversation. Use true only when composing a message. Sending a message or ending the turn clears it automatically.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "typing": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "typing"
-      ],
-      "additionalProperties": false
-    }
-  },
-  {
-    "type": "function",
     "name": "send_agent_message",
-    "description": "Send one short message to the user in this agent conversation immediately. First call set_typing(true) in a separate tool call before composing each message; sending clears typing. Call again for another separate bubble when useful. Prefer 1\u20133 sentences per message; send results and questions through this tool, not a long final response. This does not send instructions to a coding chat.",
+    "description": "Send one short, natural message to the user immediately, as soon as you have a useful answer, update or question. Focus on the task and outcome. Omit model names, reasoning settings, tool/command names and internal session details unless requested or needed to resolve a blocker. No preparatory tool call is needed. Call again for another separate bubble when useful. Prefer 1\u20133 sentences per message; send results and questions through this tool, not a long final response. This does not send instructions to a coding chat.",
     "inputSchema": {
       "type": "object",
       "properties": {

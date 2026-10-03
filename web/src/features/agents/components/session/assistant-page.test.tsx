@@ -4,9 +4,10 @@ import type { AssistantState } from "@/features/agents/types/assistant"
 import type { SessionShellState } from "./session-shell"
 
 const apiMock = vi.hoisted(() => ({ read: vi.fn(), send: vi.fn(), accounts: vi.fn() }))
+const renderWork = vi.hoisted(() => ({ markdown: vi.fn(), profile: vi.fn() }))
 vi.mock("@/features/agents/lib/api-client", () => ({ apiClient: { assistant: { read: apiMock.read, send: apiMock.send }, providerAccounts: { list: apiMock.accounts } } }))
-vi.mock("./assistant-profile-panel", () => ({ AssistantProfilePanel: () => null }))
-vi.mock("./chat-markdown", () => ({ MarkdownContent: ({ content }: { content: string }) => <p>{content}</p> }))
+vi.mock("./assistant-profile-panel", () => ({ AssistantProfilePanel: () => { renderWork.profile(); return null } }))
+vi.mock("./chat-markdown", () => ({ MarkdownContent: ({ content }: { content: string }) => { renderWork.markdown(content); return <p>{content}</p> } }))
 
 import { AssistantPage } from "./assistant-page"
 
@@ -44,6 +45,67 @@ async function renderConversation() {
   Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 })
   return { ...result, scroller }
 }
+
+it("keeps typing independent of the conversation history and profile", async () => {
+  apiMock.read.mockResolvedValue({ ...initial, messages: Array.from({ length: 150 }, (_, index) => ({
+    id: `history-${index}`, role: "assistant", content: `Reply ${index}`, createdAt: initial.createdAt,
+  })) })
+  const { unmount } = render(<AssistantPage shell={shell} agentId="pock" />)
+  await screen.findByText("Reply 149")
+  const input = screen.getByRole("textbox", { name: "Message Pock" })
+  const markdownRenders = renderWork.markdown.mock.calls.length
+  const profileRenders = renderWork.profile.mock.calls.length
+  for (let index = 1; index <= 10; index++) fireEvent.change(input, { target: { value: "x".repeat(index) } })
+  expect(input).toHaveValue("xxxxxxxxxx")
+  expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled()
+  expect(renderWork.markdown).toHaveBeenCalledTimes(markdownRenders)
+  expect(renderWork.profile).toHaveBeenCalledTimes(profileRenders)
+  expect(apiMock.send).not.toHaveBeenCalled()
+  unmount()
+})
+
+it("preserves the next draft through streamed replies, send failures, and retries", async () => {
+  apiMock.send.mockRejectedValueOnce(new Error("Offline"))
+  await renderConversation()
+  const input = screen.getByRole("textbox", { name: "Message Pock" })
+  fireEvent.change(input, { target: { value: "First message" } })
+  fireEvent.keyDown(input, { key: "Enter" })
+  expect(input).toHaveValue("")
+  fireEvent.change(input, { target: { value: "Next draft" } })
+  await screen.findByText("Not sent")
+  act(() => window.dispatchEvent(new CustomEvent("boosted:assistant-updated", { detail: {
+    ...initial, updatedAt: "2026-10-02T00:00:02.000Z",
+    messages: [...initial.messages, { id: "reply", role: "assistant", content: "Live reply", createdAt: "2026-10-02T00:00:02.000Z" }],
+  } })))
+  expect(input).toHaveValue("Next draft")
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry" })))
+  expect(apiMock.send).toHaveBeenCalledTimes(2)
+  expect(apiMock.send.mock.calls[1][1]).toEqual(apiMock.send.mock.calls[0][1])
+  expect(input).toHaveValue("Next draft")
+})
+
+it("shows only dots for runtime activity and clears them after sending or stopping", async () => {
+  apiMock.read.mockResolvedValue({ ...initial, status: "running", activity: "thinking" })
+  const { scroller } = await renderConversation()
+  expect(screen.getByRole("status", { name: "Pock is typing" })).toHaveTextContent(/^•••$/)
+
+  let revision = 1
+  const update = (activity: AssistantState["activity"], status: AssistantState["status"] = "running") => {
+    act(() => window.dispatchEvent(new CustomEvent("boosted:assistant-updated", { detail: {
+      ...initial, status, activity, updatedAt: `2026-10-02T00:00:0${++revision}.000Z`,
+    } })))
+  }
+  update("working")
+  expect(screen.getByRole("status", { name: "Pock is typing" })).toHaveTextContent(/^•••$/)
+  expect(scroller.scrollTop).toBe(1000)
+  update("responding")
+  expect(screen.getByRole("status", { name: "Pock is typing" })).toHaveTextContent(/^•••$/)
+  update(null)
+  expect(screen.queryByRole("status")).not.toBeInTheDocument()
+  update("thinking")
+  update(null, "idle")
+  expect(screen.queryByRole("status")).not.toBeInTheDocument()
+})
 
 describe("agent conversation scrolling", () => {
   it("follows replies and keyboard resizing inside the transcript without scrolling ancestors", async () => {
@@ -88,27 +150,37 @@ describe("agent conversation scrolling", () => {
 it("collapses adjacent tools into a count and preserves expansion as new calls arrive", async () => {
   const receipts: AssistantState["messages"] = [
     { id: "command", role: "assistant", content: "", createdAt: "2026-10-02T00:00:02.000Z", actions: [{ id: "command-action", tool: "commandExecution", arguments: { command: "glab issue list" }, status: "failed" }] },
-    { id: "lookup", role: "assistant", content: "", createdAt: "2026-10-02T00:00:03.000Z", actions: [{ id: "lookup-action", tool: "mcpToolCall", arguments: {}, status: "completed" }] },
+    { id: "edit", role: "assistant", content: "", createdAt: "2026-10-02T00:00:03.000Z", actions: [{ id: "edit-action", tool: "fileChange", arguments: {}, status: "completed" }] },
   ]
   apiMock.read.mockResolvedValue({ ...initial, messages: [...initial.messages, ...receipts] })
   await renderConversation()
   const toggle = screen.getByRole("button", { name: "2 tools" })
+  expect(toggle).toHaveTextContent(/^2$/)
   expect(toggle).toHaveAttribute("aria-expanded", "false")
+  const panel = document.getElementById(toggle.getAttribute("aria-controls")!)!
+  expect(panel).toHaveAttribute("aria-hidden", "true")
+  expect(panel).toHaveAttribute("inert")
   expect(screen.queryByRole("img", { name: "Failed" })).not.toBeInTheDocument()
   fireEvent.click(toggle)
   expect(toggle).toHaveAttribute("aria-expanded", "true")
+  expect(panel).toHaveAttribute("data-expanded", "true")
+  expect(panel).toHaveAttribute("aria-hidden", "false")
+  expect(panel).not.toHaveAttribute("inert")
   expect(screen.getByRole("img", { name: "Failed" })).toBeInTheDocument()
   expect(screen.getByRole("img", { name: "Completed" })).toBeInTheDocument()
   expect(screen.getByText("Run command").closest("summary")).toHaveTextContent(/^Run command$/)
   act(() => window.dispatchEvent(new CustomEvent("boosted:assistant-updated", { detail: {
     ...initial, updatedAt: "2026-10-02T00:00:04.000Z", messages: [...initial.messages, ...receipts,
-      { id: "search", role: "assistant", content: "", createdAt: "2026-10-02T00:00:04.000Z", actions: [{ id: "search-action", tool: "webSearch", arguments: {}, status: "running" }] },
+      { id: "avatar", role: "assistant", content: "", createdAt: "2026-10-02T00:00:04.000Z", actions: [{ id: "avatar-action", tool: "generate_avatar", arguments: {}, status: "running" }] },
     ],
   } })))
   expect(screen.getByRole("button", { name: "3 tools" })).toBe(toggle)
+  expect(toggle).toHaveTextContent(/^3$/)
   expect(toggle).toHaveAttribute("aria-expanded", "true")
   expect(screen.getByRole("img", { name: "Running" })).toBeInTheDocument()
   fireEvent.click(toggle)
   expect(toggle).toHaveAttribute("aria-expanded", "false")
+  expect(panel).toHaveAttribute("data-expanded", "false")
+  expect(panel).toHaveAttribute("inert")
   expect(screen.queryByRole("img", { name: "Running" })).not.toBeInTheDocument()
 })

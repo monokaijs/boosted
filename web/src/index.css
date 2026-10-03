@@ -100,6 +100,29 @@ body {
   user-select: none;
 }
 
+.ios-status-bar-background {
+  display: none;
+}
+
+@supports (-webkit-touch-callout: none) {
+  @media (max-width: 900px) and (display-mode: standalone) {
+    .ios-status-bar-background {
+      /* iOS 27 samples this real fixed element to suppress its status-bar blur.
+         Clip the paint to empty text so it cannot cover the header or intercept taps.
+         Keep it outside #root, which moves with the keyboard's visual viewport. */
+      display: block;
+      position: fixed;
+      inset: 0 0 auto;
+      height: 11px;
+      z-index: 2147483647;
+      pointer-events: none;
+      background-color: var(--mobile-status-bar-background, var(--canvas));
+      -webkit-background-clip: text;
+      background-clip: text;
+    }
+  }
+}
+
 :where(
   input,
   textarea,
@@ -107,6 +130,7 @@ body {
   [contenteditable]:not([contenteditable="false"]),
   .selectable-text,
   .aui-markdown,
+  .chat-markdown,
   pre,
   .monaco-editor.enable-user-select
 ) {
@@ -621,6 +645,19 @@ select {
 }
 
 @media (max-width: 900px) {
+  .dialog-content {
+    --dialog-available-height: calc(var(--app-viewport-height, 100dvh) - max(8px, env(safe-area-inset-top)) - max(8px, var(--safe-area-bottom)));
+    --dialog-bottom: calc(100% - var(--app-viewport-top, 0px) - var(--app-viewport-height, 100%) + max(8px, var(--safe-area-bottom)));
+    top: calc(var(--app-viewport-top, 0px) + var(--app-viewport-height, 100dvh) / 2);
+    max-height: var(--dialog-available-height);
+    overscroll-behavior: contain;
+    scroll-padding-block: 12px;
+  }
+
+  :root[data-keyboard-open] .dialog-footer {
+    flex-direction: row;
+  }
+
   html {
     background: var(--canvas);
     overscroll-behavior: none;
@@ -878,16 +915,16 @@ select {
 
   .dialog-content {
     top: auto;
-    bottom: max(8px, var(--safe-area-bottom));
+    bottom: var(--dialog-bottom);
     width: calc(100% - 16px);
-    max-height: calc(100dvh - max(8px, env(safe-area-inset-top)) - max(8px, var(--safe-area-bottom)));
+    max-height: var(--dialog-available-height);
     --tw-translate-y: 0px;
     transform: none;
     gap: 12px;
     overscroll-behavior: contain;
   }
 
-  .dialog-content:not(.settings-dialog):not(.task-create-dialog) {
+  .dialog-content:not(.settings-dialog):not(.task-create-dialog):not(.group-details-panel):not(.group-editor) {
     padding: 16px;
   }
 
@@ -911,7 +948,7 @@ select {
   }
 
   .settings-dialog {
-    height: calc(100dvh - max(8px, env(safe-area-inset-top)) - max(8px, var(--safe-area-bottom)));
+    height: var(--dialog-available-height);
   }
 
   .settings-layout {

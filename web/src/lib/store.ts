@@ -10,6 +10,7 @@ function readMachineState(machineId?: string) {
   return {
     selectedProjectId: localStorage.getItem(key(machineId, "boosted.project")) ?? undefined,
     selectedTaskId: localStorage.getItem(key(machineId, "boosted.task")) ?? undefined,
+    selectedGroupId: localStorage.getItem(key(machineId, "boosted.group")) ?? undefined,
     selectedCodexChatId: localStorage.getItem(key(machineId, "boosted.codexChat")) ?? undefined,
     openFilePath: undefined as string | undefined,
   };
@@ -30,6 +31,7 @@ type AppStore = ReturnType<typeof readMachineState> & {
   selectProject: (project?: Project) => void;
   selectTask: (task?: Task) => void;
   selectCodexChat: (id?: string) => void;
+  selectGroup: (id?: string) => void;
   openFile: (path?: string) => void;
   setTaskDrawerOpen: (open: boolean) => void;
 };
@@ -55,14 +57,21 @@ export const useAppStore = create<AppStore>((set, get) => ({
     if (task) {
       setOptional(state.activeMachineId, "boosted.project", task.projectId);
       setOptional(state.activeMachineId, "boosted.codexChat");
+      setOptional(state.activeMachineId, "boosted.group");
     }
-    set({ selectedTaskId: task?.id, selectedProjectId: task?.projectId ?? state.selectedProjectId, ...(task ? { selectedCodexChatId: undefined } : {}), openFilePath: undefined });
+    set({ selectedTaskId: task?.id, selectedProjectId: task?.projectId ?? state.selectedProjectId, ...(task ? { selectedGroupId: undefined, selectedCodexChatId: undefined } : {}), openFilePath: undefined });
+  },
+  selectGroup: (id) => {
+    const state = get();
+    setOptional(state.activeMachineId, "boosted.group", id);
+    if (id) { setOptional(state.activeMachineId, "boosted.codexChat"); setOptional(state.activeMachineId, "boosted.task"); }
+    set({ selectedGroupId: id, ...(id ? { selectedCodexChatId: undefined, selectedTaskId: undefined, openFilePath: undefined } : {}) });
   },
   selectCodexChat: (id) => {
     const state = get();
     setOptional(state.activeMachineId, "boosted.codexChat", id);
-    if (id) setOptional(state.activeMachineId, "boosted.task");
-    set({ selectedCodexChatId: id, ...(id ? { selectedTaskId: undefined, openFilePath: undefined } : {}) });
+    if (id) { setOptional(state.activeMachineId, "boosted.task"); setOptional(state.activeMachineId, "boosted.group"); }
+    set({ selectedCodexChatId: id, ...(id ? { selectedGroupId: undefined, selectedTaskId: undefined, openFilePath: undefined } : {}) });
   },
   openFile: (openFilePath) => set({ openFilePath }),
   setTaskDrawerOpen: (taskDrawerOpen) => set({ taskDrawerOpen }),

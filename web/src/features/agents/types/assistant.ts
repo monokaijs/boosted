@@ -65,7 +65,8 @@ export type AssistantState = {
   profile: AssistantProfile
   messages: AssistantMessage[]
   status: "idle" | "running"
-  typing?: boolean
+  activeGroupId?: string | null
+  activity?: "thinking" | "working" | "responding" | null
   followUps?: AssistantFollowUp[]
   timeZone?: string
   accountId: string | null

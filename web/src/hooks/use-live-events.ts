@@ -19,11 +19,15 @@ export function useLiveEvents() {
       if (disposed || !getToken()) return;
       const connection = new WebSocket(api.webSocket("/ws"));
       socket = connection;
-      connection.addEventListener("open", () => connection.send(JSON.stringify({ type: "authenticate", token: getToken() })));
+      connection.addEventListener("open", () => {
+        connection.send(JSON.stringify({ type: "authenticate", token: getToken() }));
+        void queryClient.invalidateQueries({ queryKey: ["groups"] });
+      });
       connection.addEventListener("message", (message) => {
         try {
           const event = JSON.parse(message.data) as LiveEvent;
           void notifyForLiveEvent(event, api);
+          if (event.topic.startsWith("group.")) void queryClient.invalidateQueries({ queryKey: ["groups"] });
           if (event.topic === "assistant.updated") {
             window.dispatchEvent(new CustomEvent("boosted:assistant-updated", { detail: event.data }));
           }

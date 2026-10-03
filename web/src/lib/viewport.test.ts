@@ -8,6 +8,7 @@ afterEach(() => {
   stop = undefined;
   document.body.replaceChildren();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
@@ -103,6 +104,120 @@ describe("mobile viewport", () => {
     flush();
     expect(document.documentElement.style.getPropertyValue("--app-viewport-height")).toBe("460px");
     expect(document.documentElement.hasAttribute("data-keyboard-open")).toBe(true);
+  });
+
+  it("preserves keyboard panning when Safari also shrinks innerHeight", () => {
+    const viewport = setup();
+    const input = document.createElement("textarea");
+    document.body.append(input);
+    input.focus();
+    vi.stubGlobal("innerHeight", 460);
+    viewport.height = 460;
+    viewport.offsetTop = 240;
+    viewport.dispatchEvent(new Event("resize"));
+    flush();
+    const root = document.documentElement;
+    expect(root.style.getPropertyValue("--app-viewport-height")).toBe("460px");
+    expect(root.style.getPropertyValue("--app-viewport-top")).toBe("240px");
+
+    // The offset can lag behind the height during the closing animation.
+    input.blur();
+    vi.stubGlobal("innerHeight", 730);
+    viewport.height = 730;
+    viewport.dispatchEvent(new Event("resize"));
+    flush();
+    expect(root.style.getPropertyValue("--app-viewport-top")).toBe("50px");
+  });
+
+  it("clears iOS document scrolling without scrolling the message list", () => {
+    const viewport = setup();
+    const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    const messages = document.createElement("div");
+    messages.scrollTop = 180;
+    const input = document.createElement("textarea");
+    document.body.append(messages, input);
+    input.focus();
+    viewport.height = 460;
+    vi.stubGlobal("scrollY", 120);
+    viewport.dispatchEvent(new Event("resize"));
+    flush();
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "instant" });
+    expect(messages.scrollTop).toBe(180);
+
+    scrollTo.mockClear();
+    vi.stubGlobal("scrollY", 0);
+    viewport.dispatchEvent(new Event("scroll"));
+    flush();
+    expect(scrollTo).not.toHaveBeenCalled();
+
+    input.blur();
+    vi.stubGlobal("scrollY", 34);
+    viewport.height = 780;
+    viewport.dispatchEvent(new Event("resize"));
+    flush();
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "instant" });
+    expect(document.documentElement.hasAttribute("data-keyboard-open")).toBe(false);
+  });
+
+  it("leaves document scrolling alone at rest and on desktop", () => {
+    const viewport = setup();
+    const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    vi.stubGlobal("scrollY", 120);
+    window.dispatchEvent(new Event("scroll"));
+    flush();
+    expect(scrollTo).not.toHaveBeenCalled();
+
+    vi.stubGlobal("innerWidth", 1200);
+    const input = document.createElement("textarea");
+    document.body.append(input);
+    input.focus();
+    viewport.height = 460;
+    viewport.dispatchEvent(new Event("resize"));
+    flush();
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it("reveals a dialog field in its own scroll container when the keyboard opens", () => {
+    const viewport = setup();
+    const dialog = document.createElement("div");
+    dialog.className = "dialog-content";
+    const body = document.createElement("div");
+    body.style.overflowY = "auto";
+    Object.defineProperties(body, { scrollHeight: { value: 800 }, clientHeight: { value: 200 } });
+    body.getBoundingClientRect = () => ({ top: 100, bottom: 300 } as DOMRect);
+    const input = document.createElement("textarea");
+    input.getBoundingClientRect = () => ({ top: 330, bottom: 390, height: 60 } as DOMRect);
+    body.append(input);
+    dialog.append(body);
+    document.body.append(dialog);
+    input.focus();
+    viewport.height = 460;
+    viewport.dispatchEvent(new Event("resize"));
+    flush();
+    expect(body.scrollTop).toBe(102);
+
+    // The same focused field can be above the visible body after panning.
+    input.getBoundingClientRect = () => ({ top: 90, bottom: 150, height: 60 } as DOMRect);
+    viewport.offsetTop = 40;
+    viewport.dispatchEvent(new Event("scroll"));
+    flush();
+    expect(body.scrollTop).toBe(80);
+  });
+
+  it("does not scroll the conversation while tracking a focused composer", () => {
+    const viewport = setup();
+    const conversation = document.createElement("div");
+    conversation.style.overflowY = "auto";
+    Object.defineProperties(conversation, { scrollHeight: { value: 800 }, clientHeight: { value: 200 } });
+    conversation.scrollTop = 180;
+    const input = document.createElement("textarea");
+    conversation.append(input);
+    document.body.append(conversation);
+    input.focus();
+    viewport.height = 460;
+    viewport.dispatchEvent(new Event("resize"));
+    flush();
+    expect(conversation.scrollTop).toBe(180);
   });
 
   it("uses the resting visual height rather than mistaking a stale iOS inset for a keyboard", () => {

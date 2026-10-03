@@ -1,4 +1,5 @@
 import type { AssistantAction, AssistantMessage } from "@/features/agents/types/assistant"
+import { isChatActionVisible } from "./assistant-actions"
 
 export function assistantMessageLayout<Message extends AssistantMessage>(messages: Message[]) {
   return messages.map((message, index) => {
@@ -23,10 +24,15 @@ type ConversationItem<Message extends AssistantMessage> = ReturnType<typeof assi
 )
 
 export function assistantConversationLayout<Message extends AssistantMessage>(messages: Message[]) {
+  const visibleMessages = messages.flatMap((message) => {
+    const actions = message.actions?.filter(isChatActionVisible)
+    if (message.role === "assistant" && !message.content.trim() && !message.attachments?.length && message.actions?.length && !actions?.length) return []
+    return [actions && actions.length !== message.actions?.length ? { ...message, actions } : message]
+  })
   const items: ConversationItem<Message>[] = []
-  for (const entry of assistantMessageLayout(messages)) {
+  for (const entry of assistantMessageLayout(visibleMessages)) {
     const { message } = entry
-    const toolsOnly = message.role === "assistant" && !message.content && !message.attachments?.length && message.actions?.length
+    const toolsOnly = message.role === "assistant" && !message.content.trim() && !message.attachments?.length && message.actions?.length
     const previous = items.at(-1)
     if (toolsOnly && previous?.type === "tools" && !entry.startGroup && previous.message.assistantName === message.assistantName) {
       previous.actions.push(...message.actions!)

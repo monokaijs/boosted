@@ -45,6 +45,13 @@ impl ProviderManager {
             .or_default()
             .clone()
     }
+    pub(crate) async fn agent_client(&self, home: &Path) -> AppResult<CodexClient> {
+        #[cfg(test)]
+        if let Some(program) = &self.test_program {
+            return CodexClient::test_process_with_home(program.clone(), Some(home), true).await;
+        }
+        CodexClient::for_account(home, true).await
+    }
     pub async fn client(&self, db: &Database, id: &str) -> AppResult<CodexClient> {
         let account = document(db, "accounts", id).await?;
         if account["providerId"] != "codex" {

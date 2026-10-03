@@ -11,6 +11,7 @@ export type AppPage = typeof destinations[number]["id"];
 
 export function pageFromHash(): AppPage {
   const id = window.location.hash.slice(1);
+  if (id === "chats") return "home";
   return destinations.find((page) => page.id === id)?.id ?? "home";
 }
 

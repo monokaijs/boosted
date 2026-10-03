@@ -24,6 +24,19 @@
   max-height: calc(100dvh - 32px - var(--safe-area-inset-top, 0px) - var(--safe-area-inset-bottom, 0px));
 }
 
+@media (max-width: 900px) {
+  .assistant-profile-panel { max-height: var(--dialog-available-height); }
+
+  .assistant-identity,
+  .assistant-identity-backdrop {
+    display: none;
+  }
+
+  .assistant-conversation-scroll {
+    padding-top: 16px;
+  }
+}
+
 .assistant-message-reply {
   background-color: var(--assistant-message-background, var(--card));
 }
@@ -56,19 +69,23 @@
   display: grid;
   grid-template-rows: 0fr;
   opacity: 0;
+  filter: blur(6px);
   transform: translateY(-4px);
-  transition: grid-template-rows 220ms ease, opacity 180ms ease, transform 220ms ease;
+  transition: grid-template-rows 220ms ease, opacity 180ms ease, filter 220ms ease, transform 220ms ease;
 }
 
 .assistant-tool-reveal[data-expanded="true"] {
   grid-template-rows: 1fr;
   opacity: 1;
+  filter: blur(0);
   transform: translateY(0);
 }
 
 @media (prefers-reduced-motion: reduce) {
   .assistant-tool-reveal {
     transition: none;
+    filter: none;
+    transform: none;
   }
 }
 

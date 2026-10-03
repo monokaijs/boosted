@@ -9,6 +9,8 @@ mod dev_web;
 mod error;
 mod files;
 mod git;
+mod group_models;
+mod groups;
 mod integrations;
 mod models;
 mod process;
@@ -16,34 +18,34 @@ mod providers;
 pub mod updater;
 
 use axum::{
-    Extension, Json, Router,
     body::Body,
     extract::{
+        ws::{Message as WsMessage, WebSocket},
         ConnectInfo, DefaultBodyLimit, Multipart, Path as AxumPath, Query, Request, State,
         WebSocketUpgrade,
-        ws::{Message as WsMessage, WebSocket},
     },
-    http::{HeaderMap, Method, StatusCode, header},
+    http::{header, HeaderMap, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
+    Extension, Json, Router,
 };
 use chrono::{TimeZone, Utc};
 use codex_transcript::{codex_item_message, codex_live_item_message};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sqlx::Row;
 use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
 };
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{broadcast, RwLock};
 use tower_http::{
     cors::{Any, CorsLayer},
     services::{ServeDir, ServeFile},
@@ -146,6 +148,7 @@ struct AppState {
     db: Database,
     providers: providers::ProviderManager,
     agents: agents::AgentManager,
+    groups: groups::GroupManager,
     codex: CodexManager,
     live: broadcast::Sender<LiveEvent>,
     sequence: Arc<AtomicU64>,
@@ -269,6 +272,7 @@ pub async fn run_with_updater(
     let agents = agents::AgentManager::load(&db).await?;
     let state = AppState {
         agents,
+        groups: groups::GroupManager::default(),
         providers: providers::ProviderManager::new(
             config.data_dir.join("providers/codex/accounts"),
         ),
@@ -360,6 +364,27 @@ fn router(
             "/agents",
             get(agents::list_agents).post(agents::create_agent),
         )
+        .route("/groups", get(groups::list).post(groups::create))
+        .route("/groups/{id}", get(groups::read).patch(groups::update))
+        .route(
+            "/groups/{id}/messages",
+            get(groups::messages)
+                .post(groups::send)
+                .layer(DefaultBodyLimit::max(15 * 1024 * 1024)),
+        )
+        .route(
+            "/groups/{id}/tasks",
+            get(groups::tasks).post(groups::create_task),
+        )
+        .route("/groups/{id}/tasks/{task}", patch(groups::patch_task))
+        .route("/groups/{id}/tasks/{task}/reviews", post(groups::review))
+        .route(
+            "/groups/{id}/tasks/{task}/cancel",
+            post(groups::cancel_task),
+        )
+        .route("/groups/{id}/tasks/{task}/retry", post(groups::retry_task))
+        .route("/groups/{id}/stop", post(groups::stop))
+        .route("/groups/{id}/resume", post(groups::resume))
         .route("/agents/{id}", get(agents::read_agent))
         .route(
             "/agents/{id}/messages",
@@ -1786,6 +1811,17 @@ async fn send_codex_message_locked(
             let Some(method) = event.get("method").and_then(Value::as_str) else {
                 continue;
             };
+            if let Err(error) = groups::record_child_event(
+                &forward_state,
+                &forward_thread_id,
+                &forward_turn_id,
+                method,
+                params,
+            )
+            .await
+            {
+                tracing::warn!(%error,"Unable to save group coding activity");
+            }
             if matches!(
                 method,
                 "item/commandExecution/requestApproval"
@@ -3421,7 +3457,11 @@ fn slugify(value: &str) -> String {
         .take(6)
         .collect::<Vec<_>>()
         .join("-");
-    if slug.is_empty() { "task".into() } else { slug }
+    if slug.is_empty() {
+        "task".into()
+    } else {
+        slug
+    }
 }
 
 #[cfg(test)]
