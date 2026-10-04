@@ -1,4 +1,6 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render as renderReact, screen } from "@testing-library/react"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import type { ReactNode } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { AssistantState } from "@/features/agents/types/assistant"
 import type { SessionShellState } from "./session-shell"
@@ -21,9 +23,14 @@ const shell: SessionShellState = {
   updateAgent: vi.fn(), selectAgent: vi.fn(), openCreateAgent: vi.fn(), createAgent: vi.fn(),
   selectManagementView: vi.fn(), selectNavigationView: vi.fn(), openSidebarChat: vi.fn(),
 }
+let queryClient: QueryClient
+function render(ui: ReactNode) {
+  return renderReact(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
+}
 let onResize: () => void
 const disconnect = vi.fn()
 beforeEach(() => {
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   vi.clearAllMocks()
   window.sessionStorage.clear()
   apiMock.read.mockResolvedValue(initial)
@@ -35,7 +42,7 @@ beforeEach(() => {
     disconnect = disconnect
   })
 })
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
+afterEach(() => { cleanup(); queryClient.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 async function renderConversation() {
   const result = render(<AssistantPage shell={shell} agentId="pock" />)
@@ -45,6 +52,25 @@ async function renderConversation() {
   Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 })
   return { ...result, scroller }
 }
+
+it("reopens cached conversations with their draft and retryable outbox", async () => {
+  apiMock.send.mockRejectedValueOnce(new Error("Offline"))
+  const first = await renderConversation()
+  const input = screen.getByRole("textbox", { name: "Message Pock" })
+  fireEvent.change(input, { target: { value: "Send this" } })
+  fireEvent.keyDown(input, { key: "Enter" })
+  await screen.findByText("Not sent")
+  fireEvent.change(input, { target: { value: "Next draft" } })
+  first.unmount()
+  await renderConversation()
+  expect(screen.getByRole("textbox", { name: "Message Pock" })).toHaveValue("Next draft")
+  expect(apiMock.read).toHaveBeenCalledTimes(1)
+  expect(apiMock.accounts).toHaveBeenCalledTimes(1)
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }))
+  await act(async () => { await Promise.resolve() })
+  expect(apiMock.send).toHaveBeenCalledTimes(2)
+  expect(apiMock.send.mock.calls[1][1]).toEqual(apiMock.send.mock.calls[0][1])
+})
 
 it("keeps typing independent of the conversation history and profile", async () => {
   apiMock.read.mockResolvedValue({ ...initial, messages: Array.from({ length: 150 }, (_, index) => ({
@@ -174,7 +200,7 @@ it("collapses adjacent tools into a count and preserves expansion as new calls a
       { id: "avatar", role: "assistant", content: "", createdAt: "2026-10-02T00:00:04.000Z", actions: [{ id: "avatar-action", tool: "generate_avatar", arguments: {}, status: "running" }] },
     ],
   } })))
-  expect(screen.getByRole("button", { name: "3 tools" })).toBe(toggle)
+  expect(await screen.findByRole("button", { name: "3 tools" })).toBe(toggle)
   expect(toggle).toHaveTextContent(/^3$/)
   expect(toggle).toHaveAttribute("aria-expanded", "true")
   expect(screen.getByRole("img", { name: "Running" })).toBeInTheDocument()

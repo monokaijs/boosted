@@ -7,6 +7,7 @@ import {
   MessagePrimitive,
   ThreadPrimitive,
   type AppendMessage,
+  type AssistantRuntime,
   type ThreadMessageLike,
   useAuiState,
   useExternalStoreRuntime,
@@ -21,11 +22,13 @@ import { codexQuestionReply, parseCodexMessage } from "@/lib/codex-message-forma
 import { WorkspaceFileProvider } from "@/components/assistant-ui/workspace-file-markdown";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { api } from "@/lib/api";
-import { appendCodexDelta, upsertCodexMessage } from "@/lib/codex-chat-state";
-import { chatActivity } from "@/lib/codex-chat-status";
+import { useBoostedApiClient } from "@/lib/api-context";
+import { upsertCodexMessage } from "@/lib/codex-chat-state";
+import { pinWorkspaceValue, useWorkspaceState, useWorkspaceStore } from "@/lib/workspace-state";
+import { conversationQueryOptions } from "@/lib/query-client";
+import { chatActivity, setCachedChatStatus } from "@/lib/codex-chat-status";
 import { machinePreferenceKey, useAppStore } from "@/lib/store";
-import type { CodexAccessOption, CodexAttachment, CodexChatMessage, CodexChatThread, CodexCollaborationMode, CodexLiveEvent } from "@/lib/types";
+import type { CodexAccessOption, CodexAttachment, CodexChatMessage, CodexChatThread, CodexCollaborationMode } from "@/lib/types";
 
 function UserMessage() {
   return (
@@ -79,55 +82,69 @@ function toolLabel(content: string) {
   return label.length > 96 ? `${label.slice(0, 93)}...` : label;
 }
 
+const assistantMessageCache = new WeakMap<CodexChatMessage, ThreadMessageLike>();
 function toAssistantMessage(message: CodexChatMessage): ThreadMessageLike {
-  return {
+  const cached = assistantMessageCache.get(message);
+  if (cached) return cached;
+  const converted: ThreadMessageLike = {
     id: message.id,
     role: message.role,
     content: [{ type: "text", text: message.content }],
     createdAt: message.createdAt ? new Date(message.createdAt) : undefined,
     metadata: { custom: { kind: message.kind, questions: message.questions, label: message.kind === "tool" ? toolLabel(message.content) : undefined } },
   };
+  assistantMessageCache.set(message, converted);
+  return converted;
 }
 
 function passthroughMessage(message: ThreadMessageLike): ThreadMessageLike {
   return message;
 }
 
-function errorText(error: unknown) {
-  if (!error) return "Codex stopped unexpectedly.";
-  if (typeof error === "string") return error;
-  if (typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
-  return "Codex stopped unexpectedly.";
-}
-
 function createClientMessageId() {
   return globalThis.crypto?.randomUUID?.() ?? `web-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function CodexDraftSync({ runtime, sessionKey }: { runtime: AssistantRuntime; sessionKey: string }) {
+  useEffect(() => {
+    const composer = runtime.thread.composer;
+    const key = `${sessionKey}:draft`;
+    const { generation, values, write } = useWorkspaceStore.getState();
+    const unpin = pinWorkspaceValue(key);
+    composer.setText(typeof values[key] === "string" ? values[key] : "");
+    const unsubscribe = composer.subscribe(() => write(key, composer.getState().text, "", generation));
+    return () => { unsubscribe(); unpin(); };
+  }, [runtime, sessionKey]);
+  return null;
+}
+
 function CodexTranscript({ thread }: { thread: CodexChatThread }) {
+  const api = useBoostedApiClient();
   const queryClient = useQueryClient();
   const selectCodexChat = useAppStore((state) => state.selectCodexChat);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [messages, setMessages] = useState<CodexChatMessage[]>(thread.messages);
-  const [isRunning, setIsRunning] = useState(() => ["running", "waiting"].includes(chatActivity(thread.chat.status)));
-  const [error, setError] = useState<string>();
-  const [model, setModel] = useState(() => thread.runtimeDefaults?.model ?? localStorage.getItem(machinePreferenceKey("boosted.codex.model")) ?? thread.chat.model ?? "");
-  const [reasoningEffort, setReasoningEffort] = useState(() => thread.runtimeDefaults?.reasoningEffort ?? localStorage.getItem(machinePreferenceKey("boosted.codex.effort")) ?? "");
-  const [collaborationMode, setCollaborationMode] = useState<CodexCollaborationMode>(() => thread.runtimeDefaults?.collaborationMode === "plan" ? "plan" : "default");
-  const [accessMode, setAccessMode] = useState<CodexAccessOption["id"]>(() => {
+  const messages = thread.messages;
+  const isRunning = ["running", "waiting"].includes(chatActivity(thread.chat.status));
+  const sessionKey = `codex:${thread.chat.id}`;
+  const setMessages = useCallback((update: (messages: CodexChatMessage[]) => CodexChatMessage[]) => {
+    queryClient.setQueryData<CodexChatThread>(["codex-chat", thread.chat.id], (current) => current ? { ...current, messages: update(current.messages) } : current);
+  }, [queryClient, thread.chat.id]);
+  const setIsRunning = useCallback((running: boolean) => setCachedChatStatus(queryClient, thread.chat.id, running ? "active" : "idle"), [queryClient, thread.chat.id]);
+  const [error, setError] = useWorkspaceState<string | undefined>(`${sessionKey}:error`, undefined);
+  const [model, setModel] = useWorkspaceState(`${sessionKey}:model`, () => thread.runtimeDefaults?.model ?? localStorage.getItem(machinePreferenceKey("boosted.codex.model")) ?? thread.chat.model ?? "");
+  const [reasoningEffort, setReasoningEffort] = useWorkspaceState(`${sessionKey}:reasoningEffort`, () => thread.runtimeDefaults?.reasoningEffort ?? localStorage.getItem(machinePreferenceKey("boosted.codex.effort")) ?? "");
+  const [collaborationMode, setCollaborationMode] = useWorkspaceState<CodexCollaborationMode>(`${sessionKey}:collaborationMode`, () => thread.runtimeDefaults?.collaborationMode === "plan" ? "plan" : "default");
+  const [accessMode, setAccessMode] = useWorkspaceState<CodexAccessOption["id"]>(`${sessionKey}:accessMode`, () => {
     const stored = thread.runtimeDefaults?.accessMode ?? localStorage.getItem(machinePreferenceKey("boosted.codex.access"));
     return stored === "workspaceWrite" || stored === "readOnly" ? stored : "fullAccess";
   });
-  const [attachments, setAttachments] = useState<CodexAttachment[]>([]);
+  const [attachments, setAttachments] = useWorkspaceState<CodexAttachment[]>(`${sessionKey}:attachments`, []);
   const [isUploading, setIsUploading] = useState(false);
   const codexOptions = useQuery({ queryKey: ["codex-options", thread.chat.id], queryFn: () => api.threadCodexOptions(thread.chat.id), staleTime: 60_000 });
   const approvals = useQuery({ queryKey: ["codex-approvals", thread.chat.id], queryFn: () => api.codexApprovals(thread.chat.id), refetchInterval: isRunning ? 2000 : false });
   const selectedModel = codexOptions.data?.models.find((entry) => entry.model === model || entry.id === model);
   const selectedAccess = codexOptions.data?.accessModes.find((entry) => entry.id === accessMode);
   const supportsImages = selectedModel?.inputModalities.includes("image") ?? false;
-
-  useEffect(() => setMessages(thread.messages), [thread.messages]);
-  useEffect(() => setIsRunning(["running", "waiting"].includes(chatActivity(thread.chat.status))), [thread.chat.status]);
 
   useEffect(() => {
     if (!codexOptions.data) return;
@@ -150,63 +167,43 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
     }
   }, [accessMode, codexOptions.data, model, reasoningEffort, thread.chat.model]);
 
-  useEffect(() => {
-    const handleCodexEvent = (rawEvent: Event) => {
-      const event = (rawEvent as CustomEvent<CodexLiveEvent>).detail;
-      if (!event || event.threadId !== thread.chat.id) return;
-      if (event.method === "turn/started") {
-        setIsRunning(true);
-        setError(undefined);
-        return;
-      }
-      if ((event.method === "item/started" || event.method === "item/completed" || event.method === "item/commandExecution/outputDelta") && event.message) {
-        setMessages((current) => upsertCodexMessage(current, event.message!, event.clientMessageId));
-        return;
-      }
-      if (event.method === "item/agentMessage/delta") setMessages((current) => appendCodexDelta(current, event, "message"));
-      if (event.method === "item/reasoning/summaryTextDelta") setMessages((current) => appendCodexDelta(current, event, "reasoning"));
-      if (event.method === "item/plan/delta") setMessages((current) => appendCodexDelta(current, event, "plan"));
-      if (event.method === "error") setError(errorText(event.error));
-      if (event.method === "turn/completed") {
-        setIsRunning(false);
-        if (event.status === "failed") setError(errorText(event.error));
-        void queryClient.invalidateQueries({ queryKey: ["codex-chat", thread.chat.id] });
-        void queryClient.invalidateQueries({ queryKey: ["codex-chats"] });
-      }
-    };
-    window.addEventListener("boosted:codex-event", handleCodexEvent);
-    return () => window.removeEventListener("boosted:codex-event", handleCodexEvent);
-  }, [queryClient, thread.chat.id]);
-
   const sendMessage = useCallback(async (message: AppendMessage) => {
+    const generation = useWorkspaceStore.getState().generation;
     const text = message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
     if ((!text && attachments.length === 0) || !model || !reasoningEffort) return;
     const clientMessageId = createClientMessageId();
     const optimisticContent = [text, ...attachments.map(() => "[Image attachment]")].filter(Boolean).join("\n\n");
-    setMessages((current) => [...current, { id: clientMessageId, role: "user", content: optimisticContent, kind: "message", createdAt: new Date().toISOString() }]);
+    await queryClient.cancelQueries({ queryKey: ["codex-chat", thread.chat.id], exact: true });
+    if (useWorkspaceStore.getState().generation !== generation) return;
+    setMessages((current) => upsertCodexMessage(current, { id: clientMessageId, role: "user", content: optimisticContent, kind: "message", createdAt: new Date().toISOString() }));
     setIsRunning(true);
     setError(undefined);
     try {
       const started = await api.sendCodexMessage(thread.chat.id, text, clientMessageId, { model, reasoningEffort, accessMode, collaborationMode, approvalPolicy: accessMode === thread.runtimeDefaults?.accessMode ? thread.runtimeDefaults?.approvalPolicy : "never", attachmentIds: attachments.map((attachment) => attachment.id) });
+      if (useWorkspaceStore.getState().generation !== generation) return;
       setAttachments([]);
       if (started.threadId !== thread.chat.id) {
-        selectCodexChat(started.threadId);
+        setIsRunning(false);
         void queryClient.invalidateQueries({ queryKey: ["codex-chats"] });
-        window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", {
-          detail: {
-            threadId: started.threadId,
-            title: thread.chat.title,
-            replaceThreadId: thread.chat.id,
-          },
-        }));
+        if (useAppStore.getState().selectedCodexChatId === thread.chat.id) {
+          selectCodexChat(started.threadId);
+          window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", {
+            detail: {
+              threadId: started.threadId,
+              title: thread.chat.title,
+              replaceThreadId: thread.chat.id,
+            },
+          }));
+        }
       }
     } catch (cause) {
+      if (useWorkspaceStore.getState().generation !== generation) return;
       setMessages((current) => current.filter((item) => item.id !== clientMessageId));
       setIsRunning(false);
       setError(cause instanceof Error ? cause.message : "Unable to send message.");
       throw cause;
     }
-  }, [accessMode, attachments, collaborationMode, model, queryClient, reasoningEffort, selectCodexChat, thread.chat.id, thread.chat.title, thread.runtimeDefaults?.accessMode, thread.runtimeDefaults?.approvalPolicy]);
+  }, [api, accessMode, attachments, collaborationMode, model, queryClient, reasoningEffort, selectCodexChat, setAttachments, setError, setIsRunning, setMessages, thread.chat.id, thread.chat.title, thread.runtimeDefaults?.accessMode, thread.runtimeDefaults?.approvalPolicy]);
 
   const uploadFiles = useCallback(async (incoming: File[]) => {
     const availableSlots = Math.max(0, 4 - attachments.length);
@@ -298,15 +295,20 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
     parseCodexMessage(message.content).flatMap((part) => part.type === "question-reply" ? part.replies.flatMap((reply) => reply.questionItemId ? [reply.questionItemId] : []) : []),
   )), [messages]);
   const replyToQuestions = useCallback(async (messageId: string, questions: NonNullable<CodexChatMessage["questions"]>, answers: Record<string, { answers: string[] }>) => {
+    const generation = useWorkspaceStore.getState().generation;
     const started = await api.sendCodexMessage(thread.chat.id, codexQuestionReply(messageId, questions, answers), createClientMessageId(), { model, reasoningEffort, accessMode, collaborationMode, approvalPolicy: accessMode === thread.runtimeDefaults?.accessMode ? thread.runtimeDefaults?.approvalPolicy : "never" });
+    if (useWorkspaceStore.getState().generation !== generation) return;
     setIsRunning(true);
     if (started.threadId !== thread.chat.id) {
-      selectCodexChat(started.threadId);
-      window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", { detail: { threadId: started.threadId, title: thread.chat.title, replaceThreadId: thread.chat.id } }));
+      setIsRunning(false);
+      if (useAppStore.getState().selectedCodexChatId === thread.chat.id) {
+        selectCodexChat(started.threadId);
+        window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", { detail: { threadId: started.threadId, title: thread.chat.title, replaceThreadId: thread.chat.id } }));
+      }
     }
     void queryClient.invalidateQueries({ queryKey: ["codex-chat", started.threadId] });
     void queryClient.invalidateQueries({ queryKey: ["codex-chats"] });
-  }, [accessMode, collaborationMode, model, queryClient, reasoningEffort, selectCodexChat, thread.chat.id, thread.chat.title, thread.runtimeDefaults?.accessMode, thread.runtimeDefaults?.approvalPolicy]);
+  }, [api, accessMode, collaborationMode, model, queryClient, reasoningEffort, selectCodexChat, setIsRunning, thread.chat.id, thread.chat.title, thread.runtimeDefaults?.accessMode, thread.runtimeDefaults?.approvalPolicy]);
   const runtime = useExternalStoreRuntime({
     messages: assistantMessages,
     convertMessage: passthroughMessage,
@@ -318,6 +320,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
   return (
     <WorkspaceFileProvider scope={{ kind: "codex", id: thread.chat.id }}>
       <AssistantRuntimeProvider runtime={runtime}>
+        <CodexDraftSync runtime={runtime} sessionKey={sessionKey} />
         <CodexAsyncQuestionProvider value={{ answered: answeredQuestions, reply: replyToQuestions }}>
         <ThreadPrimitive.Root className="min-h-0 flex-1">
           <ThreadPrimitive.Viewport className="codex-thread-viewport relative flex h-full flex-col overflow-y-auto px-4">
@@ -369,7 +372,8 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
 }
 
 export function CodexChatPanel({ threadId }: { threadId: string }) {
-  const thread = useQuery({ queryKey: ["codex-chat", threadId], queryFn: () => api.codexChat(threadId) });
+  const api = useBoostedApiClient();
+  const thread = useQuery({ ...conversationQueryOptions, queryKey: ["codex-chat", threadId], queryFn: ({ signal }) => api.codexChat(threadId, signal) });
   return (
     <div className="panel-root">
       {thread.isLoading && <div className="grid min-h-0 flex-1 place-items-center"><LoaderCircle className="size-5 animate-spin text-muted-foreground" /></div>}

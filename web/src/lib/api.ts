@@ -165,7 +165,7 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   removeCodexAttachment: (id: string) => request<void>(`/codex/attachments/${encodeURIComponent(id)}`, { method: "DELETE" }),
   codexChats: (cwd: string) => request<CodexChat[]>(`/codex/chats${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ""}`),
   createCodexChat: (cwd: string, model?: string) => request<CodexChat>("/codex/chats", json("POST", { cwd, model })),
-  codexChat: (id: string) => request<CodexChatThread>(`/codex/chats/${encodeURIComponent(id)}`),
+  codexChat: (id: string, signal?: AbortSignal) => request<CodexChatThread>(`/codex/chats/${encodeURIComponent(id)}`, { signal }),
   sendCodexMessage: (id: string, message: string, clientMessageId: string, options: { model: string; reasoningEffort: string; accessMode: CodexAccessOption["id"]; approvalPolicy?: string; attachmentIds?: string[]; collaborationMode?: CodexCollaborationMode }) => request<CodexTurnStart>(`/codex/chats/${encodeURIComponent(id)}/messages`, json("POST", { message, clientMessageId, ...options })),
   codexApprovals: (id: string) => request<CodexPendingRequest[]>(`/codex/chats/${encodeURIComponent(id)}/approvals`),
   answerCodexApproval: (id: string, requestId: string, decision: "accept" | "decline") => request<void>(`/codex/chats/${encodeURIComponent(id)}/approvals/${encodeURIComponent(requestId)}`, json("POST", { decision })),

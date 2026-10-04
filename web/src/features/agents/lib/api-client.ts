@@ -12,7 +12,7 @@ export const apiClient = {
     usage: (days: number) => request<AgentUsage>(`/agents/usage?days=${days}`),
     list: () => request<AssistantSummary[]>('/agents'),
     create: (body: CreateAssistantRequest) => request<AssistantState>('/agents', 'POST', body),
-    read: (id: string) => request<AssistantState>(`/agents/${encode(id)}`),
+    read: (id: string, signal?: AbortSignal) => api.featureRequest<AssistantState>(`/agents/${encode(id)}`, { signal }),
     send: (id: string, body: AssistantMessageRequest) => request<AssistantState>(`/agents/${encode(id)}/messages`, 'POST', body),
     stop: (id: string) => request<AssistantState>(`/agents/${encode(id)}/stop`, 'POST'),
     updateAvatar: (id: string, avatar: string) => request<AssistantState>(`/agents/${encode(id)}/avatar`, 'PUT', { avatar }),

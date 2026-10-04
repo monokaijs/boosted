@@ -1,6 +1,7 @@
-import { lazy, StrictMode, Suspense, useEffect, useState } from "react";
+import { lazy, StrictMode, Suspense, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from "@tanstack/react-query";
+import { QueryClientProvider, useQuery, useQueryClient } from "@tanstack/react-query";
+import { createWorkspaceQueryClient } from "@/lib/query-client";
 import { LoaderCircle, RefreshCw, Server } from "lucide-react";
 import "./index.css";
 import "./app-shell.css";
@@ -19,14 +20,6 @@ import { useAppStore } from "@/lib/store";
 import type { SetupState, User } from "@/lib/types";
 
 const AppShell = lazy(() => import("@/components/app-shell").then((module) => ({ default: module.AppShell })));
-
-function createQueryClient() {
-  return new QueryClient({
-    defaultOptions: {
-      queries: { staleTime: 2_500, retry: 1, refetchOnWindowFocus: false },
-    },
-  });
-}
 
 function Unavailable({ profile, message, retry, retrying }: { profile: MachineProfile; message: string; retry: () => void; retrying: boolean }) {
   const [connectionsOpen, setConnectionsOpen] = useState(false);
@@ -84,7 +77,14 @@ function SessionRoot({ profile }: { profile: MachineProfile }) {
 }
 
 function MachineBoundary({ profile }: { profile: MachineProfile }) {
-  const [queryClient] = useState(createQueryClient);
+  const [workspaceQueries] = useState(createWorkspaceQueryClient);
+  const queryClient = workspaceQueries.client;
+  const disposal = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => {
+    // StrictMode replays effects immediately; only dispose on a real unmount.
+    clearTimeout(disposal.current);
+    return () => { disposal.current = setTimeout(workspaceQueries.dispose, 0); };
+  }, [workspaceQueries]);
   const [apiClient] = useState(getActiveApiClient);
   if (useAppStore.getState().activeMachineId !== profile.id) useAppStore.getState().activateMachine(profile.id);
   return <ApiClientProvider client={apiClient}><QueryClientProvider client={queryClient}><TooltipProvider delayDuration={350}><SessionRoot profile={profile} /></TooltipProvider></QueryClientProvider></ApiClientProvider>;

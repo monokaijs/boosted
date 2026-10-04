@@ -3,7 +3,10 @@ import { useQueryClient } from "@tanstack/react-query";
 import { getToken } from "@/lib/api";
 import { useBoostedApiClient } from "@/lib/api-context";
 import { notifyForLiveEvent } from "@/lib/notifications";
-import { applyChatStatusEvent, setCachedChatStatus } from "@/lib/codex-chat-status";
+import { setCachedChatStatus } from "@/lib/codex-chat-status";
+import { applyCodexEvent } from "@/lib/codex-chat-state";
+import { assistantSummary, shouldAcceptAssistantState } from "@/features/agents/lib/assistant-state";
+import type { AssistantState, AssistantSummary } from "@/features/agents/types/assistant";
 import type { CodexLiveEvent, LiveEvent } from "@/lib/types";
 
 export function useLiveEvents() {
@@ -22,6 +25,10 @@ export function useLiveEvents() {
       connection.addEventListener("open", () => {
         connection.send(JSON.stringify({ type: "authenticate", token: getToken() }));
         void queryClient.invalidateQueries({ queryKey: ["groups"] });
+        // Recover updates missed during a socket disconnect, including hidden views.
+        for (const kind of ["codex-chat", "codex-chats", "agents", "assistant-state", "task", "events"]) {
+          void queryClient.invalidateQueries({ queryKey: [kind] });
+        }
       });
       connection.addEventListener("message", (message) => {
         try {
@@ -29,6 +36,15 @@ export function useLiveEvents() {
           void notifyForLiveEvent(event, api);
           if (event.topic.startsWith("group.")) void queryClient.invalidateQueries({ queryKey: ["groups"] });
           if (event.topic === "assistant.updated") {
+            const next = event.data as AssistantState;
+            const key = ["assistant-state", next.id];
+            const current = queryClient.getQueryData<AssistantState>(key);
+            if (current && shouldAcceptAssistantState(current, next, next.id)) {
+              void queryClient.cancelQueries({ queryKey: key, exact: true });
+              queryClient.setQueryData(key, next);
+            }
+            queryClient.setQueryData<AssistantSummary[]>(["agents"], (agents) => agents?.map((current) =>
+              current.id === next.id && shouldAcceptAssistantState(current, next, next.id) ? assistantSummary(next) : current));
             window.dispatchEvent(new CustomEvent("boosted:assistant-updated", { detail: event.data }));
           }
           if (event.topic === "provider-chats.updated") void queryClient.invalidateQueries({ queryKey: ["codex-chats"] });
@@ -54,8 +70,7 @@ export function useLiveEvents() {
             }
           }
           if (event.topic === "codex.event") {
-            applyChatStatusEvent(queryClient, event.data as CodexLiveEvent);
-            window.dispatchEvent(new CustomEvent("boosted:codex-event", { detail: event.data }));
+            applyCodexEvent(queryClient, event.data as CodexLiveEvent);
             const data = event.data as { threadId?: string; method?: string };
             if (data.method === "turn/completed" && data.threadId) {
               void queryClient.invalidateQueries({ queryKey: ["codex-chat", data.threadId] });

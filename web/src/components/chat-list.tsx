@@ -4,6 +4,7 @@ import { ChevronDown, ChevronRight, CircleAlert, Folder, FolderOpen, FolderPlus,
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
+import { useWorkspaceState } from "@/lib/workspace-state";
 import { chatActivity } from "@/lib/codex-chat-status";
 import { useBoostedApiClient } from "@/lib/api-context";
 import { createGroupsApi } from "@/features/groups/api";
@@ -34,10 +35,10 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
   const rooms = useQuery({ queryKey: ["groups"], queryFn: groupApi.list, refetchInterval: 15000 });
   const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
   const [creatingGroup, setCreatingGroup] = useState(false);
-  const [search, setSearch] = useState("");
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const [visibleCounts, setVisibleCounts] = useState<Record<string, number>>({});
-  const [searchOpen, setSearchOpen] = useState(false);
+  const [search, setSearch] = useWorkspaceState("chat-list:search", "");
+  const [expanded, setExpanded] = useWorkspaceState<Set<string>>("chat-list:expanded", () => new Set());
+  const [visibleCounts, setVisibleCounts] = useWorkspaceState<Record<string, number>>("chat-list:visibleCounts", {});
+  const [searchOpen, setSearchOpen] = useWorkspaceState("chat-list:searchOpen", false);
   const projectId = useAppStore((state) => state.selectedProjectId);
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const chats = useQuery({ queryKey: ["codex-chats", "all"], queryFn: () => api.codexChats(""), refetchInterval: 15_000 });

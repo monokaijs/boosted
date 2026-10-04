@@ -11,6 +11,7 @@ import { isChatActionVisible } from '@/features/agents/lib/assistant-actions';
 import { GroupDetails, taskLabels, type GroupDetailTab } from './group-details';
 import '@/features/agents/agents.css';
 import { useBoostedApiClient } from '@/lib/api-context';
+import { conversationQueryOptions } from '@/lib/query-client';
 import { machinePreferenceKey, useAppStore } from '@/lib/store';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -36,13 +37,13 @@ export function GroupPanel({ groupId, headerTarget }: { groupId: string; headerT
   const groups = useMemo(() => createGroupsApi(client), [client]);
   const queryClient = useQueryClient();
   const user = useAppStore((s) => s.user);
-  const current = useRef<GroupState | undefined>(undefined);
   const state = useQuery({
+    ...conversationQueryOptions,
     queryKey: ['groups', groupId],
     queryFn: async () => {
       const next = await groups.read(groupId);
-      if (acceptGroupSnapshot(current.current, next, groupId)) current.current = next;
-      return current.current!;
+      const current = queryClient.getQueryData<GroupState>(['groups', groupId]);
+      return acceptGroupSnapshot(current, next, groupId) ? next : current!;
     },
     refetchInterval: 5000,
   });

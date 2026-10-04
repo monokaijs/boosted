@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { conversationQueryOptions } from "@/lib/query-client"
+import { enqueueWorkspaceOperation, waitForWorkspaceOperations, useWorkspaceState, useWorkspaceStore } from "@/lib/workspace-state"
 import { LoaderCircle, MessageSquarePlus, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react"
 import type { AssistantAttachment, AssistantState } from "@/features/agents/types/assistant"
-import { apiClient, type ProviderAccountResponse } from "@/features/agents/lib/api-client"
+import { apiClient } from "@/features/agents/lib/api-client"
 import { MarkdownContent } from "@/features/agents/components/session/chat-markdown"
 import type { SessionShellState } from "@/features/agents/components/session/session-shell"
 import { cn } from "@/lib/utils"
@@ -20,19 +23,30 @@ const suggestions = [
 ]
 
 export function AssistantPage({ shell, agentId }: { shell: SessionShellState; agentId: string }) {
-  const [state, setState] = useState<AssistantState | null>(null)
-  const [accounts, setAccounts] = useState<ProviderAccountResponse[]>([])
-  const [accountId, setAccountId] = useState("")
-  const [error, setError] = useState<string | null>(null)
-  const [outbox, setOutbox] = useState<AssistantPendingMessage[]>([])
-  const sendQueue = useRef(Promise.resolve())
+  const queryClient = useQueryClient()
+  const workspaceGeneration = useWorkspaceStore((workspace) => workspace.generation)
+  const snapshot = useQuery({
+    ...conversationQueryOptions,
+    queryKey: ["assistant-state", agentId],
+    queryFn: async ({ signal }) => {
+      const next = await apiClient.assistant.read(agentId, signal)
+      const current = queryClient.getQueryData<AssistantState>(["assistant-state", agentId]) ?? null
+      return shouldAcceptAssistantState(current, next, agentId) ? next : current!
+    },
+    refetchInterval: (query) => query.state.data?.status === "running" ? 1000 : 5000,
+    retry: false,
+  })
+  const state = snapshot.data ?? null
+  const providers = useQuery({ queryKey: ["provider-accounts"], queryFn: apiClient.providerAccounts.list, staleTime: 30_000 })
+  const accounts = useMemo(() => (providers.data ?? []).filter((account) => account.status === "CONNECTED"), [providers.data])
+  const [accountId, setAccountId] = useWorkspaceState(`assistant:${agentId}:account`, "")
+  const [localError, setError] = useState<string | null>(null)
+  const error = localError ?? snapshot.error?.message ?? providers.error?.message ?? null
+  const [outbox, setOutbox] = useWorkspaceState<AssistantPendingMessage[]>(`assistant:${agentId}:outbox`, [])
   const [stopping, setStopping] = useState(false)
-  const [refreshKey, setRefreshKey] = useState(0)
   const [profileOpen, setProfileOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const followRef = useRef(true)
-  const requestId = useRef(0)
-  const latestState = useRef<AssistantState | null>(null)
   const composerRef = useRef<AssistantComposerHandle>(null)
   const running = state?.status === "running"
   const activity = running && !state?.activeGroupId ? state?.activity : null
@@ -43,51 +57,21 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
   const assistantName = state?.profile.name ?? shell.agents.find((agent) => agent.id === agentId)?.profile.name ?? "Agent"
 
   const acceptState = useCallback((next: AssistantState) => {
+    if (useWorkspaceStore.getState().generation !== workspaceGeneration) return
     // A poll or send response may arrive after a newer streamed update.
-    if (!shouldAcceptAssistantState(latestState.current, next, agentId)) return
-    latestState.current = next
-    setState(next)
+    const current = queryClient.getQueryData<AssistantState>(["assistant-state", agentId]) ?? null
+    if (!shouldAcceptAssistantState(current, next, agentId)) return
+    void queryClient.cancelQueries({ queryKey: ["assistant-state", agentId], exact: true })
+    queryClient.setQueryData(["assistant-state", agentId], next)
     shell.updateAgent(next)
     setError(null)
-  }, [agentId, shell.updateAgent])
+  }, [agentId, queryClient, shell.updateAgent, workspaceGeneration])
 
   useEffect(() => {
-    let disposed = false
-    let pollId = 0
-    let timer: ReturnType<typeof setTimeout>
-
-    const poll = async () => {
-      const currentPollId = ++pollId
-      const id = ++requestId.current
-      let next: AssistantState | null = null
-      try {
-        next = await apiClient.assistant.read(agentId)
-        if (!disposed && id === requestId.current) acceptState(next)
-      } catch (cause) {
-        if (!disposed && id === requestId.current) setError(cause instanceof Error ? cause.message : "Unable to load assistant.")
-      }
-      if (!disposed && currentPollId === pollId) timer = setTimeout(() => void poll(), next?.status === "running" ? 1000 : 5000)
-    }
-    const handleUpdate = (event: Event) => {
-      const payload = (event as CustomEvent<AssistantState>).detail
-      if (!disposed && payload.id === agentId) acceptState(payload)
-    }
+    const handleUpdate = (event: Event) => acceptState((event as CustomEvent<AssistantState>).detail)
     window.addEventListener("boosted:assistant-updated", handleUpdate)
-    void poll()
-    return () => {
-      disposed = true
-      clearTimeout(timer)
-      window.removeEventListener("boosted:assistant-updated", handleUpdate)
-    }
-  }, [agentId, refreshKey, acceptState])
-
-  useEffect(() => {
-    let disposed = false
-    void apiClient.providerAccounts.list().then((items) => {
-      if (!disposed) setAccounts(items.filter((account) => account.status === "CONNECTED"))
-    }).catch((cause) => { if (!disposed) setError(cause instanceof Error ? cause.message : "Unable to load providers.") })
-    return () => { disposed = true }
-  }, [shell.chatAccounts, refreshKey])
+    return () => window.removeEventListener("boosted:assistant-updated", handleUpdate)
+  }, [acceptState])
 
   useEffect(() => {
     const scroller = scrollRef.current
@@ -107,9 +91,13 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
   }, [])
 
   const dispatchMessage = (message: AssistantPendingMessage) => {
-    const operation = sendQueue.current.then(async () => {
+    const generation = useWorkspaceStore.getState().generation
+    return enqueueWorkspaceOperation(`assistant:${agentId}`, async () => {
+      if (useWorkspaceStore.getState().generation !== generation) return
       try {
+        await queryClient.cancelQueries({ queryKey: ["assistant-state", agentId], exact: true })
         const next = await apiClient.assistant.send(agentId, message.request)
+        if (useWorkspaceStore.getState().generation !== generation) return
         acceptState(next)
         setOutbox((current) => current.filter((pending) => pending.id !== message.id))
       } catch (cause) {
@@ -117,8 +105,6 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
         setOutbox((current) => current.map((pending) => pending.id === message.id ? { ...pending, localDelivery: "failed", sendError } : pending))
       }
     })
-    sendQueue.current = operation
-    return operation
   }
 
   const retryMessage = (message: AssistantPendingMessage) => {
@@ -131,7 +117,6 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
     const content = message.trim() || (sendingAttachments.length ? "Please look at the attached files." : "")
     if (!content || stopping || !state || !accounts.length) return false
     setError(null)
-    ++requestId.current
     followRef.current = true
     const id = crypto.randomUUID()
     const pending: AssistantPendingMessage = {
@@ -144,9 +129,18 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
     return true
   }
 
+  const refresh = () => { void snapshot.refetch(); void providers.refetch() }
+
   const stop = async () => {
     setStopping(true)
-    try { await sendQueue.current; const next = await apiClient.assistant.stop(agentId); acceptState(next); setRefreshKey((key) => key + 1) }
+    const generation = useWorkspaceStore.getState().generation
+    try {
+      await waitForWorkspaceOperations(`assistant:${agentId}`)
+      if (useWorkspaceStore.getState().generation !== generation) return
+      const next = await apiClient.assistant.stop(agentId)
+      if (useWorkspaceStore.getState().generation !== generation) return
+      acceptState(next); refresh()
+    }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to stop assistant.") }
     finally { setStopping(false) }
   }
@@ -157,7 +151,7 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
       <AssistantProfilePanel
         open={profileOpen} onOpenChange={setProfileOpen} agentId={agentId} name={assistantName} state={state}
         accounts={accounts} accountId={accountId} onAccountChange={setAccountId} disabled={running || sending}
-        onRefresh={() => setRefreshKey((key) => key + 1)} shell={shell}
+        onRefresh={() => refresh()} shell={shell}
         onAvatarChange={async (avatar) => acceptState(await apiClient.assistant.updateAvatar(agentId, avatar))}
         onCancelFollowUp={async (id) => acceptState(await apiClient.assistant.cancelFollowUp(agentId, id))}
         onGenerateAvatar={() => {

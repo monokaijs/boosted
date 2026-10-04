@@ -12,6 +12,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { machinePreferenceKey, useAppStore } from "@/lib/store";
+import { useWorkspaceState } from "@/lib/workspace-state";
+import { conversationQueryOptions } from "@/lib/query-client";
 import { taskStatusMeta } from "@/lib/status";
 import type { CodexAccessOption, CodexCollaborationMode, TaskEvent } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -82,7 +84,8 @@ function chatTitle(prompt: string) {
 }
 
 export function NewChatPanel() {
-  const [prompt, setPrompt] = useState("");
+  const projectId = useAppStore((state) => state.selectedProjectId);
+  const [prompt, setPrompt] = useWorkspaceState(`new-chat:${projectId ?? "none"}:draft`, "");
   const [model, setModel] = useState(() => localStorage.getItem(machinePreferenceKey("boosted.codex.model")) ?? "");
   const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem(machinePreferenceKey("boosted.codex.effort")) ?? "");
   const [collaborationMode, setCollaborationMode] = useState<CodexCollaborationMode>(() => localStorage.getItem(machinePreferenceKey("boosted.codex.mode")) === "plan" ? "plan" : "default");
@@ -90,7 +93,6 @@ export function NewChatPanel() {
     const stored = localStorage.getItem(machinePreferenceKey("boosted.codex.access"));
     return stored === "workspaceWrite" || stored === "readOnly" ? stored : "fullAccess";
   });
-  const projectId = useAppStore((state) => state.selectedProjectId);
   const selectProject = useAppStore((state) => state.selectProject);
   const selectCodexChat = useAppStore((state) => state.selectCodexChat);
   const queryClient = useQueryClient();
@@ -230,11 +232,11 @@ export function NewChatPanel() {
 }
 
 export function TaskPanel() {
-  const [message, setMessage] = useState("");
   const selectedTaskId = useAppStore((state) => state.selectedTaskId);
+  const [message, setMessage] = useWorkspaceState(`task:${selectedTaskId ?? "none"}:draft`, "");
   const queryClient = useQueryClient();
-  const task = useQuery({ queryKey: ["task", selectedTaskId], queryFn: () => api.task(selectedTaskId!), enabled: Boolean(selectedTaskId) });
-  const events = useQuery({ queryKey: ["events", selectedTaskId], queryFn: () => api.taskEvents(selectedTaskId!), enabled: Boolean(selectedTaskId), refetchInterval: task.data?.status === "running" || task.data?.status === "planning" ? 1_000 : false });
+  const task = useQuery({ ...conversationQueryOptions, queryKey: ["task", selectedTaskId], queryFn: () => api.task(selectedTaskId!), enabled: Boolean(selectedTaskId) });
+  const events = useQuery({ ...conversationQueryOptions, queryKey: ["events", selectedTaskId], queryFn: () => api.taskEvents(selectedTaskId!), enabled: Boolean(selectedTaskId), refetchInterval: task.data?.status === "running" || task.data?.status === "planning" ? 1_000 : false });
   const send = useMutation({
     mutationFn: () => api.sendMessage(selectedTaskId!, message.trim()),
     onSuccess: () => { setMessage(""); void queryClient.invalidateQueries({ queryKey: ["events", selectedTaskId] }); void queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] }); },

@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Bot, ChevronDown, FolderOpen, LogOut, MessagesSquare, Ellipsis, Files, GitBranch, Plus, X } from "lucide-react";
-import { openProvidersEvent } from "@/features/agents/agents-panel";
+import { openProvidersEvent } from "@/features/agents/events";
 import { AgentAvatar } from "@/features/agents/components/session/agent-avatar";
 import { apiClient } from "@/features/agents/lib/api-client";
 import { Button } from "@/components/ui/button";
@@ -38,6 +38,7 @@ type ContentView = "chat" | "task" | "editor" | "agents" | "group";
 type ToolView = typeof tools[number]["id"];
 
 export function AppShell() {
+  const queryClient = useQueryClient();
   const { profileId } = useBoostedApiClient();
   useLiveEvents();
   useNotificationNavigation();
@@ -199,7 +200,7 @@ export function AppShell() {
   async function logout() {
     try { await api.logout(); }
     catch { /* Allow local sign-out while disconnected. */ }
-    finally { await setToken(); useAppStore.getState().setUser(undefined); }
+    finally { await setToken(); useAppStore.getState().setUser(undefined); queryClient.clear(); }
   }
 
   const navigation = destinations.map(({ id, label, icon: Icon }) => <Tooltip key={id}><TooltipTrigger asChild><button className="destination" aria-label={label} aria-current={page === id && !(id === "home" && view === "agents") ? "page" : undefined} onClick={() => { if (id === "home") setView(groupId ? "group" : "chat"); if (id === "tasks") setView("chat"); goTo(id); }}><Icon /><span>{label}</span></button></TooltipTrigger><TooltipContent side="left">{label}</TooltipContent></Tooltip>);

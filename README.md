@@ -22,6 +22,12 @@ The first browser visit creates the administrator. The admin then creates member
 
 > Boosted currently starts Codex with full host access, matching the selected product policy. Only expose the server to trusted users, and put remote access behind your own authenticated TLS proxy or tunnel.
 
+## Frontend state
+
+Zustand owns workspace selections and transient UI state; React Query owns server snapshots and transcripts. Drafts, chat settings, pending agent messages, and chat-list controls survive view switches. The workspace WebSocket updates cached conversations even while their panels are unmounted, and reconnecting invalidates snapshots to recover missed events.
+
+Cached queries stay fresh for 30 seconds by default and expire after two minutes without observers. Inactive conversation caches retain at most eight histories and approximately 16 MiB of text; this is a cache budget, not a total heap limit. Active views and in-flight queries are protected. Transient UI values use a 128-entry eviction target that protects mounted controls and pending deliveries. Switching machines or signing out clears the transient workspace, and machine disposal releases its query cache.
+
 ## Machine connections
 
 The web/PWA and desktop frontends can save multiple Boosted servers and switch between them from the machine selector or **Settings → Connections**. A connection has its own session and workspace state; switching replaces the whole active workspace, and Boosted never polls or combines data from saved machines.

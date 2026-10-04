@@ -1,5 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { beforeEach, vi } from "vitest";
+import { useWorkspaceStore } from "@/lib/workspace-state";
 
 // jsdom has no layout scrolling; Radix Select scrolls its keyboard-focused option.
 if (!HTMLElement.prototype.scrollIntoView) {
@@ -18,6 +19,7 @@ const storage: Storage = {
 };
 vi.stubGlobal("localStorage", storage);
 beforeEach(() => {
+  useWorkspaceStore.getState().reset();
   storage.clear();
   vi.stubGlobal("localStorage", storage);
 });

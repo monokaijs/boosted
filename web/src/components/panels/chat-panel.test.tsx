@@ -1,11 +1,13 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { machinePreferenceKey, useAppStore } from "@/lib/store";
+import { applyCodexEvent } from "@/lib/codex-chat-state";
 import type { Task } from "@/lib/types";
 
 const api = vi.hoisted(() => ({ projects: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexApprovals: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn() }));
 vi.mock("@/lib/api", () => ({ api }));
+vi.mock("@/lib/api-context", () => ({ useBoostedApiClient: () => api }));
 import { NewChatPanel, TaskPanel } from "./chat-panel";
 import { CodexChatPanel } from "./codex-chat-panel";
 
@@ -46,6 +48,39 @@ beforeEach(() => {
 });
 
 describe("planning in chats", () => {
+  it("restores a draft and receives streaming updates while the conversation is hidden", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = (visible: boolean) => <QueryClientProvider client={client}>{visible ? <CodexChatPanel threadId="chat-a" /> : <div>Settings</div>}</QueryClientProvider>;
+    const result = render(view(true));
+    await screen.findByRole("heading", { name: "Proposed work" });
+    fireEvent.change(screen.getByPlaceholderText("Message Codex..."), { target: { value: "Keep this draft" } });
+    result.rerender(view(false));
+    act(() => {
+      applyCodexEvent(client, { threadId: "chat-a", turnId: "turn", method: "turn/started" });
+      applyCodexEvent(client, { threadId: "chat-a", turnId: "turn", method: "item/agentMessage/delta", itemId: "answer", delta: "Arrived while hidden" });
+    });
+    result.rerender(view(true));
+    expect(await screen.findByText("Arrived while hidden")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Message Codex...")).toHaveValue("Keep this draft");
+    expect(screen.getByRole("button", { name: "Chat mode" })).toBeDisabled();
+    expect(api.codexChat).toHaveBeenCalledTimes(1);
+    result.unmount(); client.clear();
+  });
+
+  it("keeps new-chat and task drafts separate across view switches", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = (taskView: boolean) => <QueryClientProvider client={client}>{taskView ? <TaskPanel /> : <NewChatPanel />}</QueryClientProvider>;
+    const result = render(view(false));
+    fireEvent.change(await screen.findByPlaceholderText("Ask anything…"), { target: { value: "New chat draft" } });
+    result.rerender(view(true));
+    fireEvent.change(await screen.findByPlaceholderText("Ask for a plan revision, or approve the plan…"), { target: { value: "Task draft" } });
+    result.rerender(view(false));
+    expect(screen.getByPlaceholderText("Ask anything…")).toHaveValue("New chat draft");
+    result.rerender(view(true));
+    expect(screen.getByPlaceholderText("Ask for a plan revision, or approve the plan…")).toHaveValue("Task draft");
+    result.unmount(); client.clear();
+  });
+
   it("restores Plan mode and the proposed plan in an existing conversation and sends planning followups", async () => {
     renderPanel(<CodexChatPanel threadId="chat-a" />);
     expect(within(await screen.findByRole("button", { name: "Chat mode" })).getByText("Plan")).toBeInTheDocument();

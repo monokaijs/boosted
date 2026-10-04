@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { machineScopedKey } from "@/lib/machines";
 import type { Project, Task, User } from "@/lib/types";
+import { useWorkspaceStore } from "@/lib/workspace-state";
 
 function key(machineId: string | undefined, value: string) {
   return machineId ? machineScopedKey(machineId, value) : value;
@@ -41,8 +42,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
   activeMachineId: undefined,
   user: undefined,
   taskDrawerOpen: false,
-  activateMachine: (activeMachineId) => set({ ...readMachineState(activeMachineId), activeMachineId, user: undefined, taskDrawerOpen: false }),
-  setUser: (user) => set({ user }),
+  activateMachine: (activeMachineId) => {
+    useWorkspaceStore.getState().reset();
+    set({ ...readMachineState(activeMachineId), activeMachineId, user: undefined, taskDrawerOpen: false });
+  },
+  setUser: (user) => {
+    if (!user) useWorkspaceStore.getState().reset();
+    set({ user });
+  },
   selectProject: (project) => {
     const state = get();
     if (state.selectedProjectId === project?.id) return;

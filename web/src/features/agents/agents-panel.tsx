@@ -8,9 +8,10 @@ import { CreateAgentDialog } from './components/session/create-agent-dialog';
 import { apiClient } from './lib/api-client';
 import type { AssistantState } from './types/assistant';
 import type { SessionShellState } from './components/session/session-shell';
+import { assistantSummary, shouldAcceptAssistantState } from './lib/assistant-state';
+import { openProvidersEvent } from './events';
 import './agents.css';
 
-export const openProvidersEvent = 'boosted:open-providers';
 export function AgentsPanel({ selectedId, selectAgent, createAgentOpen, onCreateAgentOpenChange }: { selectedId: string; selectAgent(id: string): void; createAgentOpen: boolean; onCreateAgentOpenChange(open: boolean): void }) {
   const { profileId } = useBoostedApiClient();
   const queryClient = useQueryClient();
@@ -19,7 +20,7 @@ export function AgentsPanel({ selectedId, selectAgent, createAgentOpen, onCreate
   const projects = useQuery({ queryKey: ['projects'], queryFn: api.projects });
   const chats = useQuery({ queryKey: ['codex-chats', 'agents'], queryFn: () => api.codexChats(''), staleTime: 10_000 });
   const selected = agents.data?.find((a) => a.id === selectedId) ?? agents.data?.[0];
-  const updateAgent = useCallback((agent: AssistantState) => queryClient.setQueryData(['agents'], (old: typeof agents.data) => old?.map((a) => a.id === agent.id ? agent : a)), [queryClient]);
+  const updateAgent = useCallback((agent: AssistantState) => queryClient.setQueryData(['agents'], (old: typeof agents.data) => old?.map((a) => a.id === agent.id && shouldAcceptAssistantState(a, agent, agent.id) ? assistantSummary(agent) : a)), [queryClient]);
   const shell = useMemo<SessionShellState>(() => ({
     agents: agents.data ?? [], chatAccounts: accounts.data ?? [],
     chats: chats.data?.map((chat) => ({ id: chat.id, title: chat.title, workingDirectory: chat.cwd, status: chat.status === 'active' ? 'RUNNING' : 'IDLE' })) ?? [],
