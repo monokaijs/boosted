@@ -775,6 +775,7 @@ export function SettingsPage({ section, onSectionChange, onClose }: { section: S
   const projectId = useAppStore((state) => state.selectedProjectId);
   const scrollRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const navigationRef = useRef<HTMLDivElement>(null);
   const selected = sectionGroups.flatMap((group) => group.sections).find((item) => item.id === section)!;
   const query = search.trim().toLocaleLowerCase();
   const visibleGroups = sectionGroups.map((group) => ({ ...group, sections: group.sections.filter((item) => `${group.label} ${item.label} ${sectionDescriptions[item.id]}`.toLocaleLowerCase().includes(query)) }));
@@ -806,6 +807,6 @@ export function SettingsPage({ section, onSectionChange, onClose }: { section: S
         {section === "codex" && (projectId ? <CodexSettings /> : <div className="settings-content"><p className="settings-empty">Open a workspace to configure Codex instructions and MCP servers.</p></div>)}
       </div>
     </div>
-    <Dialog open={navigationOpen} onOpenChange={setNavigationOpen}><DialogContent className="settings-navigation-drawer immersive-panel"><DialogHeader className="sr-only"><DialogTitle>Settings sections</DialogTitle><DialogDescription>Choose a settings section.</DialogDescription></DialogHeader>{navigation}</DialogContent></Dialog>
+    <Dialog open={navigationOpen} onOpenChange={setNavigationOpen}><DialogContent ref={navigationRef} className="settings-navigation-drawer immersive-panel" onOpenAutoFocus={(event) => { event.preventDefault(); navigationRef.current?.focus(); }}><DialogHeader className="sr-only"><DialogTitle>Settings sections</DialogTitle><DialogDescription>Choose a settings section.</DialogDescription></DialogHeader>{navigation}</DialogContent></Dialog>
   </section>;
 }

@@ -117,7 +117,25 @@
   .settings-page > .settings-sidebar { display: none; }
   .settings-mobile-controls { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; }
   .settings-page-heading { padding-top: 16px; padding-bottom: 24px; }
-  .settings-navigation-drawer.dialog-content { position: fixed; inset: max(var(--panel-gutter), env(safe-area-inset-top)) auto max(var(--panel-gutter), env(safe-area-inset-bottom)) max(var(--panel-gutter), env(safe-area-inset-left)); transform: none; translate: none; width: min(320px, 90vw); max-width: 320px; height: auto; max-height: none; display: flex; flex-direction: column; gap: 0; overflow: hidden; padding: 24px 8px 16px; border: 0; border-radius: var(--panel-radius); }
+  .settings-navigation-drawer.dialog-content {
+    --drawer-top-gap: max(var(--panel-gutter), env(safe-area-inset-top));
+    --drawer-bottom-gap: max(var(--panel-gutter), var(--safe-area-bottom));
+    position: fixed;
+    inset: calc(var(--app-viewport-top, 0px) + var(--drawer-top-gap)) auto auto max(var(--panel-gutter), env(safe-area-inset-left));
+    transform: none;
+    translate: none;
+    width: min(320px, calc(100vw - max(var(--panel-gutter), env(safe-area-inset-left)) - max(var(--panel-gutter), env(safe-area-inset-right))));
+    max-width: 320px;
+    height: calc(var(--app-viewport-height, 100dvh) - var(--drawer-top-gap) - var(--drawer-bottom-gap));
+    max-height: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    overflow: hidden;
+    padding: 24px 8px 16px;
+    border: 0;
+    border-radius: var(--panel-radius);
+  }
   .settings-navigation-drawer .settings-sidebar-heading { padding-right: 40px; }
   .settings-navigation-drawer .settings-sidebar-heading > button { display: none; }
   .settings-navigation-drawer .settings-nav-item { height: 40px; }

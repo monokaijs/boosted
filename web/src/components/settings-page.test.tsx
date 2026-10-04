@@ -119,6 +119,8 @@ describe("settings page", () => {
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: "Browse settings sections" }));
     const drawer = screen.getByRole("dialog", { name: "Settings sections" });
+    expect(drawer).toHaveFocus();
+    expect(within(drawer).getByRole("textbox", { name: "Search settings" })).not.toHaveFocus();
     fireEvent.click(within(drawer).getByRole("button", { name: "Codex" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(screen.getByText("Open a workspace to configure Codex instructions and MCP servers.")).toBeInTheDocument();
