@@ -1939,6 +1939,7 @@ pub(crate) fn tools(base: Value, purpose: &str) -> Value {
             matches!(
                 name,
                 "send_agent_message"
+                    | "select_agent_model"
                     | "get_profile"
                     | "list_workspaces"
                     | "list_chats"

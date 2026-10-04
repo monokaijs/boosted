@@ -9,10 +9,19 @@ is shared by chats belonging to that account. Stopping one chat does not kill
 the process or other chats.
 
 The persistent assistant uses a separate ephemeral app-server thread for each
-turn, with native shell/file tools, live web search, full host and network
-access, and no execution approvals. MCP configuration is inherited from the
-selected account's Codex home. Boosted's dynamic management tools remain
-available alongside the native tools. Commands, file changes, web searches,
+turn, with read-only native shell/file access
+for management and independent review, and no execution approvals. Project
+work is dispatched to persistent Codex coding chats with watched runs. The
+manager inspects each outcome and sends follow-up instructions in the same
+chat when authorized work or verification remains incomplete. Verified results
+are reported for human curation; later feedback continues the same chat. MCP
+configuration is inherited from the selected account's Codex home. Boosted's dynamic management tools remain
+available alongside native inspection tools. Chat metadata stores the managing
+agent, original request and feedback message IDs, and latest dispatched run.
+Each continuation carries those source messages into its watch and recovery
+record, so background turns retain the goal. The model receives durable managed
+chat references and saved follow-ups in addition to conversation history.
+Commands, file changes, web searches,
 image views and MCP calls are saved as action receipts, including failures.
 Stopping or timing out an assistant turn interrupts Codex and cleans its
 background terminals before shutting down its dedicated subprocess. Normal
@@ -82,17 +91,17 @@ Run the installed CLI integration explicitly with:
 
 ```sh
 cargo test -p boosted-server --lib agents::tests::installed_codex_executes_and_interrupts_through_agent_tools -- --ignored
-cargo test -p boosted-server --lib agents::tests::installed_codex_agent_executes_native_tools_and_stops_commands -- --ignored
+cargo test -p boosted-server --lib agents::tests::installed_codex_manager_inspects_without_modifying_project -- --ignored
 cargo test -p boosted-server --lib agents::tests::installed_codex_agent_delivers_computer_screenshot_as_visual_input -- --ignored
 ```
 
 That integration uses a temporary account home and a loopback Responses
 endpoint. It verifies exact model requests, completed and interrupted turns,
 forks, clearing and deletion without external inference or existing chats.
-The native agent integration also uses a disposable stdio MCP server and
-loopback HTTP endpoint to verify shell execution, filesystem writes, network
-access, inherited MCP configuration, application tool replies, and termination
-of a running command on Stop.
+The manager integration uses a loopback model endpoint to verify read-only
+inspection, denial of project file writes, and application tool replies. The
+synthetic manager regression covers dispatch, watched outcomes, automatic
+continuation, human curation, and persisted request context after reload.
 
 The screenshot integration uses a fake desktop and verifies that the installed
 CLI forwards image content to a loopback model endpoint, including code mode.

@@ -1,5 +1,6 @@
 import { api } from '@/lib/api';
 import type { AssistantState, AssistantSummary, AssistantMessageRequest, CreateAssistantRequest } from '../types/assistant';
+import type { AgentUsage } from './usage';
 import type { ProviderDefinitionResponse, ProviderAccountResponse, CreateProviderAccountRequest, UpdateProviderAccountRequest, AuthenticateProviderAccountResponse, ProviderModelListResponse, ProviderAccountLimitsResponse } from '../types/providers';
 export type * from '../types/providers';
 const encode = encodeURIComponent;
@@ -8,6 +9,7 @@ function request<T>(path: string, method = 'GET', body?: unknown) {
 }
 export const apiClient = {
   assistant: {
+    usage: (days: number) => request<AgentUsage>(`/agents/usage?days=${days}`),
     list: () => request<AssistantSummary[]>('/agents'),
     create: (body: CreateAssistantRequest) => request<AssistantState>('/agents', 'POST', body),
     read: (id: string) => request<AssistantState>(`/agents/${encode(id)}`),

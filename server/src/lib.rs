@@ -1,3 +1,4 @@
+mod agent_usage;
 mod agents;
 mod auth;
 pub mod cli;
@@ -386,6 +387,7 @@ fn router(
         .route("/groups/{id}/stop", post(groups::stop))
         .route("/groups/{id}/resume", post(groups::resume))
         .route("/agents/{id}", get(agents::read_agent))
+        .route("/agents/usage", get(agent_usage::read_usage))
         .route(
             "/agents/{id}/messages",
             post(agents::send_message).layer(DefaultBodyLimit::max(15 * 1024 * 1024)),

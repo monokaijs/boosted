@@ -11,11 +11,11 @@ import type { SessionShellState } from "@/features/agents/components/session/ses
 const apiMock = vi.hoisted(() => {
   const values = new Map<string, string>();
   vi.stubGlobal("localStorage", { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key), clear: () => values.clear() });
-  return { projects: vi.fn(), codexChats: vi.fn(), logout: vi.fn(), agents: vi.fn(), featureRequest: vi.fn(), createAgent: vi.fn() };
+  return { projects: vi.fn(), codexChats: vi.fn(), logout: vi.fn(), agents: vi.fn(), usage: vi.fn(), featureRequest: vi.fn(), createAgent: vi.fn() };
 });
 vi.mock("@/lib/api", () => ({ api: apiMock, setToken: vi.fn() }));
 vi.mock("@/lib/api-context", () => ({ useBoostedApiClient: () => ({ profileId: "test-machine", featureRequest: apiMock.featureRequest, projects: apiMock.projects }) }));
-vi.mock("@/features/agents/lib/api-client", () => ({ apiClient: { assistant: { list: apiMock.agents } } }));
+vi.mock("@/features/agents/lib/api-client", () => ({ apiClient: { assistant: { list: apiMock.agents, usage: apiMock.usage } } }));
 vi.mock("@/hooks/use-live-events", () => ({ useLiveEvents() {} }));
 vi.mock("@/hooks/use-notification-navigation", () => ({ useNotificationNavigation() {} }));
 vi.mock("@/lib/updater", () => ({ useAppUpdateState: () => ({ phase: "idle" }), formatUpdateProgress: () => undefined }));
@@ -58,6 +58,7 @@ beforeEach(() => {
   apiMock.projects.mockResolvedValue(projects);
   apiMock.codexChats.mockResolvedValue([...chats, chats[0]]);
   apiMock.featureRequest.mockResolvedValue([]);
+  apiMock.usage.mockResolvedValue({ trackedSince: null, series: [] });
   apiMock.createAgent.mockResolvedValue(undefined);
   apiMock.agents.mockResolvedValue([
     { id: "pock", profile: { name: "Pock" } },
@@ -90,7 +91,7 @@ describe("page navigation and conversations", () => {
     useAppStore.setState({ selectedCodexChatId: "old" });
     renderShell();
     const mobile = within(screen.getByRole("navigation", { name: "Mobile navigation" }));
-    expect(mobile.getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Chats", "Scheduled", "Projects", "Tasks", "Settings"]);
+    expect(mobile.getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Chats", "Scheduled", "Projects", "Tasks", "Usage", "Settings"]);
     expect(screen.getByRole("heading", { name: "Chats" })).toBeInTheDocument();
     expect(screen.queryByText("Conversation old")).not.toBeInTheDocument();
     fireEvent.click(mobile.getByRole("button", { name: "Settings" }));
@@ -123,7 +124,7 @@ describe("page navigation and conversations", () => {
     vi.stubGlobal("innerWidth", 393);
     renderShell();
     const mobile = within(screen.getByRole("navigation", { name: "Mobile navigation" }));
-    for (const [tab, content] of [["Scheduled", "Scheduled work is coming"], ["Projects", "A home for your code and conversations."], ["Tasks", "Task board content"], ["Settings", "Settings page content"]]) {
+    for (const [tab, content] of [["Scheduled", "Scheduled work is coming"], ["Projects", "A home for your code and conversations."], ["Tasks", "Task board content"], ["Usage", "Daily token consumption, with a separate series for each agent."], ["Settings", "Settings page content"]]) {
       fireEvent.click(mobile.getByRole("button", { name: tab }));
       expect(await screen.findByText(content)).toBeInTheDocument();
       expect(mobile.getByRole("button", { name: tab })).toHaveAttribute("aria-current", "page");

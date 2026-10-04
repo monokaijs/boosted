@@ -1,6 +1,33 @@
 [
   {
     "type": "function",
+    "name": "select_agent_model",
+    "description": "Escalate your own reasoning for the current task while preserving this conversation and tool results. Use gpt-6.1-sol for complex coding, debugging or multi-step analysis; reserve gpt-6-astra for exceptionally difficult reasoning that needs greater capability. Routine replies and tool operations should stay on the fast default. Send a useful short user update before escalating when appropriate. Call this tool by itself; after success, stop immediately without further tools. The server hands off automatically. This does not change any coding chat's model or account defaults.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "enum": [
+            "gpt-6.1-sol",
+            "gpt-6-astra"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      },
+      "required": [
+        "model",
+        "reason"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "type": "function",
     "name": "send_agent_message",
     "description": "Send one short, natural message to the user immediately, as soon as you have a useful answer, update or question. Focus on the task and outcome. Omit model names, reasoning settings, tool/command names and internal session details unless requested or needed to resolve a blocker. No preparatory tool call is needed. Call again for another separate bubble when useful. Prefer 1\u20133 sentences per message; send results and questions through this tool, not a long final response. This does not send instructions to a coding chat.",
     "inputSchema": {
@@ -304,7 +331,7 @@
   {
     "type": "function",
     "name": "create_chat",
-    "description": "Create a real Codex chat and start its first coding run in a saved project using the connected account and its isolated Codex home. By default a nonempty prompt is required and a real run starts. Use startRun false without a prompt only when the user explicitly requests an empty chat; it returns IDLE with no runId. Pass the exact model from list_models when the user selects one; otherwise use account defaults. New coding chats use full access with approvalPolicy never. Runs are watched unless watch is false. A failure after creation includes the chatId; retry send_message on that chat instead of creating a duplicate.",
+    "description": "Create a real Codex chat and start its first coding run in a saved project using the connected account and its isolated Codex home. By default a nonempty prompt is required and a real run starts. Use startRun false without a prompt only when the user explicitly requests an empty chat; it returns IDLE with no runId. Pass the exact model from list_models when the user selects one; otherwise use account defaults. New coding chats use full access with approvalPolicy never. Runs are watched unless watch is false. A failure after creation includes the chatId; retry send_message on that chat instead of creating a duplicate. This is the default way to carry out project tasks: dispatch concrete acceptance criteria and verification, review the watched result, and iterate in this chat until ready for user curation.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -347,7 +374,7 @@
   {
     "type": "function",
     "name": "send_message",
-    "description": "Send instructions to a chat. Running chats queue the message unless steer is true. This starts real coding work with the chat's existing permissions. New runs are automatically watched; set watch false if the user requests no updates. Steering changes the existing run and does not install a new watch.",
+    "description": "Send instructions to a chat. Running chats queue the message unless steer is true. This starts real coding work with the chat's existing permissions. New runs are automatically watched; set watch false if the user requests no updates. Steering changes the existing run and does not install a new watch. Use the same chat for autonomous fixes, missing verification and subsequent user feedback; preserve the original goal and scope.",
     "inputSchema": {
       "type": "object",
       "properties": {

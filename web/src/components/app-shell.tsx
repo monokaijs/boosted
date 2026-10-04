@@ -29,6 +29,7 @@ import { formatUpdateProgress, useAppUpdateState } from "@/lib/updater";
 const CodexChatPanel = lazy(() => import("@/components/panels/codex-chat-panel").then((module) => ({ default: module.CodexChatPanel })));
 const GroupPanel = lazy(() => import("@/features/groups/group-panel").then((module) => ({ default: module.GroupPanel })));
 const AgentsPanel = lazy(() => import("@/features/agents/agents-panel").then((module) => ({ default: module.AgentsPanel })));
+const UsagePage = lazy(() => import("@/features/agents/components/usage-page").then((module) => ({ default: module.UsagePage })));
 const tools = [
   { id: "files", label: "Files", icon: Files },
   { id: "git", label: "Changes", icon: GitBranch },
@@ -239,6 +240,7 @@ export function AppShell() {
           <EditorPanel />
         </div> : view === "group" && groupId ? <GroupPanel key={profileId + ":" + groupId} groupId={groupId} headerTarget={mobileChatDetail ? groupHeaderTarget : null} /> : view === "agents" ? <AgentsPanel selectedId={selectedAgentId} selectAgent={selectAgent} createAgentOpen={createAgentOpen} onCreateAgentOpenChange={setCreateAgentOpen} /> : chatId ? <CodexChatPanel key={chatId} threadId={chatId} /> : <NewChatPanel key={projectId ?? "empty"} />)}
         {page === "scheduled" && <ScheduledPage />}
+        {page === "usage" && <UsagePage />}
         {page === "projects" && <ProjectsPage onOpenProject={() => setProjectDialogOpen(true)} onSelect={newChat} />}
         {page === "tasks" && (view === "task" && taskId ? <div className="page-detail"><div className="page-detail-back"><Button variant="ghost" size="sm" onClick={() => setView("chat")}><ArrowLeft />All tasks</Button></div><TaskPanel key={taskId} /></div> : <TaskboardPanel />)}
         {page === "settings" && <SettingsPage section={settingsSection} onSectionChange={setSettingsSection} onClose={() => { if (isMobile && previousPage.current === "home" && !previousMobileChatOpen.current) openChats(); else goTo(previousPage.current); }} />}

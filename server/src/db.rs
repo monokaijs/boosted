@@ -43,6 +43,7 @@ impl Database {
         }
         sqlx::query("CREATE TABLE IF NOT EXISTS feature_documents (namespace TEXT NOT NULL, id TEXT NOT NULL, content_json TEXT NOT NULL, PRIMARY KEY(namespace,id))").execute(&self.pool).await?;
         crate::groups::migrate(self).await?;
+        crate::agent_usage::migrate(self).await?;
         Ok(())
     }
 

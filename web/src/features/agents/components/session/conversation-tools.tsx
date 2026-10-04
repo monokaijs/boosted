@@ -14,6 +14,7 @@ const labels: Record<string, string> = {
   watch_chat: "Watch coding run", schedule_follow_up: "Schedule follow-up", list_follow_ups: "Read follow-ups", cancel_follow_up: "Cancel follow-up",
   get_profile: "Read assistant profile", update_profile: "Update name and personality",
   generate_avatar: "Generate avatar",
+  select_agent_model: "Adjust reasoning",
   list_workspaces: "Read projects", list_chats: "Read chats", read_chat: "Read conversation", read_run: "Read coding run",
   list_accounts: "Check provider capacity", list_models: "Read Codex models", set_chat_model: "Switch chat model", create_chat: "Create chat", send_message: "Send instructions",
   stop_chat: "Stop chat", stop_run: "Stop coding run", set_chat_access: "Change chat access", clear_chat: "Clear conversation", delete_chat: "Delete conversation", move_chat: "Move chat to another account", set_failover: "Update quota recovery",
