@@ -1,3 +1,4 @@
+import { forgetGroup } from "@/features/groups/lifecycle";
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getToken } from "@/lib/api";
@@ -34,7 +35,10 @@ export function useLiveEvents() {
         try {
           const event = JSON.parse(message.data) as LiveEvent;
           void notifyForLiveEvent(event, api);
-          if (event.topic.startsWith("group.")) void queryClient.invalidateQueries({ queryKey: ["groups"] });
+          if (event.topic === "group.deleted") {
+            const id = (event.data as { groupId?: string }).groupId;
+            if (id) forgetGroup(queryClient, id, api.profileId);
+          } else if (event.topic.startsWith("group.")) void queryClient.invalidateQueries({ queryKey: ["groups"] });
           if (event.topic === "assistant.updated") {
             const next = event.data as AssistantState;
             const key = ["assistant-state", next.id];

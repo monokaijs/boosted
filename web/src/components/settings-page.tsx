@@ -1,7 +1,6 @@
-import { ProvidersSettings } from "@/features/agents/providers-settings";
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Bell, Bot, Code2, Copy, ExternalLink, GitBranch, Globe2, LoaderCircle, Menu, Pencil, Plug, Plus, RefreshCw, Search, Server, Settings2, Shield, Trash2, UserPlus, Users, X } from "lucide-react";
+import { ArrowLeft, ChartNoAxesCombined, Bell, Bot, Code2, ExternalLink, GitBranch, Globe2, LoaderCircle, Menu, Pencil, Plug, Plus, RefreshCw, Search, Server, Settings2, Shield, Trash2, UserPlus, Users, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -9,13 +8,12 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import { formatDuration, formatExactNumber, formatPercent, formatWindowDuration, rateLimitBuckets, rateLimitLabel } from "@/lib/codex-usage";
 import { defaultNotificationSettings, notificationEventDefinitions, notificationPermission, readNotificationSettings, requestNotificationPermission, showTestNotification, writeNotificationSettings, type PwaNotificationSettings } from "@/lib/notifications";
 import { useMachineStore } from "@/lib/machines";
 import { useAppStore } from "@/lib/store";
 import { isTauriRuntime } from "@/lib/runtime";
 import { refreshWebApp } from "@/lib/web-update";
-import type { CodexRateLimitWindow, Integration, IntegrationDiscoveryTarget } from "@/lib/types";
+import type { Integration, IntegrationDiscoveryTarget } from "@/lib/types";
 import { checkAndInstallAppUpdate, formatUpdateProgress, refreshAppUpdateAvailability, useAppUpdateState } from "@/lib/updater";
 import { cn, relativeTime } from "@/lib/utils";
 import { ConnectionsManager } from "@/components/machine-manager";
@@ -23,17 +21,21 @@ import { SettingsGroup, SettingsRow, SettingsSection, SettingsSelect } from "@/c
 import "./settings.css";
 
 const Gitlab = GitBranch;
+const UsageSettings = lazy(() => import("./settings-usage").then((m) => ({ default: m.UsageSettings })));
+const CodexSettings = lazy(() => import("./settings-codex").then((m) => ({ default: m.CodexSettings })));
+const ProvidersSettings = lazy(() => import("@/features/agents/providers-settings").then((m) => ({ default: m.ProvidersSettings })));
 
-export type SettingsSectionId = "providers" | "connections" | "notifications" | "web" | "application" | "team" | "workspace" | "integrations" | "codex";
+export type SettingsSectionId = "providers" | "connections" | "notifications" | "web" | "application" | "team" | "usage" | "workspace" | "integrations" | "codex";
 type Section = SettingsSectionId;
 
 const sectionGroups: { label: string; sections: { id: Section; label: string; icon: typeof Settings2 }[] }[] = [
-  { label: "This device", sections: [
+  { label: "Device", sections: [
     { id: "connections", label: "Connections", icon: Server },
     { id: "notifications", label: "Notifications", icon: Bell },
   ] },
-  { label: "This machine", sections: [
+  { label: "Machine", sections: [
     { id: "providers", label: "Providers", icon: Plug },
+    { id: "usage", label: "Usage", icon: ChartNoAxesCombined },
     { id: "web", label: "Web interface", icon: Globe2 },
     { id: "application", label: "Application", icon: RefreshCw },
     { id: "team", label: "Team", icon: Users },
@@ -46,7 +48,7 @@ const sectionGroups: { label: string; sections: { id: Section; label: string; ic
 ];
 
 function ConnectionsSettings() {
-  return <div className="settings-content"><SettingsSection title="Saved machines" description="Connect to a Boosted server and switch between your machines."><ConnectionsManager embedded /></SettingsSection><SettingsSection title="Connection scope"><SettingsGroup><SettingsRow label="Independent workspaces" description="Each machine has its own accounts, projects, tasks, and settings."><Server className="size-4 text-muted-foreground" /></SettingsRow></SettingsGroup></SettingsSection></div>;
+  return <div className="settings-content"><SettingsSection title="Saved machines" description="Connect to a Boosted server and switch between your machines."><ConnectionsManager embedded /></SettingsSection><p className="settings-note">Each machine keeps its own accounts, repositories, and settings.</p></div>;
 }
 
 function GlobalWebSettings() {
@@ -662,82 +664,6 @@ export function IntegrationsSettings() {
   </div>;
 }
 
-function collectObjects(value: unknown): Record<string, any>[] {
-  if (Array.isArray(value)) return value.filter((entry): entry is Record<string, any> => Boolean(entry) && typeof entry === "object");
-  if (!value || typeof value !== "object") return [];
-  const record = value as Record<string, unknown>;
-  for (const key of ["data", "servers", "items", "mcpServers"]) { const found = collectObjects(record[key]); if (found.length) return found; }
-  return [];
-}
-
-function formatDayCount(value?: number | null) {
-  if (value === undefined || value === null) return "Unavailable";
-  return `${formatExactNumber(value)} ${value === 1 ? "day" : "days"}`;
-}
-
-function formatUnixTimestamp(value?: number | null) {
-  if (value === undefined || value === null) return "Not provided";
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(new Date(value * 1_000));
-}
-
-function QuotaWindow({ name, window }: { name: string; window: CodexRateLimitWindow }) {
-  const percentage = window.usedPercent;
-  const width = percentage === undefined || percentage === null ? 0 : Math.min(100, Math.max(0, percentage));
-  return <div className="settings-quota-window">
-    <div className="flex items-center justify-between gap-3"><span className="text-[11px] font-medium">{window.windowDurationMins === undefined || window.windowDurationMins === null ? name : formatWindowDuration(window.windowDurationMins)}</span><strong className="text-xs">{percentage === undefined || percentage === null ? "Usage unavailable" : `${formatPercent(percentage)} used`}</strong></div>
-    <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${width}%` }} /></div>
-    <p className="mt-2 text-[10px] text-muted-foreground">{window.resetsAt === undefined || window.resetsAt === null ? "Reset time unavailable" : `Resets ${formatUnixTimestamp(window.resetsAt)}`}</p>
-  </div>;
-}
-
-function CodexSettings() {
-  const projectId = useAppStore((state) => state.selectedProjectId);
-  const user = useAppStore((state) => state.user);
-  const queryClient = useQueryClient();
-  const settings = useQuery({ queryKey: ["workspace-codex-settings", projectId], queryFn: () => api.workspaceCodexSettings(projectId!), enabled: Boolean(projectId), refetchInterval: 30_000, retry: false });
-  const setup = useQuery({ queryKey: ["setup"], queryFn: api.setupState, refetchInterval: 5_000 });
-  const [instructions, setInstructions] = useState("");
-  const [mcpName, setMcpName] = useState("");
-  const [mcpType, setMcpType] = useState<"url" | "command">("url");
-  const [mcpValue, setMcpValue] = useState("");
-  const [mcpArgs, setMcpArgs] = useState("");
-  const [copied, setCopied] = useState(false);
-  useEffect(() => { if (settings.data) setInstructions(settings.data.instructions); }, [settings.data]);
-  const save = useMutation({ mutationFn: () => api.updateWorkspaceCodexSettings(projectId!, instructions), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["workspace-codex-settings", projectId] }) });
-  const addMcp = useMutation({ mutationFn: () => api.upsertWorkspaceMcp(projectId!, mcpName, mcpType === "url" ? { url: mcpValue } : { command: mcpValue, args: mcpArgs.split(/\s+/).filter(Boolean) }), onSuccess: () => { setMcpName(""); setMcpValue(""); setMcpArgs(""); void queryClient.invalidateQueries({ queryKey: ["workspace-codex-settings", projectId] }); } });
-  const login = useMutation({ mutationFn: api.startCodexLogin, onSuccess: () => void setup.refetch() });
-  const mcps = useMemo(() => collectObjects(settings.data?.mcps), [settings.data?.mcps]);
-  const codex = setup.data?.codex;
-  const usage = settings.data?.usage;
-  const summary = usage?.summary;
-  const dailyUsage = usage?.dailyUsageBuckets;
-  const limits = rateLimitBuckets(settings.data?.rateLimits);
-  const resetCredits = settings.data?.rateLimits?.rateLimitResetCredits;
-  return <div className="settings-content">
-    <SettingsSection title="Shared Codex account" description="The local Codex CLI account used by workspace tasks.">
-      <SettingsGroup><SettingsRow label="Connection" description={codex?.available ? codex?.version ?? "Codex CLI detected" : "Install the Codex CLI on this machine to connect."}><span className={codex?.authenticated ? "text-success" : "text-muted-foreground"}>{codex?.authenticated ? "Ready" : codex?.available ? "Login required" : "Unavailable"}</span></SettingsRow>
-      {!codex?.authenticated && codex?.available && <SettingsRow label="Sign in with ChatGPT" description="Connect this machine's shared Codex account."><Button variant="secondary" size="sm" disabled={user?.role !== "admin" || login.isPending} onClick={() => login.mutate()}>{login.isPending && <LoaderCircle className="animate-spin" />}Connect</Button></SettingsRow>}</SettingsGroup>
-      {settings.isLoading && <p className="settings-note">Loading workspace configuration…</p>}
-      {settings.error && <p role="alert" className="settings-error">{settings.error.message}</p>}
-      {login.error && <p role="alert" className="settings-error">{login.error.message}</p>}
-      {login.data && !codex?.authenticated && <div className="settings-auth-code"><p>Open <a href={login.data.verificationUrl} target="_blank" rel="noreferrer">the verification page <ExternalLink className="inline size-3" /></a> and enter this code:</p><Button variant="ghost" type="button" aria-label="Copy device code" onClick={() => { void navigator.clipboard.writeText(login.data!.userCode); setCopied(true); }}><code>{login.data.userCode}</code><Copy className="size-4" /></Button>{copied && <p role="status">Copied</p>}</div>}
-    </SettingsSection>
-    <SettingsSection title="Usage" description="Token activity reported for the shared Codex account.">
-      {summary ? <SettingsGroup><SettingsRow label="Lifetime tokens"><span>{formatExactNumber(summary.lifetimeTokens)}</span></SettingsRow><SettingsRow label="Peak daily tokens"><span>{formatExactNumber(summary.peakDailyTokens)}</span></SettingsRow><SettingsRow label="Longest turn"><span>{formatDuration(summary.longestRunningTurnSec)}</span></SettingsRow><SettingsRow label="Current streak"><span>{formatDayCount(summary.currentStreakDays)}</span></SettingsRow><SettingsRow label="Longest streak"><span>{formatDayCount(summary.longestStreakDays)}</span></SettingsRow></SettingsGroup> : <p className="settings-note">Token activity is unavailable for this account.</p>}
-      {dailyUsage && dailyUsage.length > 0 && <details className="settings-advanced"><summary>Daily token activity <span className="settings-inline-meta">{dailyUsage.length} days</span></summary><SettingsGroup>{dailyUsage.map((bucket) => <SettingsRow key={bucket.startDate} label={bucket.startDate}><span>{formatExactNumber(bucket.tokens)} tokens</span></SettingsRow>)}</SettingsGroup></details>}
-    </SettingsSection>
-    <SettingsSection title="Quota windows" description="Reported usage and exact local reset times.">
-      {limits.length ? <div className="settings-quota-list">{limits.map((limit) => <div key={limit.limitId}><div className="settings-quota-title"><p>{rateLimitLabel(limit)}</p>{limit.planType && <span>{limit.planType}</span>}</div><div className="settings-group">{limit.primary && <QuotaWindow name="Primary window" window={limit.primary} />}{limit.secondary && <QuotaWindow name="Secondary window" window={limit.secondary} />}</div>{limit.rateLimitReachedType && <p className="settings-error">{limit.rateLimitReachedType}</p>}</div>)}</div> : <p className="settings-note">Quota-window usage is unavailable for this account.</p>}
-    </SettingsSection>
-    <SettingsSection title="Banked resets" description="Earned rate-limit resets available on this account."><SettingsGroup><SettingsRow label="Available resets"><span>{resetCredits ? formatExactNumber(resetCredits.availableCount) : "Unavailable"}</span></SettingsRow>{resetCredits?.credits?.map((credit) => <SettingsRow key={credit.id} label={credit.title ?? "Rate-limit reset"} description={<>{credit.description && <>{credit.description}<br /></>}{credit.resetType} · Granted {formatUnixTimestamp(credit.grantedAt)} · {credit.expiresAt ? `Expires ${formatUnixTimestamp(credit.expiresAt)}` : "Does not expire"}</>}><span className="settings-value">{credit.status}</span></SettingsRow>)}</SettingsGroup>{resetCredits && resetCredits.availableCount > (resetCredits.credits?.length ?? 0) && <p className="settings-note">The account reported {resetCredits.availableCount} available resets and returned {resetCredits.credits?.length ?? 0} individual details.</p>}</SettingsSection>
-    <SettingsSection title="Workspace instructions" description="Included in every planning and execution run in this repository."><SettingsGroup><SettingsRow stacked label="Instructions" description="Repository conventions, required checks, and architecture boundaries."><Textarea className="min-h-44 font-mono" value={instructions} disabled={settings.isLoading || !settings.data} onChange={(event) => setInstructions(event.target.value)} placeholder="Describe how Codex should work in this repository…" /></SettingsRow></SettingsGroup><div className="settings-save-bar"><p>{save.isSuccess ? "Instructions saved." : "Applies to new runs in this workspace."}</p><Button size="sm" onClick={() => save.mutate()} disabled={save.isPending || settings.isLoading || !settings.data}>{save.isPending && <LoaderCircle className="animate-spin" />}Save instructions</Button></div>{save.error && <p role="alert" className="settings-error">{save.error.message}</p>}</SettingsSection>
-    <SettingsSection title="MCP servers" description="Tools available to Codex in this workspace.">
-      <div className="settings-mcp-list">{mcps.map((mcp, index) => <div key={String(mcp.name ?? mcp.id ?? index)} className="settings-integration-row"><div className="settings-integration-logo"><Plug /></div><div className="settings-row-copy"><p>{String(mcp.name ?? mcp.id ?? "MCP server")}</p><p>{String(mcp.status ?? mcp.authStatus ?? "Configured")}</p></div>{Array.isArray(mcp.tools) && <span className="settings-value">{mcp.tools.length} tools</span>}</div>)}{!mcps.length && <p className="settings-note">No MCP servers reported for this workspace.</p>}</div>
-      <details className="settings-advanced"><summary>Add MCP server</summary><form onSubmit={(event) => { event.preventDefault(); if (!addMcp.isPending) addMcp.mutate(); }}><SettingsGroup><SettingsRow label="Server name"><Input value={mcpName} onChange={(event) => setMcpName(event.target.value)} required /></SettingsRow><SettingsRow label="Connection type"><SettingsSelect value={mcpType} onValueChange={(value) => setMcpType(value as "url" | "command")} options={[{ value: "url", label: "HTTP URL" }, { value: "command", label: "Command" }]} /></SettingsRow><SettingsRow stacked label={mcpType === "url" ? "Server URL" : "Command"}><Input placeholder={mcpType === "url" ? "https://mcp.example.com" : "npx"} value={mcpValue} onChange={(event) => setMcpValue(event.target.value)} required /></SettingsRow>{mcpType === "command" && <SettingsRow stacked label="Arguments" description="Separate arguments with spaces."><Input value={mcpArgs} onChange={(event) => setMcpArgs(event.target.value)} /></SettingsRow>}</SettingsGroup><div className="settings-save-bar"><p>Saved to .codex/config.toml in this repository.</p><Button size="sm" disabled={addMcp.isPending || !mcpName.trim() || !mcpValue.trim()}>{addMcp.isPending ? <LoaderCircle className="animate-spin" /> : <Plus />}Add server</Button></div>{addMcp.error && <p role="alert" className="settings-error">{addMcp.error.message}</p>}</form></details>
-    </SettingsSection>
-  </div>;
-}
-
 function TeamSettings() {
   const user = useAppStore((state) => state.user);
   const queryClient = useQueryClient();
@@ -766,7 +692,8 @@ const sectionDescriptions: Record<Section, string> = {
   team: "Manage access to this machine.",
   workspace: "Repository details and task defaults.",
   integrations: "Bring external issues into your workspace.",
-  codex: "Account usage, workspace instructions, and MCP servers.",
+  codex: "Instructions, tools, and the shared account connection.",
+  usage: "Token activity across agents, groups, and the shared Codex account.",
 };
 
 export function SettingsPage({ section, onSectionChange, onClose }: { section: Section; onSectionChange: (section: Section) => void; onClose: () => void }) {
@@ -777,6 +704,7 @@ export function SettingsPage({ section, onSectionChange, onClose }: { section: S
   const headingRef = useRef<HTMLHeadingElement>(null);
   const navigationRef = useRef<HTMLDivElement>(null);
   const selected = sectionGroups.flatMap((group) => group.sections).find((item) => item.id === section)!;
+  const scope = sectionGroups.find((group) => group.sections.some((item) => item.id === section))!.label;
   const query = search.trim().toLocaleLowerCase();
   const visibleGroups = sectionGroups.map((group) => ({ ...group, sections: group.sections.filter((item) => `${group.label} ${item.label} ${sectionDescriptions[item.id]}`.toLocaleLowerCase().includes(query)) }));
   useEffect(() => { scrollRef.current?.scrollTo?.(0, 0); headingRef.current?.focus({ preventScroll: true }); }, [section]);
@@ -794,9 +722,10 @@ export function SettingsPage({ section, onSectionChange, onClose }: { section: S
     <aside className="settings-sidebar immersive-panel">{navigation}</aside>
     <div className="settings-main" ref={scrollRef}>
       <div className="settings-mobile-controls"><Button variant="ghost" size="sm" onClick={onClose}><ArrowLeft />Workspace</Button><Button variant="ghost" size="sm" aria-label="Browse settings sections" onClick={() => setNavigationOpen(true)}><Menu />Sections</Button></div>
-      <div className="settings-page-heading"><h1 ref={headingRef} tabIndex={-1}>{selected.label === "General" ? "Workspace" : selected.label}</h1><p>{sectionDescriptions[section]}</p></div>
-      <div key={section}>
+      <div className="settings-page-heading"><span className="settings-scope-label">{scope} settings</span><h1 ref={headingRef} tabIndex={-1}>{selected.label === "General" ? "Workspace" : selected.label}</h1><p>{sectionDescriptions[section]}</p></div>
+      <Suspense fallback={<div className="settings-content"><p role="status" className="settings-note">Loading settings…</p></div>}><div key={section}>
         {section === "providers" && <ProvidersSettings />}
+        {section === "usage" && <UsageSettings />}
         {section === "connections" && <ConnectionsSettings />}
         {section === "notifications" && <NotificationSettings />}
         {section === "web" && <GlobalWebSettings />}
@@ -804,8 +733,8 @@ export function SettingsPage({ section, onSectionChange, onClose }: { section: S
         {section === "team" && <TeamSettings />}
         {section === "workspace" && <WorkspaceSettings />}
         {section === "integrations" && <IntegrationsSettings />}
-        {section === "codex" && (projectId ? <CodexSettings /> : <div className="settings-content"><p className="settings-empty">Open a workspace to configure Codex instructions and MCP servers.</p></div>)}
-      </div>
+        {section === "codex" && (projectId ? <CodexSettings key={projectId} /> : <div className="settings-content"><p className="settings-empty">Open a workspace to configure Codex instructions and MCP servers.</p></div>)}
+      </div></Suspense>
     </div>
     <Dialog open={navigationOpen} onOpenChange={setNavigationOpen}><DialogContent ref={navigationRef} className="settings-navigation-drawer immersive-panel" onOpenAutoFocus={(event) => { event.preventDefault(); navigationRef.current?.focus(); }}><DialogHeader className="sr-only"><DialogTitle>Settings sections</DialogTitle><DialogDescription>Choose a settings section.</DialogDescription></DialogHeader>{navigation}</DialogContent></Dialog>
   </section>;

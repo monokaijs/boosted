@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ForcePasswordDialog, NewTaskDialog, OpenProjectDialog } from "@/components/create-dialogs";
-import { SettingsPage, type SettingsSectionId } from "@/components/settings-page";
+import type { SettingsSectionId } from "@/components/settings-page";
 import { MachineSwitcher } from "@/components/machine-manager";
 import { ChatList } from "@/components/chat-list";
 import { ProjectsPage, ScheduledPage } from "@/components/app-pages";
@@ -26,10 +26,10 @@ import { useAppStore } from "@/lib/store";
 import { destinations, navigate, pageFromHash, type AppPage } from "@/lib/navigation";
 import { formatUpdateProgress, useAppUpdateState } from "@/lib/updater";
 
+const SettingsPage = lazy(() => import("@/components/settings-page").then((m) => ({ default: m.SettingsPage })));
 const CodexChatPanel = lazy(() => import("@/components/panels/codex-chat-panel").then((module) => ({ default: module.CodexChatPanel })));
 const GroupPanel = lazy(() => import("@/features/groups/group-panel").then((module) => ({ default: module.GroupPanel })));
 const AgentsPanel = lazy(() => import("@/features/agents/agents-panel").then((module) => ({ default: module.AgentsPanel })));
-const UsagePage = lazy(() => import("@/features/agents/components/usage-page").then((module) => ({ default: module.UsagePage })));
 const tools = [
   { id: "files", label: "Files", icon: Files },
   { id: "git", label: "Changes", icon: GitBranch },
@@ -46,7 +46,7 @@ export function AppShell() {
   const [page, setPage] = useState(pageFromHash);
   const isMobile = useMobileLayout();
   const [mobileChatOpen, setMobileChatOpen] = useState(() => window.location.hash === "#home");
-  const [settingsSection, setSettingsSection] = useState<SettingsSectionId>("connections");
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId>(() => window.location.hash === "#usage" ? "usage" : "connections");
   const previousPage = useRef<AppPage>("home");
   const previousMobileChatOpen = useRef(false);
   const [view, setView] = useState<ContentView>(() => useAppStore.getState().selectedGroupId ? "group" : "chat");
@@ -122,9 +122,11 @@ export function AppShell() {
       if (!id) return;
       useAppStore.getState().selectGroup(id); setView("group"); setToolView(undefined); goTo("home");
     };
+    const deleted = () => { setView("chat"); setToolView(undefined); if (isMobile) openChats(); };
+    window.addEventListener("boosted:group-deleted", deleted);
     window.addEventListener("boosted:open-group", open);
-    return () => window.removeEventListener("boosted:open-group", open);
-  }, [goTo]);
+    return () => { window.removeEventListener("boosted:group-deleted", deleted); window.removeEventListener("boosted:open-group", open); };
+  }, [goTo, isMobile, openChats]);
 
   useEffect(() => {
     const select = (event: Event) => {
@@ -155,7 +157,7 @@ export function AppShell() {
   }, [projectId, projects.data]);
 
   useEffect(() => {
-    const hashChange = () => { setPage(pageFromHash()); setMobileChatOpen(window.location.hash === "#home"); setMobileChatsOpen(false); };
+    const hashChange = () => { if (window.location.hash === "#usage") setSettingsSection("usage"); setPage(pageFromHash()); setMobileChatOpen(window.location.hash === "#home"); setMobileChatsOpen(false); };
     window.addEventListener("hashchange", hashChange);
     return () => window.removeEventListener("hashchange", hashChange);
   }, [setMobileChatsOpen]);
@@ -241,7 +243,6 @@ export function AppShell() {
           <EditorPanel />
         </div> : view === "group" && groupId ? <GroupPanel key={profileId + ":" + groupId} groupId={groupId} headerTarget={mobileChatDetail ? groupHeaderTarget : null} /> : view === "agents" ? <AgentsPanel selectedId={selectedAgentId} selectAgent={selectAgent} createAgentOpen={createAgentOpen} onCreateAgentOpenChange={setCreateAgentOpen} /> : chatId ? <CodexChatPanel key={chatId} threadId={chatId} /> : <NewChatPanel key={projectId ?? "empty"} />)}
         {page === "scheduled" && <ScheduledPage />}
-        {page === "usage" && <UsagePage />}
         {page === "projects" && <ProjectsPage onOpenProject={() => setProjectDialogOpen(true)} onSelect={newChat} />}
         {page === "tasks" && (view === "task" && taskId ? <div className="page-detail"><div className="page-detail-back"><Button variant="ghost" size="sm" onClick={() => setView("chat")}><ArrowLeft />All tasks</Button></div><TaskPanel key={taskId} /></div> : <TaskboardPanel />)}
         {page === "settings" && <SettingsPage section={settingsSection} onSectionChange={setSettingsSection} onClose={() => { if (isMobile && previousPage.current === "home" && !previousMobileChatOpen.current) openChats(); else goTo(previousPage.current); }} />}

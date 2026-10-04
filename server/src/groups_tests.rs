@@ -986,7 +986,7 @@ async fn leader_quietly_forwards_greetings_preserving_identity_sender_and_recipi
         State(state.clone()),
         AxumPath(id(&g).into()),
         Extension(user()),
-        Json(json!({"content":"Chào Alice","recipientIds":[id(&coral)],"clientMessageId":"address-alice",
+        Json(json!({"content":"FORWARD_TO_ALICE","recipientIds":[id(&coral)],"clientMessageId":"address-alice",
             "attachments":[{"id":"note","name":"note.txt","kind":"file","dataUrl":"data:text/plain;base64,aGVsbG8="}]})),
     )
     .await
@@ -1048,7 +1048,7 @@ async fn leader_quietly_forwards_greetings_preserving_identity_sender_and_recipi
     assert_eq!(forwarded["attachmentContext"][0]["text"], "hello");
     assert_eq!(
         forwarded["currentGroupMessages"][0]["content"],
-        "Chào Alice"
+        "FORWARD_TO_ALICE"
     );
     assert_eq!(
         forwarded["currentGroupMessages"][0]["recipientIds"],
@@ -1092,6 +1092,151 @@ async fn leader_quietly_forwards_greetings_preserving_identity_sender_and_recipi
             .any(|receipt| receipt["tool"] == "forward_group_message"
                 && receipt["status"] == "completed")
     );
+}
+
+#[test]
+fn greeting_routing_requires_one_named_peer_and_preserves_possible_nicknames() {
+    let mut view = json!({"members":[
+        {"id":"coral","profile":{"name":"Coral"}},
+        {"id":"alice","profile":{"name":"Alice"}}
+    ],"messages":[]});
+    let mut message = json!({"id":"current","senderType":"user","recipientIds":["coral"]});
+    for greeting in [
+        "hello alice",
+        "Hello Alice!",
+        "HELLO, @ALICE",
+        "Chào Alice",
+        "Xin chào Alice.",
+        "hi: alice",
+    ] {
+        message["content"] = json!(greeting);
+        assert_eq!(
+            greeting_recipient(&view, &message, "coral"),
+            Some("alice".into()),
+            "{greeting}"
+        );
+    }
+    for content in [
+        "hello coral",
+        "hello Coco",
+        "Alice joined the group",
+        "say hello Alice",
+        "hello Alice and Coral",
+        "hello Alice, how are you?",
+        "hialice",
+        "\"hello Alice\"",
+    ] {
+        message["content"] = json!(content);
+        assert_eq!(
+            greeting_recipient(&view, &message, "coral"),
+            None,
+            "{content}"
+        );
+    }
+    message["content"] = json!("hello alice");
+    message["senderType"] = json!("agent");
+    assert_eq!(greeting_recipient(&view, &message, "coral"), None);
+    message["senderType"] = json!("user");
+    for nickname in [
+        "I'll call you Alice",
+        "Your nickname is Alice",
+        "Từ giờ anh sẽ gọi em là Alice",
+    ] {
+        view["messages"] = json!([{"id":"nickname","senderType":"user","recipientIds":["coral"],"content":nickname},message]);
+        assert_eq!(
+            greeting_recipient(&view, &message, "coral"),
+            None,
+            "{nickname}"
+        );
+    }
+    view["messages"] = json!([{"id":"earlier","senderType":"user","recipientIds":["coral"],"content":"Alice joined the group"},message]);
+    assert_eq!(
+        greeting_recipient(&view, &message, "coral"),
+        Some("alice".into())
+    );
+    view["members"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"other-alice","profile":{"name":"ALICE"}}));
+    assert_eq!(greeting_recipient(&view, &message, "coral"), None);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn greeting_routing_bypasses_a_leader_model_that_refuses_to_forward() {
+    let (root, state, _) = fixture().await;
+    let (_, Json(coral)) =
+        agents::create_agent(State(state.clone()), Json(json!({"name":"Coral"})))
+            .await
+            .unwrap();
+    let (_, Json(alice)) =
+        agents::create_agent(State(state.clone()), Json(json!({"name":"Alice"})))
+            .await
+            .unwrap();
+    let (_, Json(g)) = create(
+        State(state.clone()),
+        Extension(user()),
+        Json(json!({"name":"DiningConnect","memberIds":[id(&coral),id(&alice)]})),
+    )
+    .await
+    .unwrap();
+    let g = serde_json::to_value(g).unwrap();
+    for (index, greeting) in ["hello alice", "hello alice", "Chào Alice"]
+        .into_iter()
+        .enumerate()
+    {
+        let source = human(
+            &state,
+            id(&g),
+            greeting,
+            vec![id(&coral)],
+            &format!("greeting-{index}"),
+        )
+        .await;
+        let view = settle(&state, id(&g)).await;
+        let replies: Vec<_> = view["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["rootId"] == source["id"] && message["senderType"] == "agent")
+            .collect();
+        assert_eq!(
+            replies.len(),
+            1,
+            "Only the intended agent should reply to {greeting}"
+        );
+        assert_eq!(replies[0]["senderId"], id(&alice));
+        assert_eq!(replies[0]["inReplyTo"], source["id"]);
+        assert_eq!(replies[0]["recipientIds"], json!([]));
+        assert!(view["tasks"].as_array().unwrap().is_empty());
+        assert_eq!(
+            get(&state.db, "group_messages", id(&source)).await.unwrap(),
+            source
+        );
+    }
+    let log =
+        std::fs::read_to_string(root.path().join("accounts/account/group-rpc-log.jsonl")).unwrap();
+    let starts: Vec<Value> = log
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|rpc| rpc["method"] == "turn/start")
+        .map(|rpc| {
+            serde_json::from_str(rpc["params"]["input"][0]["text"].as_str().unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(starts.len(), 3);
+    for prompt in starts {
+        assert_eq!(
+            prompt["agentIdentity"]["agentId"],
+            id(&alice),
+            "The leader model must never run for these greetings"
+        );
+        assert_eq!(prompt["currentGroupMessages"][0]["senderId"], "admin");
+        assert_eq!(
+            prompt["groupContext"]["currentDelivery"]["event"],
+            json!({"type":"forwarded_message","forwardedBy":id(&coral)})
+        );
+    }
 }
 
 #[tokio::test]
@@ -1689,6 +1834,91 @@ async fn stop_interrupts_only_its_group_and_cleans_native_terminals() {
     let _ = stop(State(state.clone()), AxumPath(id(&b).into()))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn deletion_removes_owned_records_and_usage_but_preserves_other_groups_and_files() {
+    let (root, state, peer) = fixture().await;
+    let a = group(&state, &peer, true).await;
+    let b = group(&state, &peer, false).await;
+    human(&state,id(&a),"Saved message",vec![],"a").await;
+    human(&state,id(&b),"Keep this",vec![],"b").await;
+    for table in ["group_tasks","group_reviews","group_executions","group_receipts","group_operations"] {
+        put(&state.db,table,id(&a),&json!({"id":format!("a-{table}"),"groupId":id(&a),"status":"completed"})).await.unwrap();
+    }
+    agent_usage::record_scoped(&state.db,"pock","usage-a",&json!({"tokenUsage":{"total":{"totalTokens":100}}}),Some(id(&a)),true).await.unwrap();
+    let mut events = state.live.subscribe();
+    let Json(deleted) = delete(State(state.clone()),AxumPath(id(&a).into())).await.unwrap();
+    assert_eq!(deleted["deleted"],true);
+    for table in ["groups","group_messages","group_tasks","group_reviews","group_executions","group_receipts","group_operations","group_requests","group_members","group_deliveries","group_usage_buckets"] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE group_id=?")).bind(id(&a)).fetch_one(&state.db.pool).await.unwrap();
+        assert_eq!(count,0,"{table} leaked deleted records");
+    }
+    assert_eq!(snapshot(&state,id(&b)).await.unwrap()["messages"][0]["content"],"Keep this");
+    assert!(state.agents.get("pock").await.is_ok());
+    assert!(root.path().join("repo/baseline.txt").exists());
+    assert!(matches!(delete(State(state.clone()),AxumPath(id(&a).into())).await,Err(AppError::NotFound(_))));
+    assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|e| e.topic == "group.deleted"));
+    assert!(agent_usage::read_group_usage(State(state.clone()),AxumPath(id(&a).into()),Query(agent_usage::UsageQuery{days:Some(7)})).await.is_err());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn deletion_interrupts_running_turns_without_stopping_another_group() {
+    let (root,state,peer) = fixture().await;
+    let a = group(&state,&peer,false).await;
+    let b = group(&state,&peer,false).await;
+    human(&state,id(&a),"HOLD",vec!["pock"],"a").await;
+    human(&state,id(&b),"HOLD",vec![&peer],"b").await;
+    tick(&state).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3),async {
+        while !std::fs::read_to_string(root.path().join("accounts/account/group-rpc-log.jsonl")).unwrap_or_default().contains("turn/start") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let _ = delete(State(state.clone()),AxumPath(id(&a).into())).await.unwrap();
+    assert!(!agent_active(&state,"pock").await);
+    assert!(agent_active(&state,&peer).await);
+    assert_eq!(get(&state.db,"groups",id(&b)).await.unwrap()["stopped"],false);
+    tick(&state).await.unwrap();
+    assert!(get(&state.db,"groups",id(&a)).await.is_err());
+    assert!(all(&state.db,"group_executions",id(&a)).await.unwrap().is_empty());
+    let _ = stop(State(state.clone()),AxumPath(id(&b).into())).await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn group_usage_tracks_native_agent_and_child_streams_with_cached_tokens() {
+    let (_root,state,peer) = fixture().await;
+    let g = group(&state,&peer,true).await;
+    human(&state,id(&g),"CHILD",vec![],"root").await;
+    settle(&state,id(&g)).await;
+    let Json(usage) = agent_usage::read_group_usage(State(state.clone()),AxumPath(id(&g).into()),Query(agent_usage::UsageQuery{days:Some(7)})).await.unwrap();
+    assert!(usage["trackedSince"].is_string());
+    assert_eq!(usage["series"].as_array().unwrap().len(),2);
+    let mut total = 0;
+    for series in usage["series"].as_array().unwrap() {
+        for bucket in series["buckets"].as_array().unwrap() {
+            let tokens = bucket["tokens"].as_i64().unwrap();
+            assert_eq!(tokens,bucket["inputTokens"].as_i64().unwrap()+bucket["outputTokens"].as_i64().unwrap());
+            assert!(bucket["cachedTokens"].as_i64().unwrap()>0);
+            assert_eq!(bucket["detailedTokens"],bucket["tokens"]);
+            total += tokens;
+        }
+    }
+    let agent_total: i64 = sqlx::query_scalar("SELECT SUM(tokens) FROM agent_usage_buckets").fetch_one(&state.db.pool).await.unwrap();
+    // Two child coding runs of 250 tokens each are included only in group usage.
+    assert_eq!(total,agent_total+500);
+    let chats = providers::documents(&state.db,"provider-chats").await.unwrap();
+    assert_eq!(chats.len(),2);
+    let _ = delete(State(state.clone()),AxumPath(id(&g).into())).await.unwrap();
+    for chat in chats {
+        let kept = document(&state.db,"provider-chats",id(&chat)).await.unwrap();
+        for key in ["groupId","groupTaskId","groupRootId","groupAgentId"] {
+            assert!(kept[key].is_null(),"{key} still refers to a deleted group");
+        }
+        assert_eq!(kept["dispatchPaused"],true);
+    }
 }
 #[tokio::test]
 async fn exchange_limit_preserves_deliveries_and_continue_resets_budget() {

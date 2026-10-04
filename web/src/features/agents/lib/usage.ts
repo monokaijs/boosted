@@ -1,20 +1,22 @@
 export type AgentUsage = {
   trackedSince: string | null;
-  series: { agentId: string; name: string; buckets: { startDate: string; tokens: number }[] }[];
+  series: { agentId: string; name: string; buckets: { startDate: string; tokens: number; inputTokens?: number; cachedTokens?: number; outputTokens?: number; detailedTokens?: number }[] }[];
 };
 
 export function dayKey(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
-export function usageByDay(usage: AgentUsage, days: number, now = new Date()) {
+export type UsageMetric = "tokens" | "inputTokens" | "outputTokens" | "cachedTokens";
+
+export function usageByDay(usage: AgentUsage, days: number, now = new Date(), metric: UsageMetric = "tokens") {
   const dates = Array.from({ length: days }, (_, index) => new Date(now.getFullYear(), now.getMonth(), now.getDate() - days + 1 + index));
   const indices = new Map(dates.map((date, index) => [dayKey(date), index]));
   const series = usage.series.map((agent) => {
     const values = dates.map(() => 0);
     for (const bucket of agent.buckets) {
       const index = indices.get(dayKey(new Date(bucket.startDate)));
-      if (index !== undefined && Number.isFinite(bucket.tokens) && bucket.tokens > 0) values[index] += bucket.tokens;
+      if (index !== undefined && Number.isFinite(bucket[metric]) && (bucket[metric] ?? 0) > 0) values[index] += bucket[metric]!;
     }
     return { agentId: agent.agentId, name: agent.name, values, total: values.reduce((sum, value) => sum + value, 0) };
   });

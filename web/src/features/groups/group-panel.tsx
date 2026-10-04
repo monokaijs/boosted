@@ -11,6 +11,7 @@ import { isChatActionVisible } from '@/features/agents/lib/assistant-actions';
 import { GroupDetails, taskLabels, type GroupDetailTab } from './group-details';
 import '@/features/agents/agents.css';
 import { useBoostedApiClient } from '@/lib/api-context';
+import { ApiError } from '@/lib/api';
 import { conversationQueryOptions } from '@/lib/query-client';
 import { machinePreferenceKey, useAppStore } from '@/lib/store';
 import { Button } from '@/components/ui/button';
@@ -21,6 +22,8 @@ import { MarkdownContent } from '@/features/agents/components/session/chat-markd
 import { assistantAttachmentsFromFiles, checkAssistantAttachmentLimits } from '@/features/agents/lib/assistant-attachments';
 import type { AssistantAttachment } from '@/features/agents/types/assistant';
 import { createGroupsApi } from './api';
+import { DeleteGroupDialog } from './delete-group-dialog';
+import { forgetGroup, groupLifetime } from './lifecycle';
 import { GroupDialog } from './group-dialog';
 import { memberRoleNames } from './roles';
 import { acceptGroupSnapshot, mergeGroupMessages, remainingGroupOutbox } from './state';
@@ -30,16 +33,20 @@ import './groups.css';
 function persisted<T>(key: string, fallback: T): T {
   try { return JSON.parse(sessionStorage.getItem(key) ?? 'null') ?? fallback; } catch { return fallback; }
 }
-function persist(key: string, value: unknown) { try { sessionStorage.setItem(key, JSON.stringify(value)); } catch { /* Keep unsent content in memory when browser storage is full. */ } }
+function persistValue(key: string, value: unknown) { try { sessionStorage.setItem(key, JSON.stringify(value)); } catch { /* Keep unsent content in memory when browser storage is full. */ } }
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : 'Unable to complete this action.';
 export function GroupPanel({ groupId, headerTarget }: { groupId: string; headerTarget?: HTMLElement | null }) {
   const client = useBoostedApiClient();
   const groups = useMemo(() => createGroupsApi(client), [client]);
   const queryClient = useQueryClient();
+  const lifetime = useMemo(() => groupLifetime(queryClient, groupId), [queryClient, groupId]);
+  const persist = (key: string, value: unknown) => { if (!lifetime.deleted) persistValue(key, value); };
+  const [deleting, setDeleting] = useState(false);
   const user = useAppStore((s) => s.user);
   const state = useQuery({
     ...conversationQueryOptions,
     queryKey: ['groups', groupId],
+    enabled: !lifetime.deleted,
     queryFn: async () => {
       const next = await groups.read(groupId);
       const current = queryClient.getQueryData<GroupState>(['groups', groupId]);
@@ -47,6 +54,12 @@ export function GroupPanel({ groupId, headerTarget }: { groupId: string; headerT
     },
     refetchInterval: 5000,
   });
+  useEffect(() => {
+    // Recover a deletion missed while this client was disconnected.
+    if (!lifetime.deleted && state.error instanceof ApiError && state.error.status === 404) {
+      forgetGroup(queryClient, groupId, client.profileId);
+    }
+  }, [state.error, lifetime, queryClient, groupId, client.profileId]);
   const group = state.data;
   const draftKey = machinePreferenceKey('boosted.group-draft.' + groupId);
   const outboxKey = machinePreferenceKey('boosted.group-outbox.' + groupId);
@@ -239,7 +252,8 @@ export function GroupPanel({ groupId, headerTarget }: { groupId: string; headerT
         <button type="submit" className="assistant-message-send grid size-8 shrink-0 place-items-center rounded-full text-white disabled:opacity-40" aria-label="Send message" disabled={(!draft.trim() && !attachments.length) || readingFiles}><ArrowUp className="size-4" /></button>
       </form>
     </div></div>
-    <GroupDetails group={group} open={drawer} onOpenChange={setDrawer} tab={detailTab} onTabChange={setDetailTab} busy={busy} error={error} opener={opener} onControl={control} onEdit={() => setEditing(true)} onCreateTask={() => setCreatingTask(true)} onEditTask={setEditingTask} onTaskAction={(task, next) => void action(() => groups.taskAction(groupId, task.id, next))} />
+    <GroupDetails group={group} open={drawer} onOpenChange={setDrawer} tab={detailTab} onTabChange={setDetailTab} busy={busy} error={error} opener={opener} onDelete={() => setDeleting(true)} onControl={control} onEdit={() => setEditing(true)} onCreateTask={() => setCreatingTask(true)} onEditTask={setEditingTask} onTaskAction={(task, next) => void action(() => groups.taskAction(groupId, task.id, next))} />
+    <DeleteGroupDialog group={group} open={deleting} onOpenChange={setDeleting} />
     <GroupDialog open={editing} onOpenChange={setEditing} initial={group} />
     <AssignmentDialog key={editingTask?.id ?? 'new'} group={group} initial={editingTask} open={creatingTask || Boolean(editingTask)} onOpenChange={(open) => { if (!open) { setCreatingTask(false); setEditingTask(undefined); } }} onSave={async (body) => {
       if (editingTask) await groups.updateTask(groupId, editingTask.id, body); else await groups.createTask(groupId, body);

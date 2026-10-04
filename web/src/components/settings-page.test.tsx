@@ -6,14 +6,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   state: { selectedProjectId: "project-a" as string | undefined, activeMachineId: "machine-a", user: { id: "user-a", role: "admin" } },
   projects: vi.fn(), globalSettings: vi.fn(), updateGlobalSettings: vi.fn(), setupState: vi.fn(),
-  integrations: vi.fn(), workspaceCodexSettings: vi.fn(), users: vi.fn(),
+  integrations: vi.fn(), workspaceCodexSettings: vi.fn(), updateWorkspaceCodexSettings: vi.fn(), usage: vi.fn(), featureRequest: vi.fn(), users: vi.fn(),
   providers: vi.fn(), accounts: vi.fn(), limits: vi.fn(), models: vi.fn(), updateAccount: vi.fn(),
   close: vi.fn(),
 }));
 vi.mock("@/lib/api", () => ({ api: mocks }));
+vi.mock("@/lib/api-context", () => ({ useBoostedApiClient: () => ({ profileId: "machine-a", featureRequest: mocks.featureRequest }) }));
 vi.mock("@/lib/store", () => ({ useAppStore: (selector: (state: typeof mocks.state) => unknown) => selector(mocks.state) }));
 vi.mock("@/lib/updater", () => ({ useAppUpdateState: () => ({ phase: "idle", supported: true, currentVersion: "0.4.0" }), refreshAppUpdateAvailability: vi.fn(), checkAndInstallAppUpdate: vi.fn(), formatUpdateProgress: () => undefined }));
 vi.mock("@/features/agents/lib/api-client", () => ({ apiClient: {
+  assistant: { usage: mocks.usage },
   providers: { list: mocks.providers },
   providerAccounts: { list: mocks.accounts, limits: mocks.limits, models: mocks.models, update: mocks.updateAccount },
 } }));
@@ -43,6 +45,8 @@ beforeEach(() => {
   mocks.setupState.mockResolvedValue({ codex: { available: true, authenticated: true, version: "0.159.3" } });
   mocks.integrations.mockResolvedValue([]);
   mocks.workspaceCodexSettings.mockResolvedValue({ instructions: "Follow repository conventions.", mcps: [] });
+  mocks.usage.mockResolvedValue({ trackedSince: null, series: [] });
+  mocks.featureRequest.mockResolvedValue([]);
   mocks.users.mockResolvedValue([{ id: "user-a", username: "Admin", role: "admin", disabled: false }]);
   mocks.providers.mockResolvedValue([{ id: "codex", label: "OpenAI Codex", icon: "codex", capabilities: ["models", "auth"], runtimeFields: [{ key: "model" }, { key: "reasoningEffort" }, { key: "serviceTier" }, { key: "permissionMode" }], accountFields: [{ key: "codexHome" }], defaultSettings: { accountsHome: "/isolated", sharedChatHome: "~/.codex" } }]);
   mocks.accounts.mockResolvedValue([account]);
@@ -52,10 +56,40 @@ beforeEach(() => {
 });
 
 describe("settings page", () => {
+  it("places analytics under Settings and mounts only the selected usage scope", async () => {
+    renderPage("usage");
+    expect(await screen.findByText("No recorded usage in this period.")).toBeInTheDocument();
+    expect(mocks.usage).toHaveBeenCalledWith(30);
+    expect(mocks.featureRequest).not.toHaveBeenCalled();
+    expect(mocks.workspaceCodexSettings).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "Groups" }));
+    expect(await screen.findByText("Create a group to start tracking its usage.")).toBeInTheDocument();
+    expect(mocks.featureRequest).toHaveBeenCalledWith("/groups", { method: "GET" });
+    fireEvent.click(screen.getByRole("tab", { name: "Shared Codex" }));
+    expect(await screen.findByRole("heading", { name: "Quota windows" })).toBeInTheDocument();
+    expect(mocks.workspaceCodexSettings).toHaveBeenCalledWith("project-a");
+  });
+
+  it("separates Codex instructions from tools and connection while retaining edited instructions", async () => {
+    renderPage("codex");
+    const instructions = await screen.findByRole("textbox", { name: "Instructions" });
+    await waitFor(() => expect(instructions).toHaveValue("Follow repository conventions."));
+    fireEvent.change(instructions, { target: { value: "Keep my unsaved instructions." } });
+    expect(mocks.setupState).not.toHaveBeenCalled();
+    expect(screen.queryByRole("heading", { name: "MCP servers" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "MCP servers" }));
+    expect(await screen.findByRole("heading", { name: "MCP servers" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Connection" }));
+    expect(await screen.findByText("Ready")).toBeInTheDocument();
+    expect(mocks.setupState).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "Instructions" }));
+    expect(await screen.findByRole("textbox", { name: "Instructions" })).toHaveValue("Keep my unsaved instructions.");
+  });
+
   it("renders every section as a page with searchable navigation and a return action", async () => {
     renderPage();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    for (const [label, heading] of [["Providers", "Providers"], ["Connections", "Connections"], ["Notifications", "Notifications"], ["Web interface", "Web interface"], ["Application", "Application"], ["Team", "Team"], ["General", "Workspace"], ["Integrations", "Integrations"], ["Codex", "Codex"]]) {
+    for (const [label, heading] of [["Usage", "Usage"], ["Providers", "Providers"], ["Connections", "Connections"], ["Notifications", "Notifications"], ["Web interface", "Web interface"], ["Application", "Application"], ["Team", "Team"], ["General", "Workspace"], ["Integrations", "Integrations"], ["Codex", "Codex"]]) {
       selectSection(label);
       expect(screen.getByRole("heading", { level: 1, name: heading })).toBeInTheDocument();
       expect(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: label })).toHaveAttribute("aria-current", "page");

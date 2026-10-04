@@ -66,6 +66,10 @@ Project assignments use the existing registered checkout and can run concurrentl
 
 **Stop** pauses group dispatch and interrupts its owned turns and coding runs. Queued work and receipts remain available. **Resume** explicitly continues work after inspection. Server restarts leave unfinished groups stopped until you resume them. Failed or blocked assignments have individual Retry controls. Groups schedule up to four concurrent executions and 32 automatic turns per human request; **Continue** grants another exchange budget.
 
+Use **Delete group** from its sidebar menu or participant details to permanently remove its conversation, assignments, reviews, and group analytics. Boosted first stops active work. Agents, coding chats, and repository files remain available; retained coding chats are paused and detached from the deleted group.
+
+**Settings → Usage** provides agent activity, per-group analytics, and shared Codex account usage. Group analytics also appear in the group's **Usage** tab and include its agent turns and child coding runs. Choose a 7-, 30-, or 90-day range and inspect total, input, output, or cached tokens by agent. Cached tokens are included in input totals. Group attribution and token breakdowns start with newly recorded activity; older totals retain an unavailable or partial breakdown instead of inferred counts.
+
 Groups follow the existing shared workspace access policy. Group activity stays separate from agents’ direct conversations. Human-attention messages use the existing agent notification preference and open the related group; routine peer exchanges stay in the conversation. Task-board integration and scheduled group reminders are not included.
 
 ## Issue integrations

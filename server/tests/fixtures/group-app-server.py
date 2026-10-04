@@ -17,6 +17,16 @@ pending_management = None
 def emit(v):
     print(json.dumps(v), flush=True)
 
+def token_usage(thread_id, turn_id, child=False):
+    count = threads[thread_id].get("usage_count", 0) + 1
+    threads[thread_id]["usage_count"] = count
+    last = {"inputTokens": 200 if child else 80, "cachedInputTokens": 150 if child else 50,
+            "outputTokens": 50 if child else 20, "totalTokens": 250 if child else 100}
+    params = {"threadId": thread_id, "turnId": turn_id,
+              "tokenUsage": {"last": last, "total": {key: value * count for key, value in last.items()}}}
+    for _ in range(2):
+        emit({"method": "thread/tokenUsage/updated", "params": params})
+
 def next_call():
     global calls, last_tool
     if calls:
@@ -27,6 +37,7 @@ def next_call():
             "tool": name, "arguments": arguments,
         }})
     else:
+        token_usage(current_thread, turn_id)
         emit({"method": "turn/completed", "params": {"threadId": current_thread,
             "turn": {"id": turn_id, "status": "completed"}}})
 
@@ -89,6 +100,7 @@ for line in sys.stdin:
                     "items": [{"id": "result", "type": "agentMessage", "text": "Child verification passed"}]}
             threads[current_thread]["turns"].append(turn)
             emit({"id": message["id"], "result": {"turn": turn}})
+            token_usage(current_thread, turn["id"], child=True)
             emit({"method": "item/completed", "params": {"threadId": current_thread, "turnId": turn["id"],
                  "item": {"id": "child-command", "type": "commandExecution", "command": "verify", "exitCode": 0}}})
             emit({"method": "turn/completed", "params": {"threadId": current_thread, "turn": turn}})
@@ -118,12 +130,16 @@ for line in sys.stdin:
             continue
         calls = []
         if purpose == "message":
-            if directive == "Chào Alice":
+            if directive in ("Chào Alice", "hello alice", "FORWARD_TO_ALICE"):
                 if agent == gc["leaderId"]:
-                    alice = next(m["id"] for m in gc["group"]["members"] if m["profile"]["name"] == "Alice")
-                    calls.append(("forward_group_message", {"sourceMessageId": prompt["currentUserMessages"][0]["id"], "recipientIds": [alice]}))
-                    # A buffered reply after forwarding must never become a leader bubble.
-                    calls.append(("send_group_message", {"content": "Unwanted leader reply"}))
+                    if directive == "FORWARD_TO_ALICE":
+                        alice = next(m["id"] for m in gc["group"]["members"] if m["profile"]["name"] == "Alice")
+                        calls.append(("forward_group_message", {"sourceMessageId": prompt["currentUserMessages"][0]["id"], "recipientIds": [alice]}))
+                        # A buffered reply after forwarding must never become a leader bubble.
+                        calls.append(("send_group_message", {"content": "Unwanted leader reply"}))
+                    else:
+                        # Reproduce the real model failure: it answers instead of routing.
+                        calls.append(("send_group_message", {"content": "I'm Coral; Alice is my teammate."}))
                 else:
                     assert identity["name"] == "Alice"
                     assert gc["currentDelivery"]["event"] == {"type": "forwarded_message", "forwardedBy": gc["leaderId"]}

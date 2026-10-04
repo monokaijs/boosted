@@ -933,7 +933,8 @@ async fn run_turn_with_client(
                     if params["turnId"].as_str() != turn_id.as_deref() {
                         continue;
                     }
-                    if let Err(error) = agent_usage::record(&state.db, id, &thread_id, params).await
+                    let group = groups::context();
+                    if let Err(error) = agent_usage::record_scoped(&state.db, id, &thread_id, params, group.as_ref().map(|c| c.group_id.as_str()), true).await
                     {
                         tracing::warn!(%error, "Unable to save agent token usage");
                     }

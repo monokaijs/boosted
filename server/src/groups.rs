@@ -1,5 +1,6 @@
 //! Durable peer conversations. Application state mutations are serialized; turns never hold the gate.
 use super::*;
+use std::time::Duration;
 use group_models::{GroupDelivery, GroupMessage, GroupReview, GroupState, GroupSummary, GroupTask};
 use providers::{document, text};
 use sha2::{Digest, Sha256};
@@ -1297,21 +1298,91 @@ pub(crate) async fn stop(
     State(state): State<AppState>,
     AxumPath(group): AxumPath<String>,
 ) -> AppResult<Json<Value>> {
+    halt(&state, &group).await?;
+    Ok(Json(snapshot(&state, &group).await?))
+}
+async fn halt(state: &AppState, group: &str) -> AppResult<()> {
     {
         let _gate = state.groups.gate.lock().await;
-        let mut meta = get(&state.db, "groups", &group).await?;
+        let mut meta = get(&state.db, "groups", group).await?;
         meta["stopped"] = json!(true);
         meta["stopReason"] = json!("user");
-        put(&state.db, "groups", &group, &meta).await?;
+        put(&state.db, "groups", group, &meta).await?;
         for (c, signal) in state.groups.active.lock().await.values() {
             if c.group_id == group {
                 let _ = signal.send(true);
             }
         }
-        touch(&state, &group, "group.updated").await?;
+        touch(state, group, "group.updated").await?;
     }
-    stop_children(&state, &group, None).await?;
-    Ok(Json(snapshot(&state, &group).await?))
+    stop_children(state, group, None).await?;
+    Ok(())
+}
+pub(crate) async fn delete(
+    State(state): State<AppState>,
+    AxumPath(group): AxumPath<String>,
+) -> AppResult<Json<Value>> {
+    halt(&state, &group).await?;
+    // Never remove records while a turn can still write them. Stop has already
+    // paused child dispatch; the gate protects the final idle check and removal.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let gate = state.groups.gate.lock().await;
+        let meta = get(&state.db, "groups", &group).await?;
+        if meta["stopped"] != true {
+            return Err(AppError::Conflict(
+                "Group was resumed. Stop it and retry deletion".into(),
+            ));
+        }
+        let active = state
+            .groups
+            .active
+            .lock()
+            .await
+            .values()
+            .any(|(c, _)| c.group_id == group);
+        let chats = providers::documents(&state.db, "provider-chats").await?;
+        let coding = state.active_codex_turns.read().await;
+        let child_active = chats
+            .iter()
+            .any(|chat| chat["groupId"] == group && coding.contains_key(id(chat)));
+        drop(coding);
+        if !active && !child_active {
+            let mut tx = state.db.pool.begin().await?;
+            for table in [
+                "group_messages",
+                "group_tasks",
+                "group_reviews",
+                "group_executions",
+                "group_receipts",
+                "group_operations",
+                "group_requests",
+                "group_members",
+                "group_deliveries",
+                "group_usage_buckets",
+                "groups",
+            ] {
+                sqlx::query(&format!("DELETE FROM {table} WHERE group_id=?"))
+                    .bind(&group)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            // Retain coding conversations and files, but detach their ownership.
+            sqlx::query("UPDATE feature_documents SET content_json=json_remove(content_json,'$.groupId','$.groupTaskId','$.groupRootId','$.groupAgentId') WHERE namespace='provider-chats' AND json_extract(content_json,'$.groupId')=?")
+                .bind(&group).execute(&mut *tx).await?;
+            tx.commit().await?;
+            state.emit("group.deleted", json!({"groupId":group}));
+            state.emit("provider-chats.updated", json!({"groupId":group}));
+            return Ok(Json(json!({"deleted":true,"groupId":group})));
+        }
+        drop(gate);
+        if tokio::time::Instant::now() >= deadline {
+            return Err(AppError::Conflict(
+                "Group is stopping. Wait for active runs to finish and retry deletion".into(),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 async fn stop_children(state: &AppState, group: &str, task: Option<&str>) -> AppResult<()> {
     {
@@ -1666,6 +1737,26 @@ async fn run_delivery(
         }
         None => json!({"id":c.delivery_id,"content":format!("{} assignment: {}",c.purpose,task)}),
     };
+    if c.purpose == "message"
+        && c.task_id.is_none()
+        && planning_agent(&view, &root) == c.agent_id
+    {
+        if let Some(recipient) = greeting_recipient(&view, &message, &c.agent_id) {
+            if *cancel.borrow() {
+                return Err(AppError::Conflict("Group stopped".into()));
+            }
+            execute_tool(
+                state,
+                c,
+                "forward_group_message",
+                &json!({"sourceMessageId":message["id"],"recipientIds":[recipient]}),
+                "route-greeting",
+                &[message],
+            )
+            .await?;
+            return Ok(());
+        }
+    }
     let mut snapshot = agent.clone();
     snapshot["messages"] = view["messages"].clone();
     snapshot["followUps"] = json!([]);
@@ -1706,6 +1797,98 @@ async fn run_delivery(
         return result;
     }
 }
+
+fn greeting_recipient(view: &Value, message: &Value, leader: &str) -> Option<String> {
+    if message["senderType"] != "user" {
+        return None;
+    }
+    let content = normalized_greeting_text(message["content"].as_str()?);
+    let addressee = [
+        "good afternoon",
+        "good morning",
+        "good evening",
+        "xin chào",
+        "xin chao",
+        "hello",
+        "chào",
+        "chao",
+        "hey",
+        "hi",
+    ]
+    .into_iter()
+    .find_map(|greeting| {
+        let rest = content.strip_prefix(greeting)?;
+        if !rest.starts_with(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ':' | '!')) {
+            return None;
+        }
+        Some(
+            rest.trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ':' | '!'))
+                .trim_start_matches('@'),
+        )
+    })?;
+    let matches: Vec<_> = view["members"]
+        .as_array()?
+        .iter()
+        .filter(|member| {
+            member["profile"]["name"]
+                .as_str()
+                .is_some_and(|name| normalized_greeting_text(name) == addressee)
+        })
+        .collect();
+    if matches.len() != 1 || matches[0]["id"] == leader {
+        return None;
+    }
+    // An explicit nickname may collide with a roster name. Defer to conversation
+    // in that case rather than overriding a human's established form of address.
+    if view["messages"]
+        .as_array()?
+        .iter()
+        .take_while(|previous| previous["id"] != message["id"])
+        .any(|previous| {
+            if previous["senderType"] != "user"
+                || !previous["recipientIds"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|id| id == leader))
+            {
+                return false;
+            }
+            let previous =
+                normalized_greeting_text(previous["content"].as_str().unwrap_or_default());
+            previous.contains(addressee)
+                && [
+                    "call you",
+                    "call u ",
+                    "nickname",
+                    "name you",
+                    "named you",
+                    "your name",
+                    "you are my",
+                    "gọi bạn",
+                    "gọi em",
+                    "gọi mày",
+                    "biệt danh",
+                    "đặt tên",
+                    "tên bạn",
+                    "tên em",
+                ]
+                .iter()
+                .any(|marker| previous.contains(marker))
+        })
+    {
+        return None;
+    }
+    Some(string(matches[0], "id"))
+}
+
+fn normalized_greeting_text(text: &str) -> String {
+    text.trim()
+        .trim_end_matches(|ch: char| matches!(ch, '.' | ',' | '!' | '?' | '…'))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 async fn finish(
     state: &AppState,
     c: &GroupContext,
@@ -2523,6 +2706,7 @@ pub(crate) async fn attach_chat(state: &AppState, chat: &mut Value) -> AppResult
         chat["groupId"] = json!(c.group_id);
         chat["groupTaskId"] = json!(c.task_id);
         chat["groupRootId"] = json!(c.root_id);
+        chat["groupAgentId"] = json!(c.agent_id);
         // Metadata is persisted by the caller before the first real run.
         if get(&state.db, "groups", &c.group_id).await?["stopped"] == true {
             return Err(AppError::Conflict("Group stopped before dispatch".into()));
@@ -2585,6 +2769,30 @@ pub(crate) async fn record_child_event(
     method: &str,
     params: &Value,
 ) -> AppResult<()> {
+    if method == "thread/tokenUsage/updated" {
+        if let Ok(chat) = document(&state.db, "provider-chats", chat_id).await {
+            if let Some(group) = chat["groupId"].as_str() {
+                let mut agent = chat["groupAgentId"].as_str().or_else(|| chat["managedByAgentId"].as_str()).map(str::to_owned);
+                if agent.is_none() {
+                    if let Some(task) = chat["groupTaskId"].as_str() {
+                        if let Ok(task) = get(&state.db, "group_tasks", task).await {
+                            agent = task["ownerId"].as_str().map(str::to_owned);
+                        }
+                    }
+                }
+                agent_usage::record_scoped(
+                    &state.db,
+                    agent.as_deref().unwrap_or("coding"),
+                    chat_id,
+                    params,
+                    Some(group),
+                    false,
+                )
+                .await?;
+            }
+        }
+        return Ok(());
+    }
     if !matches!(method, "item/started" | "item/completed") {
         return Ok(());
     }

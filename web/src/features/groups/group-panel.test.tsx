@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppStore } from '@/lib/store';
+import { ApiError } from '@/lib/api';
 import type { GroupState } from './types';
 
 const mocks = vi.hoisted(() => ({ featureRequest: vi.fn(), projects: vi.fn(), listAgents: vi.fn() }));
@@ -39,6 +40,12 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('group conversations', () => {
+  it('clears a deleted group when reconnecting after missing its live deletion event', async () => {
+    useAppStore.getState().selectGroup('g');
+    mocks.featureRequest.mockRejectedValue(new ApiError(404, 'Group not found'));
+    renderWithQuery(<GroupPanel groupId="g" />);
+    await waitFor(() => expect(useAppStore.getState().selectedGroupId).toBeUndefined());
+  });
   it('keeps accepted messages delivered while waiting and shows typing only during an active reply', async () => {
     const queued: GroupState = { ...base,
       messages: [{ id: 'one', groupId: 'g', rootId: 'one', sequence: 1, senderType: 'user', senderId: 'u', senderName: 'User', content: 'Hello', recipientIds: ['a'], kind: 'message', createdAt: base.createdAt }],

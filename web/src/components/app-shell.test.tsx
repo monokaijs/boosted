@@ -91,7 +91,7 @@ describe("page navigation and conversations", () => {
     useAppStore.setState({ selectedCodexChatId: "old" });
     renderShell();
     const mobile = within(screen.getByRole("navigation", { name: "Mobile navigation" }));
-    expect(mobile.getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Chats", "Scheduled", "Projects", "Tasks", "Usage", "Settings"]);
+    expect(mobile.getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Chats", "Scheduled", "Projects", "Tasks", "Settings"]);
     expect(screen.getByRole("heading", { name: "Chats" })).toBeInTheDocument();
     expect(screen.queryByText("Conversation old")).not.toBeInTheDocument();
     fireEvent.click(mobile.getByRole("button", { name: "Settings" }));
@@ -124,7 +124,7 @@ describe("page navigation and conversations", () => {
     vi.stubGlobal("innerWidth", 393);
     renderShell();
     const mobile = within(screen.getByRole("navigation", { name: "Mobile navigation" }));
-    for (const [tab, content] of [["Scheduled", "Scheduled work is coming"], ["Projects", "A home for your code and conversations."], ["Tasks", "Task board content"], ["Usage", "Daily token consumption, with a separate series for each agent."], ["Settings", "Settings page content"]]) {
+    for (const [tab, content] of [["Scheduled", "Scheduled work is coming"], ["Projects", "A home for your code and conversations."], ["Tasks", "Task board content"], ["Settings", "Settings page content"]]) {
       fireEvent.click(mobile.getByRole("button", { name: tab }));
       expect(await screen.findByText(content)).toBeInTheDocument();
       expect(mobile.getByRole("button", { name: tab })).toHaveAttribute("aria-current", "page");

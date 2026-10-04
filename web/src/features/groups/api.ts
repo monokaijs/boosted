@@ -9,6 +9,7 @@ export function createGroupsApi(client: BoostedApiClient) {
   return {
     list: () => request<GroupSummary[]>('/groups'),
     create: (body: { name: string; memberIds: string[]; memberRoles: Record<string, GroupMemberRole>; projectId?: string }) => request<GroupState>('/groups', 'POST', body),
+    remove: (id: string) => request<void>(path(id), 'DELETE'),
     read: (id: string) => request<GroupState>(path(id)),
     update: (id: string, body: { projectId?: string | null; name: string; memberIds: string[]; memberRoles: Record<string, GroupMemberRole> }) => request<GroupState>(path(id), 'PATCH', body),
     send: (id: string, body: GroupSendRequest) => request<GroupMessage>(path(id) + '/messages', 'POST', body),

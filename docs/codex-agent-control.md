@@ -26,6 +26,11 @@ image views and MCP calls are saved as action receipts, including failures.
 In group conversation, the leader can quietly forward a current human message
 to its intended participant with `forward_group_message`. The delivery preserves
 the original message, sender and attachments without posting a leader bubble.
+Simple greetings that name exactly one other participant, such as `hello alice`
+or `Chào Alice`, are routed by the server before starting leader inference.
+Matching ignores case and greeting punctuation. Unknown or duplicate names,
+longer requests, and possible nicknames established in earlier human messages
+remain on the conversational path rather than being guessed by this shortcut.
 A successful forward ends the leader's turn; the recipient replies directly to
 the human. Only the current leader may forward a delivered human message, and
 recipients must belong to the group. Repeated forwarding does not duplicate a

@@ -1,6 +1,6 @@
-import { useRef, useSyncExternalStore } from 'react';
+import { lazy, Suspense, useRef, useSyncExternalStore } from 'react';
 import { Tabs } from '@base-ui/react/tabs';
-import { CheckCheck, Folder, ListTodo, LoaderCircle, Pencil, Play, Plus, Square, Users } from 'lucide-react';
+import { CheckCheck, Folder, ListTodo, LoaderCircle, Pencil, Play, Plus, Square, Trash2, Users } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { AgentAvatar } from '@/features/agents/components/session/agent-avatar';
@@ -10,8 +10,10 @@ import { taskOverlaps } from './state';
 import { memberRoleLabel } from './roles';
 import type { GroupState, GroupTask } from './types';
 
+const GroupUsage = lazy(() => import('@/features/agents/components/usage-page').then((m) => ({ default: m.UsagePage })));
+
 export const taskLabels = { queued: 'To do', running: 'Running', awaiting_review: 'Awaiting peer review', completed: 'Reviewed and complete', blocked: 'Blocked', failed: 'Failed', interrupted: 'Interrupted', cancelled: 'Cancelled' };
-export type GroupDetailTab = 'participants' | 'tasks' | 'activity';
+export type GroupDetailTab = 'participants' | 'tasks' | 'activity' | 'usage';
 const compactQuery = '(max-width: 900px)';
 function subscribeCompact(callback: () => void) {
   const query = window.matchMedia(compactQuery);
@@ -19,10 +21,10 @@ function subscribeCompact(callback: () => void) {
   return () => query.removeEventListener('change', callback);
 }
 
-export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy, error, opener, onControl, onEdit, onCreateTask, onEditTask, onTaskAction }: {
+export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy, error, opener, onControl, onEdit, onDelete, onCreateTask, onEditTask, onTaskAction }: {
   group: GroupState; open: boolean; onOpenChange(open: boolean): void;
   tab: GroupDetailTab; onTabChange(tab: GroupDetailTab): void; busy: boolean; error?: string;
-  opener: React.RefObject<HTMLElement | null>; onControl(): void; onEdit(): void; onCreateTask(): void;
+  opener: React.RefObject<HTMLElement | null>; onControl(): void; onEdit(): void; onDelete(): void; onCreateTask(): void;
   onEditTask(task: GroupTask): void; onTaskAction(task: GroupTask, action: 'cancel' | 'retry'): void;
 }) {
   const compact = useSyncExternalStore(subscribeCompact, () => window.matchMedia(compactQuery).matches, () => false);
@@ -49,6 +51,7 @@ export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy
           <Tabs.Tab value="participants">Participants</Tabs.Tab>
           <Tabs.Tab value="tasks">Tasks{group.tasks.length > 0 && <span>{group.tasks.length}</span>}</Tabs.Tab>
           <Tabs.Tab value="activity">Activity</Tabs.Tab>
+          <Tabs.Tab value="usage">Usage</Tabs.Tab>
         </Tabs.List>
         <div className="group-details-content">
           {error && <p role="alert" className="mb-3 text-xs text-destructive">{error}</p>}
@@ -69,6 +72,7 @@ export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy
             <Button className="mt-4 w-full" variant="secondary" size="sm" disabled={busy || stopping} onClick={onControl}>
               {group.stopped || limited ? <Play /> : <Square />}{limited ? 'Continue' : group.stopped ? 'Resume' : 'Stop group'}
             </Button>
+            <Button className="mt-3 w-full text-destructive" variant="ghost" size="sm" disabled={busy} onClick={() => closeWith(onDelete)}><Trash2 />Delete group</Button>
           </Tabs.Panel>
           <Tabs.Panel value="tasks" className="outline-none">
             <div className="mb-3 flex items-center justify-between"><p className="text-xs text-muted-foreground">Assignments & peer reviews</p><Button variant="ghost" size="sm" onClick={() => closeWith(onCreateTask)}><Plus />New task</Button></div>
@@ -101,6 +105,7 @@ export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy
             {group.members.filter((m) => group.receipts.some((r) => r.agentId === m.id)).map((member) => <section className="mb-5" key={member.id}><div className="mb-2 flex items-center gap-2 text-xs"><AgentAvatar name={member.profile.name} avatar={member.profile.avatar} className="size-5" />{member.profile.name}</div><ActionGroup showAll actions={group.receipts.filter((r) => r.agentId === member.id)} /></section>)}
             {group.executions.filter((e) => e.error).map((e) => <p className="mb-2 text-xs leading-5 text-muted-foreground" key={e.id}>{name(e.agentId)}: {e.error}</p>)}
           </Tabs.Panel>
+          <Tabs.Panel value="usage" className="outline-none">{open && tab === 'usage' && <Suspense fallback={<p className="text-xs text-muted-foreground">Loading usage…</p>}><GroupUsage embedded groupId={group.id} /></Suspense>}</Tabs.Panel>
         </div>
       </Tabs.Root>
     </DialogContent>

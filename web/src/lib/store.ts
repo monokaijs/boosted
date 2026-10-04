@@ -84,6 +84,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setTaskDrawerOpen: (taskDrawerOpen) => set({ taskDrawerOpen }),
 }));
 
-export function machinePreferenceKey(value: string) {
-  return key(useAppStore.getState().activeMachineId, value);
+export function machinePreferenceKey(value: string, machineId = useAppStore.getState().activeMachineId) {
+  return key(machineId, value);
 }

@@ -366,7 +366,8 @@ fn router(
             get(agents::list_agents).post(agents::create_agent),
         )
         .route("/groups", get(groups::list).post(groups::create))
-        .route("/groups/{id}", get(groups::read).patch(groups::update))
+        .route("/groups/{id}", get(groups::read).patch(groups::update).delete(groups::delete))
+        .route("/groups/{id}/usage", get(agent_usage::read_group_usage))
         .route(
             "/groups/{id}/messages",
             get(groups::messages)

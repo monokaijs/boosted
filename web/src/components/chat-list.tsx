@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, CircleAlert, Folder, FolderOpen, FolderPlus, LoaderCircle, MessageSquarePlus, Pin, Plus, Search, X } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert, Folder, FolderOpen, FolderPlus, LoaderCircle, MessageSquarePlus, Pin, Plus, Search, Trash2, Ellipsis, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
@@ -8,6 +8,8 @@ import { useWorkspaceState } from "@/lib/workspace-state";
 import { chatActivity } from "@/lib/codex-chat-status";
 import { useBoostedApiClient } from "@/lib/api-context";
 import { createGroupsApi } from "@/features/groups/api";
+import { DeleteGroupDialog } from "@/features/groups/delete-group-dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { GroupDialog } from "@/features/groups/group-dialog";
 import { AgentAvatar } from "@/features/agents/components/session/agent-avatar";
 import type { AssistantSummary } from "@/features/agents/types/assistant";
@@ -34,6 +36,7 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
   const groupApi = useMemo(() => createGroupsApi(client), [client]);
   const rooms = useQuery({ queryKey: ["groups"], queryFn: groupApi.list, refetchInterval: 15000 });
   const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+  const [deletingGroup, setDeletingGroup] = useState<{ id: string; name: string }>();
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [search, setSearch] = useWorkspaceState("chat-list:search", "");
   const [expanded, setExpanded] = useWorkspaceState<Set<string>>("chat-list:expanded", () => new Set());
@@ -101,14 +104,14 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
         {rooms.data?.filter((room) => !needle || room.name.toLowerCase().includes(needle)).map((room) => {
           const members = room.memberIds.map((id) => agentsById.get(id) ?? { id, profile: { name: id, avatar: undefined } });
           const memberNames = members.map((member) => member.profile.name).join(", ");
-          return <button key={room.id} aria-label={room.name} className={cn("chat-list-row", activeGroupId === room.id && "is-selected")} aria-current={activeGroupId === room.id ? "true" : undefined} onClick={() => { useAppStore.getState().selectGroup(room.id); window.dispatchEvent(new CustomEvent("boosted:open-group", { detail: room.id })); onClose(); }}>
+          return <div key={room.id} className="chat-group-row"><button aria-label={room.name} className={cn("chat-list-row", activeGroupId === room.id && "is-selected")} aria-current={activeGroupId === room.id ? "true" : undefined} onClick={() => { useAppStore.getState().selectGroup(room.id); window.dispatchEvent(new CustomEvent("boosted:open-group", { detail: room.id })); onClose(); }}>
             <span>{room.name}</span>
             {room.stopped && <CircleAlert aria-label="Stopped" className="chat-status" />}
             {!!members.length && <span className="chat-group-avatars" role="img" aria-label={`Participants: ${memberNames}`} title={memberNames}>
               {members.slice(0, 4).map((member) => <AgentAvatar key={member.id} name={member.profile.name} avatar={member.profile.avatar} className="size-6 text-[10px]" />)}
               {members.length > 4 && <span className="chat-group-avatar-count">+{members.length - 4}</span>}
             </span>}
-          </button>;
+          </button><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label={`Options for ${room.name}`}><Ellipsis /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem className="text-destructive" onSelect={() => setDeletingGroup(room)}><Trash2 className="size-4" />Delete group</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>;
         })}
         {rooms.error && <p className="chat-list-note text-destructive">{rooms.error.message}<button onClick={() => void rooms.refetch()}>Retry</button></p>}
       </section>
@@ -131,6 +134,7 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
         {!entries.length && !chats.isPending && !chats.error && <p className="chat-list-note">{needle ? "No matching chats." : "Your recent chats will appear here."}</p>}
       </section>
     </div>
+    {deletingGroup && <DeleteGroupDialog group={deletingGroup} open onOpenChange={(open) => { if (!open) setDeletingGroup(undefined); }} />}
     <GroupDialog open={creatingGroup} onOpenChange={setCreatingGroup} onCreated={(room) => { useAppStore.getState().selectGroup(room.id); window.dispatchEvent(new CustomEvent("boosted:open-group", { detail: room.id })); onClose(); }} />
   </section>;
 }
