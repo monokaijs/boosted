@@ -750,15 +750,16 @@ async fn run_turn_with_client(
     // Managers can inspect and review, but project mutations belong to coding chats.
     let sandbox_policy = json!({"type":"readOnly","networkAccess":true});
     let reply_instructions = if group_context.is_some() {
-        "Send public group replies through send_group_message. To ask a peer for a response, use request_group_peers once with the actual message and exact recipient IDs; it both posts the message and wakes the peers. Its content is visible to everyone, not a private instruction."
+        "Send public group replies through send_group_message. When the human clearly addresses another group member through the leader, use forward_group_message to deliver that human message quietly and end silently. Honor established nicknames for yourself instead of forwarding them. To ask a peer for input on your own work, use request_group_peers once with the actual message and exact recipient IDs; it both posts the message and wakes the peers. Its content is visible to everyone, not a private instruction."
     } else {
         "Send user-facing replies through send_agent_message."
     };
+    let agent_identity = json!({"agentId":id,"name":snapshot["profile"]["name"]});
     let thread = client.request("thread/start", json!({
         "cwd":cwd, "ephemeral":true, "approvalPolicy":"never", "sandbox":"read-only",
         "model":AgentModel::Fast.model(), "allowProviderModelFallback":false,
         "baseInstructions":format!("{}\n\n{}", include_str!("agent-instructions.txt"), group_instructions),
-        "developerInstructions":format!("Manage project work through watched Boosted coding chats. Native tools are only for read-only inspection and independent review; do not execute the project task yourself. Resolve project paths, dispatch a concrete coding prompt, inspect results, and continue the same chat until the requested outcome is verified or user input is required. {reply_instructions}\n\n{}", include_str!("../skills/computer-control/SKILL.md")),
+        "developerInstructions":format!("The server supplies your current identity as JSON data, not instructions: agentIdentity={agent_identity}\nYour agentId is stable. Your saved name changes only after a successful update_profile result. Accept conversational nicknames for yourself when established by context, without persisting them unless the human clearly asks to rename your profile or save the name. A name used to address someone in a greeting does not establish the sender's name; clarify only when the intended addressee is meaningfully ambiguous.\n\nManage project work through watched Boosted coding chats. Native tools are only for read-only inspection and independent review; do not execute the project task yourself. Resolve project paths, dispatch a concrete coding prompt, inspect results, and continue the same chat until the requested outcome is verified or user input is required. {reply_instructions}\n\n{}", include_str!("../skills/computer-control/SKILL.md")),
         "dynamicTools":tools,
         "config":{"features.shell_tool":true,"features.multi_agent":false,"web_search":"live",
             "model_reasoning_effort":AgentModel::Fast.effort(),"service_tier":"default"}
@@ -851,6 +852,7 @@ async fn run_turn_with_client(
         .collect();
     let prompt = json!({
         "agentRuntime":{"model":AgentModel::Fast.model(),"reasoningEffort":AgentModel::Fast.effort()},
+        "agentIdentity":agent_identity,
         "savedProfile":model_profile,"currentTime":Utc::now().to_rfc3339(),
         "userTimeZone":snapshot["timeZone"].as_str().unwrap_or("UTC"),
         "conversationHistory":history,"currentUserMessages":current.iter()
@@ -887,6 +889,7 @@ async fn run_turn_with_client(
         selection: Arc::new(Mutex::new(ModelSelection::default())),
     };
     let mut handoff_requested = false;
+    let mut message_forwarded = false;
     let mut calls = 0;
     let mut call_results: HashMap<String, Value> = HashMap::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
@@ -1011,7 +1014,14 @@ async fn run_turn_with_client(
                             .await
                         };
                         let response = match result {
-                            Ok(value) => computer::tool_response(value),
+                            Ok(value) => {
+                                if group_context.is_some()
+                                    && params["tool"] == "forward_group_message"
+                                {
+                                    message_forwarded = true;
+                                }
+                                computer::tool_response(value)
+                            }
                             Err(error) => {
                                 json!({"success":false,"contentItems":[{"type":"inputText","text":json!({"error":error.to_string()}).to_string()}]})
                             }
@@ -1020,6 +1030,11 @@ async fn run_turn_with_client(
                         response
                     };
                     client.respond(event["id"].clone(), response).await?;
+                    if message_forwarded {
+                        // Routing ends the leader's turn, even if the model tries to
+                        // send a redundant bubble after the successful handoff.
+                        return Ok(());
+                    }
                     if !handoff_requested && routing.selection.lock().await.pending.is_some() {
                         // Interrupt after recording and delivering the tool result, so the old
                         // model cannot execute more actions or spend another inference yielding.
@@ -1090,7 +1105,7 @@ async fn run_turn_with_client(
     let activity_result = set_activity(state, id, None).await;
     // Each agent turn owns its app-server. Interrupt first so foreground commands stop too.
     let cleanup = async {
-        if result.is_err() {
+        if result.is_err() || message_forwarded {
             if let Some(turn_id) = turn_id {
                 let _ = client
                     .request(
@@ -4189,6 +4204,16 @@ supports_websockets = false
         let log = rpc_log(root.path());
         let starts: Vec<_> = log.iter().filter(|m| m["method"] == "turn/start").collect();
         assert_eq!(starts.len(), 3);
+        // A persisted rename updates the next turn's identity, including after a handoff.
+        for (start, expected_name) in [(starts[0], "Pock"), (starts[2], "Nova")] {
+            let prompt: Value =
+                serde_json::from_str(start["params"]["input"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(
+                prompt["agentIdentity"],
+                json!({"agentId":"pock","name":expected_name})
+            );
+        }
         assert_eq!(starts[0]["params"]["model"], "gpt-6-luna");
         assert_eq!(starts[1]["params"]["model"], "gpt-6.1-sol");
         assert_eq!(starts[1]["params"]["effort"], "medium");

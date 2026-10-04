@@ -1929,6 +1929,75 @@ pub(crate) async fn reply(state: &AppState, c: &GroupContext, content: &str) -> 
     let message = json!({"id":uuid(),"groupId":c.group_id,"rootId":c.root_id,"senderType":"agent","senderId":c.agent_id,"senderName":profile["profile"]["name"],"content":content,"toLeader":!recipients.is_empty(),"recipientIds":recipients,"kind":"message","createdAt":now(),"taskId":c.task_id,"inReplyTo":reply_target(state,c).await?,"attention":false});
     append_message(state, message, &recipients, "message", None).await
 }
+
+// Called under the group gate. Reuse the human message rather than creating a peer
+// request, so the recipient replies to the human without waking the leader again.
+async fn forward_message(
+    state: &AppState,
+    c: &GroupContext,
+    args: &Value,
+    current: &[Value],
+) -> AppResult<Value> {
+    if c.purpose != "message"
+        || c.task_id.is_some()
+        || group_leader(state, &c.group_id).await? != c.agent_id
+    {
+        return Err(AppError::Conflict(
+            "Only the leader may forward a current human message".into(),
+        ));
+    }
+    let source = text(args, "sourceMessageId", 400)?;
+    if !current
+        .iter()
+        .any(|message| message["id"] == source && message["senderType"] == "user")
+        || reply_target(state, c).await? != source
+    {
+        return Err(AppError::Conflict(
+            "Forward only the current delivered human message".into(),
+        ));
+    }
+    let message = get(&state.db, "group_messages", &source).await?;
+    if message["groupId"] != c.group_id
+        || message["rootId"] != c.root_id
+        || message["senderType"] != "user"
+        || !ids(&message, "recipientIds")?.contains(&c.agent_id)
+    {
+        return Err(AppError::BadRequest(
+            "Forward a human message delivered to the leader in this group".into(),
+        ));
+    }
+    let recipients = ids(args, "recipientIds")?;
+    let roster = members(&state.db, &c.group_id).await?;
+    if recipients.is_empty()
+        || recipients
+            .iter()
+            .any(|agent| agent == &c.agent_id || !roster.contains(agent))
+    {
+        return Err(AppError::BadRequest(
+            "Choose other participants in this group".into(),
+        ));
+    }
+    let mut tx = state.db.pool.begin().await?;
+    let mut delivery_ids = Vec::new();
+    for agent in &recipients {
+        let delivery_id = format!("{source}:{agent}:message");
+        let delivery = json!({"id":delivery_id,"groupId":c.group_id,"agentId":agent,
+            "rootId":c.root_id,"messageId":source,"taskId":null,"purpose":"message",
+            "status":"queued","createdAt":now(),"recovery":false,
+            "event":{"type":"forwarded_message","forwardedBy":c.agent_id}});
+        // The usual delivery ID also prevents duplicate replies to a participant
+        // already addressed by the human or reached by an earlier routing attempt.
+        insert_delivery(&mut tx, &delivery).await?;
+        delivery_ids.push(delivery_id);
+    }
+    tx.commit().await?;
+    touch(state, &c.group_id, "group.activity").await?;
+    Ok(
+        json!({"sourceMessageId":source,"recipientIds":recipients,"deliveryIds":delivery_ids,
+        "instructions":"The original human message has been queued for these recipients. End this turn silently; do not post an acknowledgement or speak for them."}),
+    )
+}
+
 pub(crate) fn tools(base: Value, purpose: &str) -> Value {
     let mut specs: Vec<Value> = base
         .as_array()
@@ -1984,6 +2053,12 @@ pub(crate) fn tools(base: Value, purpose: &str) -> Value {
             "Post one public message. A specialist reply to a leader request wakes the current leader. Other public replies do not wake participants. To ask for a response, use request_group_peers once. attention=true only when human input is needed.",
             json!({"content":{"type":"string"},"attention":{"type":"boolean"}}),
             json!(["content"]),
+        ),
+        (
+            "forward_group_message",
+            "The leader may quietly deliver the current human message to its intended group participants. Use when the human clearly addresses another member, including a greeting. Resolve exact IDs from the roster and distinguish established nicknames for yourself from another intended recipient. Preserve the original human message and attachments; this posts no new chat bubble. After success, end silently and let the recipients reply. Do not use for peer messages, old messages, ambiguous names or new task assignments.",
+            json!({"sourceMessageId":{"type":"string"},"recipientIds":{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string"}}}),
+            json!(["sourceMessageId", "recipientIds"]),
         ),
         (
             "request_group_peers",
@@ -2069,6 +2144,7 @@ pub(crate) async fn execute_tool(
             | "manage_group"
             | "claim_group_task"
             | "request_group_peers"
+            | "forward_group_message"
             | "send_group_message"
             | "send_agent_message"
             | "create_chat"
@@ -2153,6 +2229,7 @@ async fn execute_action(
             | "review_group_task"
             | "block_group_task"
             | "request_group_peers"
+            | "forward_group_message"
             | "send_group_message"
     ) {
         let _gate = state.groups.gate.lock().await;
@@ -2160,6 +2237,7 @@ async fn execute_action(
             Err(AppError::Conflict("Group is stopped".into()))
         } else {
             match name {
+                "forward_group_message" => forward_message(state, c, args, current).await,
                 "list_group_agents" => {
                     let agents = agents::list_agents(State(state.clone())).await.0;
                     Ok(json!(agents

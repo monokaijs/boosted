@@ -69,6 +69,8 @@ for line in sys.stdin:
         result = {"thread": thread}
         if p.get("ephemeral"):
             assert "leader-managed" in p["baseInstructions"]
+            identity_line = p["developerInstructions"].split("agentIdentity=", 1)[1].splitlines()[0]
+            thread["agentIdentity"] = json.loads(identity_line)
     elif method == "thread/name/set":
         threads[p["threadId"]]["name"] = p["name"]
     elif method in ("thread/read", "thread/resume"):
@@ -94,6 +96,11 @@ for line in sys.stdin:
         gc = prompt["groupContext"]
         execution = gc["execution"]
         agent = execution["agentId"]
+        identity = prompt["agentIdentity"]
+        assert identity == threads[current_thread]["agentIdentity"]
+        assert identity["agentId"] == agent
+        assert identity["name"] == prompt["savedProfile"]["name"]
+        assert identity["name"] == next(m["profile"]["name"] for m in gc["group"]["members"] if m["id"] == agent)
         assert gc["memberRole"] == gc["group"]["memberRoles"][agent]
         assert gc["planningAgentId"] in [m["id"] for m in gc["group"]["members"]]
         purpose = execution["purpose"]
@@ -111,6 +118,19 @@ for line in sys.stdin:
             continue
         calls = []
         if purpose == "message":
+            if directive == "Chào Alice":
+                if agent == gc["leaderId"]:
+                    alice = next(m["id"] for m in gc["group"]["members"] if m["profile"]["name"] == "Alice")
+                    calls.append(("forward_group_message", {"sourceMessageId": prompt["currentUserMessages"][0]["id"], "recipientIds": [alice]}))
+                    # A buffered reply after forwarding must never become a leader bubble.
+                    calls.append(("send_group_message", {"content": "Unwanted leader reply"}))
+                else:
+                    assert identity["name"] == "Alice"
+                    assert gc["currentDelivery"]["event"] == {"type": "forwarded_message", "forwardedBy": gc["leaderId"]}
+                    assert prompt["currentGroupMessages"][0]["senderType"] == "user"
+                    calls.append(("send_group_message", {"content": "Chào bạn, mình là Alice."}))
+                next_call()
+                continue
             if prompt["currentUserMessages"] and directive in ("Add Extra as developer and reviewer", "Remove Nova from the group", "Give Pock leader and designer roles", "Assign Project to this group", "Unassign the group project"):
                 assert agent == gc["leaderId"]
                 management = {"sourceMessageId": prompt["currentUserMessages"][0]["id"]}

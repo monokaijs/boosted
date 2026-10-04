@@ -960,6 +960,284 @@ async fn broadcast_mentions_retry_ids_and_human_authorship() {
         .unwrap();
     assert_eq!(request["turnCount"], 0);
 }
+#[cfg(unix)]
+#[tokio::test]
+async fn leader_quietly_forwards_greetings_preserving_identity_sender_and_recipients() {
+    let (root, state, _) = fixture().await;
+    let (_, Json(coral)) =
+        agents::create_agent(State(state.clone()), Json(json!({"name":"Coral"})))
+            .await
+            .unwrap();
+    let (_, Json(alice)) =
+        agents::create_agent(State(state.clone()), Json(json!({"name":"Alice"})))
+            .await
+            .unwrap();
+    let (_, Json(g)) = create(
+        State(state.clone()),
+        Extension(user()),
+        Json(json!({"name":"DiningConnect","memberIds":[id(&coral),id(&alice)]})),
+    )
+    .await
+    .unwrap();
+    let g = serde_json::to_value(g).unwrap();
+    let first = human(&state, id(&g), "Chào ae", vec![id(&coral)], "hello").await;
+    settle(&state, id(&g)).await;
+    let second = send(
+        State(state.clone()),
+        AxumPath(id(&g).into()),
+        Extension(user()),
+        Json(json!({"content":"Chào Alice","recipientIds":[id(&coral)],"clientMessageId":"address-alice",
+            "attachments":[{"id":"note","name":"note.txt","kind":"file","dataUrl":"data:text/plain;base64,aGVsbG8="}]})),
+    )
+    .await
+    .unwrap()
+    .0;
+    let view = settle(&state, id(&g)).await;
+    assert!(view["tasks"].as_array().unwrap().is_empty());
+    assert_eq!(
+        state.agents.get(id(&coral)).await.unwrap()["profile"]["name"],
+        "Coral"
+    );
+    assert_eq!(
+        state.agents.get(id(&alice)).await.unwrap()["profile"]["name"],
+        "Alice"
+    );
+
+    let log =
+        std::fs::read_to_string(root.path().join("accounts/account/group-rpc-log.jsonl")).unwrap();
+    let prompts: Vec<Value> = log
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|rpc| rpc["method"] == "turn/start")
+        .map(|rpc| {
+            serde_json::from_str(rpc["params"]["input"][0]["text"].as_str().unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(prompts.len(), 3);
+    for (prompt, message) in prompts.iter().zip([&first, &second]) {
+        assert_eq!(
+            prompt["agentIdentity"],
+            json!({"agentId":id(&coral),"name":"Coral"})
+        );
+        let delivered = &prompt["currentGroupMessages"][0];
+        assert_eq!(delivered["id"], message["id"]);
+        assert_eq!(delivered["senderType"], "user");
+        assert_eq!(delivered["senderId"], "admin");
+        assert_eq!(delivered["senderName"], "admin");
+        assert_eq!(delivered["recipientIds"], json!([id(&coral)]));
+        assert_eq!(delivered["content"], message["content"]);
+    }
+    assert!(
+        prompts[1]["conversationHistory"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["senderId"] == id(&coral)
+                && message["senderName"] == "Coral"
+                && message["senderType"] == "agent")
+    );
+    let forwarded = &prompts[2];
+    assert_eq!(
+        forwarded["agentIdentity"],
+        json!({"agentId":id(&alice),"name":"Alice"})
+    );
+    assert_eq!(forwarded["currentUserMessages"][0]["id"], second["id"]);
+    assert_eq!(forwarded["currentGroupMessages"][0]["senderId"], "admin");
+    assert_eq!(forwarded["currentGroupMessages"][0]["senderName"], "admin");
+    assert_eq!(forwarded["attachmentContext"][0]["id"], "note");
+    assert_eq!(forwarded["attachmentContext"][0]["text"], "hello");
+    assert_eq!(
+        forwarded["currentGroupMessages"][0]["content"],
+        "Chào Alice"
+    );
+    assert_eq!(
+        forwarded["currentGroupMessages"][0]["recipientIds"],
+        json!([id(&coral)])
+    );
+    assert_eq!(
+        forwarded["groupContext"]["currentDelivery"]["agentId"],
+        id(&alice)
+    );
+    assert_eq!(
+        forwarded["groupContext"]["currentDelivery"]["event"],
+        json!({"type":"forwarded_message","forwardedBy":id(&coral)})
+    );
+    let replies: Vec<_> = view["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["rootId"] == second["id"] && message["senderType"] == "agent")
+        .collect();
+    assert_eq!(
+        replies.len(),
+        1,
+        "Only Alice should reply after Coral forwards the greeting"
+    );
+    assert_eq!(replies[0]["senderId"], id(&alice));
+    assert_eq!(replies[0]["inReplyTo"], second["id"]);
+    assert_eq!(
+        replies[0]["recipientIds"],
+        json!([]),
+        "Alice's reply must not wake Coral again"
+    );
+    assert_eq!(
+        get(&state.db, "group_messages", id(&second)).await.unwrap(),
+        second
+    );
+    assert!(
+        view["receipts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|receipt| receipt["tool"] == "forward_group_message"
+                && receipt["status"] == "completed")
+    );
+}
+
+#[tokio::test]
+async fn forwarding_requires_current_human_source_and_leader_and_deduplicates_delivery() {
+    let (_root, state, peer) = fixture().await;
+    let g = group(&state, &peer, false).await;
+    let old = human(&state, id(&g), "Earlier", vec![], "earlier").await;
+    let long_client_id = "x".repeat(200);
+    let source = human(&state, id(&g), "Chào Nova", vec![], &long_client_id).await;
+    assert!(id(&source).len() > 200);
+    let leader = context_for(&state, id(&g), "pock", id(&source), None, "message").await;
+    let specialist = context_for(&state, id(&g), &peer, id(&source), None, "message").await;
+    let valid = json!({"sourceMessageId":source["id"],"recipientIds":[peer]});
+    assert!(
+        execute_tool(
+            &state,
+            &specialist,
+            "forward_group_message",
+            &valid,
+            "peer",
+            &[source.clone()]
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        execute_tool(
+            &state,
+            &leader,
+            "forward_group_message",
+            &valid,
+            "no-source",
+            &[]
+        )
+        .await
+        .is_err()
+    );
+    let peer_message = json!({"id":source["id"],"senderType":"agent"});
+    assert!(
+        execute_tool(
+            &state,
+            &leader,
+            "forward_group_message",
+            &valid,
+            "peer-source",
+            &[peer_message]
+        )
+        .await
+        .is_err()
+    );
+    let mut execution = leader.clone();
+    execution.purpose = "execute".into();
+    assert!(
+        execute_tool(
+            &state,
+            &execution,
+            "forward_group_message",
+            &valid,
+            "assignment",
+            &[source.clone()]
+        )
+        .await
+        .is_err()
+    );
+    let before = snapshot(&state, id(&g)).await.unwrap();
+    for args in [
+        json!({"sourceMessageId":old["id"],"recipientIds":[peer]}),
+        json!({"sourceMessageId":source["id"],"recipientIds":[]}),
+        json!({"sourceMessageId":source["id"],"recipientIds":["pock"]}),
+        json!({"sourceMessageId":source["id"],"recipientIds":[peer,"outside-group"]}),
+        json!({"sourceMessageId":source["id"],"recipientIds":[peer,peer]}),
+    ] {
+        assert!(
+            execute_tool(
+                &state,
+                &leader,
+                "forward_group_message",
+                &args,
+                "invalid",
+                &[source.clone()]
+            )
+            .await
+            .is_err()
+        );
+    }
+    assert_eq!(
+        snapshot(&state, id(&g)).await.unwrap()["deliveries"],
+        before["deliveries"]
+    );
+    let first = execute_tool(
+        &state,
+        &leader,
+        "forward_group_message",
+        &valid,
+        "forward",
+        &[source.clone()],
+    )
+    .await
+    .unwrap();
+    let second = execute_tool(
+        &state,
+        &leader,
+        "forward_group_message",
+        &valid,
+        "retry",
+        &[source.clone()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(first, second);
+    let view = snapshot(&state, id(&g)).await.unwrap();
+    assert_eq!(
+        view["messages"], before["messages"],
+        "Routing posts no additional bubble"
+    );
+    let deliveries: Vec<_> = view["deliveries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["rootId"] == source["id"])
+        .collect();
+    assert_eq!(deliveries.len(), 2);
+    let delivery = deliveries.iter().find(|d| d["agentId"] == peer).unwrap();
+    assert_eq!(delivery["messageId"], source["id"]);
+    assert_eq!(
+        delivery["event"],
+        json!({"type":"forwarded_message","forwardedBy":"pock"})
+    );
+    assert!(view["tasks"].as_array().unwrap().is_empty());
+    let _ = stop(State(state.clone()), AxumPath(id(&g).into()))
+        .await
+        .unwrap();
+    assert!(
+        execute_tool(
+            &state,
+            &leader,
+            "forward_group_message",
+            &valid,
+            "stopped",
+            &[source]
+        )
+        .await
+        .is_err()
+    );
+}
+
 #[tokio::test]
 async fn ordinary_replies_are_shared_without_fanout_and_operations_are_durable() {
     let (_root, state, peer) = fixture().await;

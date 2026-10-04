@@ -66,6 +66,8 @@ for line in sys.stdin:
         assert params["model"] == "gpt-6-luna"
         assert params["allowProviderModelFallback"] is False
         assert params["config"]["model_reasoning_effort"] == "low"
+        identity_line = params["developerInstructions"].split("agentIdentity=", 1)[1].splitlines()[0]
+        agent_identity = json.loads(identity_line)
         emit({"id": message["id"], "result": {"thread": {"id": thread_id}}})
     elif method == "turn/start":
         turn_count += 1
@@ -78,6 +80,9 @@ for line in sys.stdin:
         if params["model"] == "gpt-6-luna":
             assert params["effort"] == "low"
             prompt = json.loads(params["input"][0]["text"])
+            assert prompt["agentIdentity"] == agent_identity
+            assert agent_identity["agentId"] == "pock"
+            assert agent_identity["name"] == prompt["savedProfile"]["name"]
             scenario = prompt["currentUserMessages"][0]["content"]
             tool("update_profile", {"name": "Nova"}, "profile-" + turn_id)
         else:

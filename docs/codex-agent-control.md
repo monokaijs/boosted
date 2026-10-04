@@ -23,6 +23,14 @@ record, so background turns retain the goal. The model receives durable managed
 chat references and saved follow-ups in addition to conversation history.
 Commands, file changes, web searches,
 image views and MCP calls are saved as action receipts, including failures.
+In group conversation, the leader can quietly forward a current human message
+to its intended participant with `forward_group_message`. The delivery preserves
+the original message, sender and attachments without posting a leader bubble.
+A successful forward ends the leader's turn; the recipient replies directly to
+the human. Only the current leader may forward a delivered human message, and
+recipients must belong to the group. Repeated forwarding does not duplicate a
+delivery. Conversational nicknames remain aliases in the available chat context;
+they do not change saved profiles unless the human requests a saved name change.
 Stopping or timing out an assistant turn interrupts Codex and cleans its
 background terminals before shutting down its dedicated subprocess. Normal
 completion also cleans background terminals. Interrupted actions with no
