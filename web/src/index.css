@@ -83,10 +83,29 @@ body,
   height: 100%;
   min-width: 0;
   overflow: hidden;
+  /* Overflow clipping alone does not stop viewport rubber-banding. */
+  overscroll-behavior: none;
 }
 
 #root {
   height: 100dvh;
+}
+
+/* Keep boundary gestures inside the primary scroll regions, including portals.
+   Nested code blocks and inputs can still hand scrolling to their containing region. */
+:where(
+  .chat-list-scroll,
+  .full-page-scroll,
+  .new-task-canvas,
+  .assistant-conversation-scroll,
+  .codex-thread-viewport,
+  .file-tree,
+  [data-radix-scroll-area-viewport],
+  .dialog-content,
+  .settings-nav,
+  .group-details-content
+) {
+  overscroll-behavior: contain;
 }
 
 body {
@@ -660,12 +679,10 @@ select {
 
   html {
     background: var(--canvas);
-    overscroll-behavior: none;
   }
 
   body {
     position: relative;
-    overscroll-behavior: none;
   }
 
   #root {
