@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useBoostedApiClient } from "@/lib/api-context";
 import { useAppStore } from "@/lib/store";
+import { chatProject } from "@/lib/chat-project";
 
 type NotificationClickData = {
   kind?: "group" | "agent" | "task" | "codex" | "integration";
@@ -36,9 +37,8 @@ export function useNotificationNavigation() {
       }
       if (data.kind === "codex") {
         const [thread, projects] = await Promise.all([api.codexChat(data.id), api.projects()]);
-        const project = projects.find((entry) => entry.repoPath === thread.chat.cwd);
-        if (project) useAppStore.getState().selectProject(project);
         useAppStore.getState().selectCodexChat(data.id);
+        useAppStore.getState().syncCodexChatProject(data.id, chatProject(projects, thread.chat.cwd));
         window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", { detail: { threadId: data.id, title: thread.chat.title } }));
       }
     }

@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAppStore } from "@/lib/store";
+import { useUnreadStore } from "@/lib/unread-conversations";
 import type { CodexChat, Project } from "@/lib/types";
 import { CreateAgentDialog } from "@/features/agents/components/session/create-agent-dialog";
 import type { SessionShellState } from "@/features/agents/components/session/session-shell";
@@ -11,7 +12,7 @@ import type { SessionShellState } from "@/features/agents/components/session/ses
 const apiMock = vi.hoisted(() => {
   const values = new Map<string, string>();
   vi.stubGlobal("localStorage", { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key), clear: () => values.clear() });
-  return { projects: vi.fn(), codexChats: vi.fn(), logout: vi.fn(), agents: vi.fn(), usage: vi.fn(), featureRequest: vi.fn(), createAgent: vi.fn() };
+  return { projects: vi.fn(), codexChats: vi.fn(), codexChat: vi.fn(), logout: vi.fn(), agents: vi.fn(), usage: vi.fn(), featureRequest: vi.fn(), createAgent: vi.fn() };
 });
 vi.mock("@/lib/api", () => ({ api: apiMock, setToken: vi.fn() }));
 vi.mock("@/lib/api-context", () => ({ useBoostedApiClient: () => ({ profileId: "test-machine", featureRequest: apiMock.featureRequest, projects: apiMock.projects }) }));
@@ -54,9 +55,11 @@ beforeEach(() => {
   vi.stubGlobal("innerWidth", 1024);
   window.history.replaceState(null, "", "/");
   localStorage.clear();
+  useUnreadStore.setState({ profiles: {}, active: undefined });
   useAppStore.setState({ selectedProjectId: "alpha", selectedGroupId: undefined, selectedCodexChatId: undefined, selectedTaskId: undefined, openFilePath: undefined, taskDrawerOpen: false, activeMachineId: undefined });
   apiMock.projects.mockResolvedValue(projects);
   apiMock.codexChats.mockResolvedValue([...chats, chats[0]]);
+  apiMock.codexChat.mockImplementation(async (id: string) => ({ chat: chats.find((chat) => chat.id === id), messages: [] }));
   apiMock.featureRequest.mockResolvedValue([]);
   apiMock.usage.mockResolvedValue({ trackedSince: null, series: [] });
   apiMock.createAgent.mockResolvedValue(undefined);
@@ -67,6 +70,62 @@ beforeEach(() => {
 });
 
 describe("page navigation and conversations", () => {
+  it("starts a new chat in the project using its plus button without expanding the accordion", async () => {
+    useAppStore.setState({ selectedCodexChatId: "old" });
+    renderShell();
+    const button = await screen.findByRole("button", { name: "New chat in Beta" });
+    fireEvent.click(button);
+    expect(useAppStore.getState().selectedProjectId).toBe("beta");
+    expect(useAppStore.getState().selectedCodexChatId).toBeUndefined();
+    expect(screen.getByRole("button", { name: "Expand Beta" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("heading", { name: "Start a conversation" })).toBeInTheDocument();
+  });
+
+  it("shows unread markers for chats, groups, and agents and clears them when opened", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    apiMock.featureRequest.mockResolvedValue([{ id: "team", name: "Build team", memberIds: ["pock", "sage"] }]);
+    renderShell();
+    const group = await screen.findByRole("button", { name: "Build team" });
+    await screen.findByRole("button", { name: "Latest beta chat" });
+    act(() => {
+      const store = useUnreadStore.getState();
+      store.receive("test-machine", "agent", "pock");
+      store.receive("test-machine", "group", "team");
+      store.receive("test-machine", "codex", "new");
+    });
+    const agent = within(screen.getByRole("navigation", { name: "Agents" })).getByRole("button", { name: /Pock/ });
+    const chat = screen.getByRole("button", { name: /Latest beta chat/ });
+    for (const row of [agent, group, chat]) expect(within(row).getByRole("img", { name: "Unread messages" })).toBeInTheDocument();
+    fireEvent.click(agent);
+    await waitFor(() => expect(within(agent).queryByRole("img", { name: "Unread messages" })).not.toBeInTheDocument());
+    fireEvent.click(group);
+    await waitFor(() => expect(within(group).queryByRole("img", { name: "Unread messages" })).not.toBeInTheDocument());
+    fireEvent.click(chat);
+    await waitFor(() => expect(within(chat).queryByRole("img", { name: "Unread messages" })).not.toBeInTheDocument());
+    vi.mocked(document.hasFocus).mockRestore();
+  });
+
+  it("syncs the project selector for restored chats and direct chat navigation", async () => {
+    useAppStore.setState({ selectedProjectId: "alpha", selectedCodexChatId: "new" });
+    renderShell();
+    await waitFor(() => expect(document.querySelector(".project-context")).toHaveTextContent("Beta"));
+    expect(useAppStore.getState().selectedProjectId).toBe("beta");
+    expect(useAppStore.getState().selectedCodexChatId).toBe("new");
+    act(() => window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", { detail: { threadId: "old" } })));
+    await waitFor(() => expect(document.querySelector(".project-context")).toHaveTextContent("Alpha"));
+    expect(useAppStore.getState().selectedProjectId).toBe("alpha");
+    expect(localStorage.getItem("boosted.project")).toBe("alpha");
+  });
+
+  it("clears stale project context for a chat outside the registered projects", async () => {
+    apiMock.codexChat.mockResolvedValue({ chat: { ...chats[0], cwd: "/other/repo" }, messages: [] });
+    useAppStore.setState({ selectedCodexChatId: "old" });
+    renderShell();
+    await waitFor(() => expect(useAppStore.getState().selectedProjectId).toBeUndefined());
+    expect(document.querySelector(".project-context")).not.toBeInTheDocument();
+    expect(useAppStore.getState().selectedCodexChatId).toBe("old");
+  });
+
   it("keeps navigation clickable while the agent selector is open", async () => {
     renderShell();
     fireEvent.click(await within(await screen.findByRole("navigation", { name: "Agents" })).findByRole("button", { name: "Pock" }));

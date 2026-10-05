@@ -71,6 +71,19 @@ describe("app selection state", () => {
     expect(useAppStore.getState()).toMatchObject({ selectedProjectId: secondProject.id, selectedTaskId: "task-b", selectedCodexChatId: undefined });
   });
 
+  it("updates a chat's project without clearing it and ignores an older chat's result", async () => {
+    const { useAppStore } = await import("@/lib/store");
+    useAppStore.getState().activateMachine("machine-a");
+    useAppStore.getState().selectProject(firstProject);
+    useAppStore.getState().selectCodexChat("chat-b");
+    useAppStore.getState().syncCodexChatProject("chat-b", secondProject);
+    useAppStore.getState().syncCodexChatProject("chat-a", firstProject);
+    expect(useAppStore.getState()).toMatchObject({ selectedProjectId: secondProject.id, selectedCodexChatId: "chat-b" });
+    useAppStore.getState().activateMachine("machine-b");
+    useAppStore.getState().activateMachine("machine-a");
+    expect(useAppStore.getState()).toMatchObject({ selectedProjectId: secondProject.id, selectedCodexChatId: "chat-b" });
+  });
+
   it("restores the selected project and conversation for every active machine", async () => {
     const { useAppStore } = await import("@/lib/store");
 

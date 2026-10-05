@@ -73,7 +73,7 @@ export type AssistantState = {
   error: string | null
 }
 
-export type AssistantSummary = Pick<AssistantState, "id" | "profile" | "status" | "accountId" | "createdAt" | "updatedAt">
+export type AssistantSummary = Pick<AssistantState, "id" | "profile" | "status" | "accountId" | "createdAt" | "updatedAt"> & { lastMessageAt?: string | null }
 export type CreateAssistantRequest = Partial<Pick<AssistantProfile, "name" | "personality">>
 
 export type AssistantMessageRequest = {

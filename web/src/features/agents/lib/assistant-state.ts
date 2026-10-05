@@ -7,5 +7,6 @@ export function shouldAcceptAssistantState(current: Pick<AssistantState, "id" | 
 
 export function assistantSummary(state: AssistantState): AssistantSummary {
   const { id, profile, status, accountId, createdAt, updatedAt } = state
-  return { id, profile, status, accountId, createdAt, updatedAt }
+  const lastMessageAt = state.messages.filter((message) => message.role === "assistant" && message.content.trim()).at(-1)?.createdAt ?? null
+  return { id, profile, status, accountId, createdAt, updatedAt, lastMessageAt }
 }

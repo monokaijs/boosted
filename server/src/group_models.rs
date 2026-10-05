@@ -34,6 +34,8 @@ pub(crate) struct GroupSummary {
     pub version: u64,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub last_message_at: Option<String>,
     pub created_by: String,
     pub initial_git_state: Value,
 }

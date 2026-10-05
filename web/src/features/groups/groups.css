@@ -106,5 +106,6 @@
 
 .chat-group-row { display: flex; min-width: 0; align-items: center; gap: 2px; }
 .chat-group-row > .chat-list-row { flex: 1; min-width: 0; }
-.chat-group-row > button:last-child { flex: none; opacity: .55; }
-.chat-group-row:hover > button:last-child, .chat-group-row:focus-within > button:last-child { opacity: 1; }
+.chat-group-row > .chat-group-menu { flex: none; opacity: 0; pointer-events: none; }
+.chat-group-row:hover > .chat-group-menu, .chat-group-row:focus-within > .chat-group-menu, .chat-group-row > .chat-group-menu[data-state="open"] { opacity: 1; pointer-events: auto; }
+@media (hover: none) { .chat-group-row > .chat-group-menu { opacity: 1; pointer-events: auto; } }

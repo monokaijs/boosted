@@ -8,6 +8,14 @@ const state: AssistantState = {
 }
 
 describe("live assistant updates", () => {
+  it("uses the last incoming reply for unread markers, ignoring user messages and tool receipts", () => {
+    const summary = assistantSummary({ ...state, messages: [
+      { id: "reply", role: "assistant", content: "Done", createdAt: state.createdAt },
+      { id: "user", role: "user", content: "Next task", createdAt: state.updatedAt },
+      { id: "tool", role: "assistant", content: "", createdAt: state.updatedAt, actions: [] },
+    ] })
+    expect(summary.lastMessageAt).toBe(state.createdAt)
+  })
   it("keeps transcript and attachment data out of list caches", () => {
     const summary = assistantSummary({ ...state, messages: [{ id: "large", role: "user", content: "Transcript", createdAt: state.createdAt }] })
     expect(summary).not.toHaveProperty("messages")

@@ -17,9 +17,10 @@ import { Separator } from "@/components/ui/separator";
 import "@/features/groups/groups.css";
 import { cn } from "@/lib/utils";
 import type { CodexChat, Project } from "@/lib/types";
+import { chatProject } from "@/lib/chat-project";
+import { conversationKey, useUnreadStore, type ConversationKind } from "@/lib/unread-conversations";
 
 type ProjectChat = { chat: CodexChat; project?: Project };
-const normalizedPath = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/, "");
 
 export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, onSelectAgent, onCreateAgent, onNewChat, onOpenProject, onClose }: {
   agents: readonly AssistantSummary[];
@@ -33,6 +34,11 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
   onClose(): void;
 }) {
   const client = useBoostedApiClient();
+  const receipts = useUnreadStore((state) => state.profiles[client.profileId]);
+  function unreadMarker(kind: ConversationKind, id: string) {
+    return receipts?.[conversationKey(kind, id)]?.unread
+      ? <span className="chat-unread-marker" role="img" aria-label="Unread messages" title="Unread messages" /> : null;
+  }
   const groupApi = useMemo(() => createGroupsApi(client), [client]);
   const rooms = useQuery({ queryKey: ["groups"], queryFn: groupApi.list, refetchInterval: 15000 });
   const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
@@ -47,11 +53,9 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
   const chats = useQuery({ queryKey: ["codex-chats", "all"], queryFn: () => api.codexChats(""), refetchInterval: 15_000 });
   const needle = search.trim().toLowerCase();
   const entries = useMemo(() => {
-    const sortedProjects = [...(projects.data ?? [])].sort((a, b) => b.repoPath.length - a.repoPath.length);
     const unique = new Map<string, ProjectChat>();
     for (const chat of chats.data ?? []) {
-      const cwd = normalizedPath(chat.cwd);
-      const project = sortedProjects.find((entry) => { const path = normalizedPath(entry.repoPath); return cwd === path || cwd.startsWith(`${path}/`); });
+      const project = chatProject(projects.data ?? [], chat.cwd);
       if (!needle || `${chat.title} ${chat.preview} ${project?.name ?? ""}`.toLowerCase().includes(needle)) unique.set(chat.id, { chat, project });
     }
     return [...unique.values()].sort((a, b) => Date.parse(b.chat.updatedAt) - Date.parse(a.chat.updatedAt));
@@ -65,8 +69,8 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
   }
 
   function openChat(entry: ProjectChat) {
-    if (entry.project) useAppStore.getState().selectProject(entry.project);
     useAppStore.getState().selectCodexChat(entry.chat.id);
+    useAppStore.getState().syncCodexChatProject(entry.chat.id, entry.project);
     window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", { detail: { threadId: entry.chat.id, title: entry.chat.title } }));
     onClose();
   }
@@ -79,6 +83,7 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
       : { running: "Running", waiting: "Needs your input", failed: "Failed", idle: "Idle" }[activity];
     return <button key={entry.chat.id} className={cn("chat-list-row", nested && "chat-list-child", selected && "is-selected")} aria-current={selected ? "true" : undefined} title={`${entry.chat.title}\n${entry.project?.name ?? entry.chat.cwd}\n${statusLabel}`} onClick={() => openChat(entry)}>
       <span>{entry.chat.title}</span>
+      {unreadMarker("codex", entry.chat.id)}
       {entry.chat.isPinned && <Pin className="chat-pin" aria-label="Pinned" />}
       {activity === "running" && <LoaderCircle className="chat-status chat-status-running" role="img" aria-label="Running" />}
       {activity === "waiting" && <CircleAlert className="chat-status chat-status-waiting" role="img" aria-label="Needs your input" />}
@@ -95,6 +100,7 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
           <div className="chat-agents-heading"><h2>Agents</h2><Button variant="ghost" size="icon-sm" aria-label="New agent" title="New agent" onClick={() => { onCreateAgent(); onClose(); }}><Plus /></Button></div>
           {agents.filter((agent) => !needle || agent.profile.name.toLowerCase().includes(needle)).map((agent) => <button key={agent.id} type="button" className={cn("chat-list-row chat-agent-row", activeAgentId === agent.id && "is-selected")} aria-current={activeAgentId === agent.id ? "page" : undefined} onClick={() => { onSelectAgent(agent.id); onClose(); }}>
             <AgentAvatar name={agent.profile.name} avatar={agent.profile.avatar} className="size-6 text-[10px]" /><span>{agent.profile.name}</span>
+            {unreadMarker("agent", agent.id)}
           </button>)}
         </nav>
         <Separator className="chat-agents-divider" decorative={false} />
@@ -106,12 +112,13 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
           const memberNames = members.map((member) => member.profile.name).join(", ");
           return <div key={room.id} className="chat-group-row"><button aria-label={room.name} className={cn("chat-list-row", activeGroupId === room.id && "is-selected")} aria-current={activeGroupId === room.id ? "true" : undefined} onClick={() => { useAppStore.getState().selectGroup(room.id); window.dispatchEvent(new CustomEvent("boosted:open-group", { detail: room.id })); onClose(); }}>
             <span>{room.name}</span>
+            {unreadMarker("group", room.id)}
             {room.stopped && <CircleAlert aria-label="Stopped" className="chat-status" />}
             {!!members.length && <span className="chat-group-avatars" role="img" aria-label={`Participants: ${memberNames}`} title={memberNames}>
               {members.slice(0, 4).map((member) => <AgentAvatar key={member.id} name={member.profile.name} avatar={member.profile.avatar} className="size-6 text-[10px]" />)}
               {members.length > 4 && <span className="chat-group-avatar-count">+{members.length - 4}</span>}
             </span>}
-          </button><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label={`Options for ${room.name}`}><Ellipsis /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem className="text-destructive" onSelect={() => setDeletingGroup(room)}><Trash2 className="size-4" />Delete group</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>;
+          </button><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="chat-group-menu" aria-label={`Options for ${room.name}`}><Ellipsis /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem className="text-destructive" onSelect={() => setDeletingGroup(room)}><Trash2 className="size-4" />Delete group</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>;
         })}
         {rooms.error && <p className="chat-list-note text-destructive">{rooms.error.message}<button onClick={() => void rooms.refetch()}>Retry</button></p>}
       </section>
@@ -119,9 +126,12 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
         {projects.isPending && <p className="chat-list-note"><LoaderCircle className="animate-spin" />Loading projects…</p>}
         {projects.error && <p className="chat-list-note text-destructive">{projects.error.message}<button onClick={() => void projects.refetch()}>Retry</button></p>}
         {groups.filter(({ project, entries }) => !needle || entries.length || project.name.toLowerCase().includes(needle)).map(({ project, entries }) => <div key={project.id}>
-          <button className={cn("chat-project-row", projectId === project.id && "is-current-project")} aria-label={`${expanded.has(project.id) ? "Collapse" : "Expand"} ${project.name}`} aria-expanded={expanded.has(project.id)} onClick={() => toggleProject(project.id)} title={project.repoPath}>
-            {expanded.has(project.id) ? <ChevronDown className="project-chevron" /> : <ChevronRight className="project-chevron" />}{expanded.has(project.id) ? <FolderOpen /> : <Folder />}<span>{project.name}</span>
-          </button>
+          <div className="chat-project-heading">
+            <button className={cn("chat-project-row", projectId === project.id && "is-current-project")} aria-label={`${expanded.has(project.id) ? "Collapse" : "Expand"} ${project.name}`} aria-expanded={expanded.has(project.id)} onClick={() => toggleProject(project.id)} title={project.repoPath}>
+              {expanded.has(project.id) ? <ChevronDown className="project-chevron" /> : <ChevronRight className="project-chevron" />}{expanded.has(project.id) ? <FolderOpen /> : <Folder />}<span>{project.name}</span>
+            </button>
+            <Button variant="ghost" size="icon-sm" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} onClick={() => { useAppStore.getState().selectProject(project); onNewChat(); onClose(); }}><Plus /></Button>
+          </div>
           {expanded.has(project.id) && <div>{entries.slice(0, visibleCounts[project.id] ?? 4).map((entry) => chatRow(entry, true))}{entries.length > (visibleCounts[project.id] ?? 4) && <button className="chat-list-row chat-list-child chat-show-all" onClick={() => setVisibleCounts((counts) => ({ ...counts, [project.id]: (counts[project.id] ?? 4) + 4 }))}><span>Load more</span></button>}</div>}
 
         </div>)}

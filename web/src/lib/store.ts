@@ -32,6 +32,7 @@ type AppStore = ReturnType<typeof readMachineState> & {
   selectProject: (project?: Project) => void;
   selectTask: (task?: Task) => void;
   selectCodexChat: (id?: string) => void;
+  syncCodexChatProject: (id: string, project?: Project) => void;
   selectGroup: (id?: string) => void;
   openFile: (path?: string) => void;
   setTaskDrawerOpen: (open: boolean) => void;
@@ -79,6 +80,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
     setOptional(state.activeMachineId, "boosted.codexChat", id);
     if (id) { setOptional(state.activeMachineId, "boosted.task"); setOptional(state.activeMachineId, "boosted.group"); }
     set({ selectedCodexChatId: id, ...(id ? { selectedGroupId: undefined, selectedTaskId: undefined, openFilePath: undefined } : {}) });
+  },
+  syncCodexChatProject: (id, project) => {
+    const state = get();
+    if (state.selectedCodexChatId !== id || state.selectedProjectId === project?.id) return;
+    setOptional(state.activeMachineId, "boosted.project", project?.id);
+    set({ selectedProjectId: project?.id, openFilePath: undefined });
   },
   openFile: (openFilePath) => set({ openFilePath }),
   setTaskDrawerOpen: (taskDrawerOpen) => set({ taskDrawerOpen }),

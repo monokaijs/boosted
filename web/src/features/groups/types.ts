@@ -19,6 +19,7 @@ export interface GroupSummary {
   version: number;
   createdAt: string;
   updatedAt: string;
+  lastMessageAt?: string | null;
   createdBy: string;
   initialGitState: unknown;
 }

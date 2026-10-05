@@ -76,6 +76,10 @@
 .chat-list-row.is-selected:hover { background: #ffffff0e; }
 .chat-list-row.is-selected::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--muted-foreground); }
 .chat-project-row.is-current-project { color: var(--foreground); }
+.chat-project-heading { display: flex; align-items: center; gap: 2px; }
+.chat-project-heading > .chat-project-row { flex: 1; min-width: 0; }
+.chat-project-heading > button:last-child { flex: none; }
+.chat-list-row > .chat-unread-marker { width: 6px; height: 6px; min-width: 6px; flex: none; border-radius: 50%; background: var(--primary); }
 .chat-list-row.chat-list-child { padding-left: 31px; }
 .chat-new { margin-top: 0; }
 .chat-new kbd { font-family: inherit; font-size: 10px; color: var(--muted-foreground); opacity: 0; }

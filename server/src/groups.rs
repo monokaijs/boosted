@@ -271,6 +271,13 @@ pub(crate) async fn list(State(state): State<AppState>) -> AppResult<Json<Vec<Gr
         .map(|v| serde_json::from_str(v))
         .collect::<Result<_, _>>()?;
     for group in &mut groups {
+        let last_message: Option<String> = sqlx::query_scalar(
+            "SELECT json_extract(data,'$.createdAt') FROM group_messages WHERE group_id=? AND json_extract(data,'$.senderType')='agent' AND trim(COALESCE(json_extract(data,'$.content'),''))!='' ORDER BY CAST(json_extract(data,'$.sequence') AS INTEGER) DESC LIMIT 1",
+        )
+        .bind(id(group))
+        .fetch_optional(&state.db.pool)
+        .await?;
+        group["lastMessageAt"] = json!(last_message);
         group["memberIds"] = json!(members(&state.db, id(group)).await?);
         let roster: Vec<String> = serde_json::from_value(group["memberIds"].clone())?;
         group["memberRoles"] = default_roles(&roster, &group["memberRoles"]);
@@ -2286,13 +2293,6 @@ pub(crate) fn tools(base: Value, purpose: &str) -> Value {
             json!(["revision", "decision", "evidence"]),
         ),
     ] {
-        specs.push(json!({"type":"function","name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}}));
-    }
-    json!(specs)
-}
-pub(crate) async fn execute_tool(
-    state: &AppState,
-    c: &GroupContext,
         let available = match name {
             "block_group_task" | "submit_group_result" => purpose == "execute",
             "review_group_task" => purpose == "review",
@@ -2301,6 +2301,13 @@ pub(crate) async fn execute_tool(
         if !available {
             continue;
         }
+        specs.push(json!({"type":"function","name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}}));
+    }
+    json!(specs)
+}
+pub(crate) async fn execute_tool(
+    state: &AppState,
+    c: &GroupContext,
     name: &str,
     args: &Value,
     call: &str,

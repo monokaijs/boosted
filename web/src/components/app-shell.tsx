@@ -21,8 +21,11 @@ import { api, setToken } from "@/lib/api";
 import { useBoostedApiClient } from "@/lib/api-context";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import { useNotificationNavigation } from "@/hooks/use-notification-navigation";
+import { useConversationReadState } from "@/hooks/use-conversation-read-state";
 import { useMobileLayout } from "@/hooks/use-mobile-layout";
 import { useAppStore } from "@/lib/store";
+import { chatProject } from "@/lib/chat-project";
+import { conversationQueryOptions } from "@/lib/query-client";
 import { destinations, navigate, pageFromHash, type AppPage } from "@/lib/navigation";
 import { formatUpdateProgress, useAppUpdateState } from "@/lib/updater";
 
@@ -65,12 +68,20 @@ export function AppShell() {
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const agents = useQuery({ queryKey: ["agents"], queryFn: apiClient.assistant.list, refetchInterval: 5000 });
   const chats = useQuery({ queryKey: ["codex-chats", "all"], queryFn: () => api.codexChats(""), enabled: isMobile && page === "home" && view === "chat" && Boolean(chatId) });
+  const activeThread = useQuery({ ...conversationQueryOptions, queryKey: ["codex-chat", chatId], queryFn: ({ signal }) => api.codexChat(chatId!, signal), enabled: Boolean(chatId) && view === "chat" });
   const selectedAgent = agents.data?.find((agent) => agent.id === selectedAgentId) ?? agents.data?.[0];
-  const project = projects.data?.find((entry) => entry.id === projectId);
+  const project = chatId && view === "chat" && page === "home"
+    ? (activeThread.data ? chatProject(projects.data ?? [], activeThread.data.chat.cwd) : undefined)
+    : projects.data?.find((entry) => entry.id === projectId);
   const current = destinations.find((entry) => entry.id === page)!;
   const toolsOpen = page === "home" && Boolean(toolView);
   const mobileChatsPage = isMobile && page === "home" && !mobileChatOpen;
   const mobileChatDetail = isMobile && page === "home" && mobileChatOpen;
+  useConversationReadState(page === "home" && !mobileChatsPage
+    ? view === "agents" && selectedAgent ? { kind: "agent", id: selectedAgent.id }
+      : view === "group" && groupId ? { kind: "group", id: groupId }
+        : view === "chat" && chatId ? { kind: "codex", id: chatId } : undefined
+    : undefined);
 
   const goTo = useCallback((next: AppPage) => {
     if (page !== "settings") { previousPage.current = page; previousMobileChatOpen.current = mobileChatOpen; }
@@ -152,9 +163,14 @@ export function AppShell() {
   }, [goTo, openProviderSettings]);
 
   useEffect(() => {
-    if (!projects.data) return;
+    if (!projects.data || chatId) return;
     if (!projectId || !projects.data.some((entry) => entry.id === projectId)) useAppStore.getState().selectProject(projects.data[0]);
-  }, [projectId, projects.data]);
+  }, [chatId, projectId, projects.data]);
+
+  useEffect(() => {
+    if (!chatId || !activeThread.data || !projects.data) return;
+    useAppStore.getState().syncCodexChatProject(chatId, chatProject(projects.data, activeThread.data.chat.cwd));
+  }, [chatId, activeThread.data, projects.data]);
 
   useEffect(() => {
     const hashChange = () => { if (window.location.hash === "#usage") setSettingsSection("usage"); setPage(pageFromHash()); setMobileChatOpen(window.location.hash === "#home"); setMobileChatsOpen(false); };

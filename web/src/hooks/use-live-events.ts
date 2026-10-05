@@ -6,6 +6,7 @@ import { useBoostedApiClient } from "@/lib/api-context";
 import { notifyForLiveEvent } from "@/lib/notifications";
 import { setCachedChatStatus } from "@/lib/codex-chat-status";
 import { applyCodexEvent } from "@/lib/codex-chat-state";
+import { useUnreadStore } from "@/lib/unread-conversations";
 import { assistantSummary, shouldAcceptAssistantState } from "@/features/agents/lib/assistant-state";
 import type { AssistantState, AssistantSummary } from "@/features/agents/types/assistant";
 import type { CodexLiveEvent, LiveEvent } from "@/lib/types";
@@ -35,6 +36,10 @@ export function useLiveEvents() {
         try {
           const event = JSON.parse(message.data) as LiveEvent;
           void notifyForLiveEvent(event, api);
+          if (event.topic === "assistant.message") {
+            const data = event.data as { agentId?: string; content?: string };
+            if (data.agentId && data.content?.trim()) useUnreadStore.getState().receive(api.profileId, "agent", data.agentId);
+          }
           if (event.topic === "group.deleted") {
             const id = (event.data as { groupId?: string }).groupId;
             if (id) forgetGroup(queryClient, id, api.profileId);
@@ -74,6 +79,11 @@ export function useLiveEvents() {
             }
           }
           if (event.topic === "codex.event") {
+            const incoming = event.data as CodexLiveEvent;
+            if ((incoming.method === "item/agentMessage/delta" && incoming.delta) ||
+              (incoming.method === "item/completed" && incoming.message?.role === "assistant" && incoming.message.kind === "message" && incoming.message.content.trim())) {
+              useUnreadStore.getState().receive(api.profileId, "codex", incoming.threadId);
+            }
             applyCodexEvent(queryClient, event.data as CodexLiveEvent);
             const data = event.data as { threadId?: string; method?: string };
             if (data.method === "turn/completed" && data.threadId) {
