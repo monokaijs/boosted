@@ -48,6 +48,29 @@ beforeEach(() => {
 });
 
 describe("planning in chats", () => {
+  it("uses a configured preset instead of the remembered model and keeps a composer override", async () => {
+    localStorage.setItem(machinePreferenceKey("boosted.codex.model"), "old-model");
+    localStorage.setItem(machinePreferenceKey("boosted.codex.effort"), "high");
+    api.codexOptions.mockResolvedValue({
+      models: [
+        { id: "old-model", model: "old-model", displayName: "Old Model", defaultReasoningEffort: "high", supportedReasoningEfforts: [{ id: "high" }] },
+        { id: "preset-model", model: "preset-model", displayName: "Preset Model", defaultReasoningEffort: "low", supportedReasoningEfforts: [{ id: "low" }, { id: "high" }] },
+      ],
+      defaultModel: "preset-model", hasModelPreset: true, defaultAccessMode: "fullAccess", accessModes: [{ id: "fullAccess", label: "Full access" }],
+    });
+    renderPanel(<NewChatPanel />);
+    fireEvent.change(await screen.findByPlaceholderText("Ask anything…"), { target: { value: "Use the preset" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create chat" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Create chat" }));
+    await waitFor(() => expect(api.sendCodexMessage).toHaveBeenCalledWith("chat-a", "Use the preset", expect.any(String), expect.objectContaining({ model: "preset-model", reasoningEffort: "low" })));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Preset Model" })).toBeEnabled());
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Preset Model" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "Old Model" }));
+    fireEvent.change(screen.getByPlaceholderText("Ask anything…"), { target: { value: "Use my override" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create chat" }));
+    await waitFor(() => expect(api.sendCodexMessage).toHaveBeenLastCalledWith("chat-a", "Use my override", expect.any(String), expect.objectContaining({ model: "old-model", reasoningEffort: "high" })));
+  });
+
   it("restores a draft and receives streaming updates while the conversation is hidden", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const view = (visible: boolean) => <QueryClientProvider client={client}>{visible ? <CodexChatPanel threadId="chat-a" /> : <div>Settings</div>}</QueryClientProvider>;

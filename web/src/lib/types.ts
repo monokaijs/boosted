@@ -121,6 +121,7 @@ export interface CodexOptions {
   accessModes: CodexAccessOption[];
   defaultModel: string;
   defaultAccessMode: CodexAccessOption["id"];
+  hasModelPreset?: boolean;
 }
 
 export interface CodexLiveEvent {

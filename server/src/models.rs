@@ -224,6 +224,7 @@ pub struct CodexOptions {
     pub access_modes: Vec<CodexAccessOption>,
     pub default_model: String,
     pub default_access_mode: String,
+    pub has_model_preset: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

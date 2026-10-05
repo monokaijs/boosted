@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   state: { selectedProjectId: "project-a" as string | undefined, activeMachineId: "machine-a", user: { id: "user-a", role: "admin" } },
   projects: vi.fn(), globalSettings: vi.fn(), updateGlobalSettings: vi.fn(), setupState: vi.fn(),
   integrations: vi.fn(), workspaceCodexSettings: vi.fn(), updateWorkspaceCodexSettings: vi.fn(), usage: vi.fn(), featureRequest: vi.fn(), users: vi.fn(),
-  providers: vi.fn(), accounts: vi.fn(), limits: vi.fn(), models: vi.fn(), updateAccount: vi.fn(),
+  presets: vi.fn(), updatePresets: vi.fn(), codexModelCatalog: vi.fn(), providers: vi.fn(), accounts: vi.fn(), limits: vi.fn(), models: vi.fn(), updateAccount: vi.fn(),
   close: vi.fn(),
 }));
 vi.mock("@/lib/api", () => ({ api: mocks }));
@@ -17,6 +17,7 @@ vi.mock("@/lib/updater", () => ({ useAppUpdateState: () => ({ phase: "idle", sup
 vi.mock("@/features/agents/lib/api-client", () => ({ apiClient: {
   assistant: { usage: mocks.usage },
   providers: { list: mocks.providers },
+  modelPresets: { read: mocks.presets, update: mocks.updatePresets },
   providerAccounts: { list: mocks.accounts, limits: mocks.limits, models: mocks.models, update: mocks.updateAccount },
 } }));
 
@@ -50,6 +51,9 @@ beforeEach(() => {
   mocks.users.mockResolvedValue([{ id: "user-a", username: "Admin", role: "admin", disabled: false }]);
   mocks.providers.mockResolvedValue([{ id: "codex", label: "OpenAI Codex", icon: "codex", capabilities: ["models", "auth"], runtimeFields: [{ key: "model" }, { key: "reasoningEffort" }, { key: "serviceTier" }, { key: "permissionMode" }], accountFields: [{ key: "codexHome" }], defaultSettings: { accountsHome: "/isolated", sharedChatHome: "~/.codex" } }]);
   mocks.accounts.mockResolvedValue([account]);
+  mocks.presets.mockResolvedValue({ default: { model: "", reasoningEffort: "" }, providers: {} });
+  mocks.updatePresets.mockImplementation(async (value) => value);
+  mocks.codexModelCatalog.mockResolvedValue({ models: [], defaultModel: "" });
   mocks.limits.mockResolvedValue({ data: {}, errors: {} });
   mocks.models.mockResolvedValue({ data: [{ id: "model-a", model: "model-a", displayName: "Model A" }] });
   mocks.updateAccount.mockImplementation(async (_id, patch) => ({ ...account, ...patch }));
@@ -114,7 +118,7 @@ describe("settings page", () => {
     fireEvent.keyDown(screen.getByRole("combobox", { name: "Model" }), { key: "ArrowDown" });
     fireEvent.click(await screen.findByRole("option", { name: "Model A" }));
     fireEvent.keyDown(screen.getByRole("combobox", { name: "Model" }), { key: "ArrowDown" });
-    fireEvent.click(await screen.findByRole("option", { name: "Automatic (Codex default)" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Use provider model preset" }));
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(mocks.updateAccount).toHaveBeenCalledWith("account-a", expect.objectContaining({ displayName: "Personal account", runtimeDefaults: expect.objectContaining({ permissionMode: "fullAccess" }) })));
     expect(mocks.updateAccount.mock.calls[0][1].runtimeDefaults).not.toHaveProperty("model");
@@ -126,11 +130,45 @@ describe("settings page", () => {
     mocks.state.user.role = "member";
     renderPage("providers");
     expect(await screen.findByRole("button", { name: "Add account" })).toBeDisabled();
+    expect(await screen.findByRole("combobox", { name: "Preset model" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Model preset" })).toBeDisabled();
     fireEvent.click(await screen.findByRole("button", { name: /Work account/ }));
     expect(await screen.findByRole("textbox", { name: "Account name" })).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "Access" })).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "Model" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
+  });
+
+  it("saves the shared model preset and lets a provider override or inherit it", async () => {
+    renderPage("providers");
+    fireEvent.keyDown(await screen.findByRole("combobox", { name: "Preset model" }), { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("option", { name: "Model A" }));
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Preset reasoning" }), { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("option", { name: "Low" }));
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Model preset" }), { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("option", { name: "Choose provider model" }));
+    const provider = within(screen.getByRole("heading", { name: "OpenAI Codex model preset" }).closest("section")!);
+    fireEvent.keyDown(provider.getByRole("combobox", { name: "Preset reasoning" }), { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("option", { name: "High" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save model presets" }));
+    await waitFor(() => expect(mocks.updatePresets).toHaveBeenCalledWith({ default: { model: "model-a", reasoningEffort: "low" }, providers: { codex: { model: "model-a", reasoningEffort: "high" } } }, expect.anything()));
+    expect(await screen.findByRole("status")).toHaveTextContent("Model presets saved.");
+    fireEvent.keyDown(provider.getByRole("combobox", { name: "Model preset" }), { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("option", { name: "Use default preset" }));
+    expect(provider.queryByRole("combobox", { name: "Preset model" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save model presets" }));
+    await waitFor(() => expect(mocks.updatePresets).toHaveBeenLastCalledWith({ default: { model: "model-a", reasoningEffort: "low" }, providers: {} }, expect.anything()));
+  });
+
+  it("retains the preset draft when saving fails", async () => {
+    mocks.updatePresets.mockRejectedValueOnce(new Error("Could not save presets"));
+    renderPage("providers");
+    fireEvent.keyDown(await screen.findByRole("combobox", { name: "Preset reasoning" }), { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("option", { name: "Low" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save model presets" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not save presets");
+    expect(screen.getByRole("combobox", { name: "Preset reasoning" })).toHaveTextContent("Low");
+    expect(screen.getByRole("button", { name: "Save model presets" })).toBeEnabled();
   });
 
   it("keeps agent notification choices and validates web settings before saving", async () => {

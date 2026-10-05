@@ -228,14 +228,14 @@ function ProviderRuntimeDefaultsField({ dialog }: { dialog: ProviderAccountDialo
               <SelectTrigger aria-label="Default model" className="h-8 w-full border-input bg-background px-2 text-[12px] text-foreground shadow-none hover:bg-secondary/60">
                 <span className="min-w-0 truncate">
                   {!dialog.defaultModel
-                    ? `Automatic${dialog.selectedDefaultModelOption ? ` (${dialog.selectedDefaultModelOption.displayName})` : ""}`
+                    ? "Use provider model preset"
                     : hasExactDefaultModel
                     ? dialog.selectedDefaultModelOption?.displayName ?? dialog.defaultModel
                     : dialog.defaultModel}
                 </span>
               </SelectTrigger>
               <SelectContent align="start" className="max-h-72 border-border bg-popover text-foreground">
-                <SelectItem className="text-[12px] hover:bg-accent focus-visible:bg-accent" value="">Automatic (Codex default)</SelectItem>
+                <SelectItem className="text-[12px] hover:bg-accent focus-visible:bg-accent" value="">Use provider model preset</SelectItem>
                 {modelOptions.map((option) => (
                   <SelectItem className="text-[12px] hover:bg-accent focus-visible:bg-accent" key={option.id} value={option.model}>
                     {option.displayName}
@@ -266,11 +266,12 @@ function ProviderRuntimeDefaultsField({ dialog }: { dialog: ProviderAccountDialo
         {dialog.hasDefaultReasoningField ? (
           <label className="block min-w-0">
             <span className="mb-1 block text-[11px] text-muted-foreground">Reasoning</span>
-            <Select className="w-full min-w-0" value={dialog.defaultReasoningEffort} onValueChange={(value) => dialog.setDefaultReasoningEffort(readComposerReasoningEffort(value))}>
+            <Select className="w-full min-w-0" value={dialog.defaultReasoningEffort} onValueChange={(value) => dialog.setDefaultReasoningEffort(value ? readComposerReasoningEffort(value) : "")}>
               <SelectTrigger aria-label="Default reasoning" className="h-8 w-full border-input bg-background px-2 text-[12px] text-foreground shadow-none hover:bg-secondary/60">
-                <span className="min-w-0 truncate">{composerReasoningEffortLabel(dialog.defaultReasoningEffort)}</span>
+                <span className="min-w-0 truncate">{dialog.defaultReasoningEffort ? composerReasoningEffortLabel(dialog.defaultReasoningEffort) : "Use provider model preset"}</span>
               </SelectTrigger>
               <SelectContent align="start" className="border-border bg-popover text-foreground">
+                <SelectItem className="text-[12px] hover:bg-accent focus-visible:bg-accent" value="">Use provider model preset</SelectItem>
                 {composerReasoningEffortOptions.map((option) => (
                   <SelectItem className="text-[12px] hover:bg-accent focus-visible:bg-accent" key={option.value} value={option.value}>
                     {option.label}

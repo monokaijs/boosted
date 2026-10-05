@@ -1606,10 +1606,7 @@ pub(crate) async fn tool_action(
                 return Err(AppError::Conflict("Connect this account first".into()));
             }
             let client = state.providers.client(&state.db, &account_id).await?;
-            let mut defaults = account["runtimeDefaults"].clone();
-            if !defaults.is_object() {
-                defaults = json!({});
-            }
+            let mut defaults = providers::account_runtime_defaults(&state.db, &account).await?;
             if args.get("model").is_some() {
                 defaults.as_object_mut().unwrap().remove("reasoningEffort");
             }
@@ -3818,6 +3815,62 @@ supports_websockets = false
         assert!(avatar.starts_with("data:image/svg+xml;base64,"));
         assert!(generate_avatar(&json!({"background":"#123456","shapes":[{"type":"path","d":"\"/><script>alert(1)</script>"}]})).is_err());
     }
+    #[tokio::test]
+    async fn provider_model_presets_persist_validate_and_require_admin() {
+        let (_root, state) = fixture().await;
+        let admin = AuthUser { id: "admin".into(), username: "Admin".into(), role: "admin".into() };
+        let member = AuthUser { role: "member".into(), ..admin.clone() };
+        let input = json!({"default":{"model":"exact-alpha","reasoningEffort":"high"},"providers":{"codex":{"model":"exact-beta","reasoningEffort":"low"}}});
+        assert!(providers::update_model_presets(State(state.clone()), Extension(member), Json(input.clone())).await.is_err());
+        assert_eq!(providers::model_presets(&state.db).await.unwrap()["providers"], json!({}));
+        let Json(saved) = providers::update_model_presets(State(state.clone()), Extension(admin.clone()), Json(input.clone())).await.unwrap();
+        assert_eq!(providers::read_model_presets(State(state.clone())).await.unwrap().0, saved);
+        for invalid in [
+            json!({"default":{"model":false,"reasoningEffort":"low"},"providers":{}}),
+            json!({"default":{"model":"exact-alpha","reasoningEffort":"bogus"},"providers":{}}),
+            json!({"default":input["default"],"providers":{"unknown":input["providers"]["codex"]}}),
+        ] {
+            assert!(providers::update_model_presets(State(state.clone()), Extension(admin.clone()), Json(invalid)).await.is_err());
+            assert_eq!(providers::model_presets(&state.db).await.unwrap(), saved);
+        }
+        assert_eq!(providers::provider_model_defaults(&state.db, "codex").await.unwrap(), input["providers"]["codex"]);
+        let _ = providers::update_model_presets(State(state.clone()), Extension(admin), Json(json!({"default":input["default"],"providers":{}}))).await.unwrap();
+        assert_eq!(providers::provider_model_defaults(&state.db, "codex").await.unwrap(), input["default"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn provider_model_presets_initialize_new_chats_and_preserve_overrides() {
+        let (root, state, _home) = coding_fixture().await;
+        let presets = json!({"id":"model-presets","default":{"model":"exact-alpha","reasoningEffort":"high"},"providers":{"codex":{"model":"exact-beta","reasoningEffort":"low"}}});
+        save_document(&state.db, "provider-settings", &presets).await.unwrap();
+        let mut account = document(&state.db, "accounts", "account").await.unwrap();
+        assert_eq!(providers::account_runtime_defaults(&state.db, &account).await.unwrap()["model"], "exact-alpha");
+        account["runtimeDefaults"] = json!({"permissionMode":"readOnly"});
+        save_document(&state.db, "accounts", &account).await.unwrap();
+        let client = state.providers.client(&state.db, "account").await.unwrap();
+        let options = providers::model_options(&state, &client).await.unwrap();
+        assert!(options.has_model_preset);
+        assert_eq!(options.default_model, "exact-beta");
+        assert_eq!(options.models.iter().find(|m| m.model == "exact-beta").unwrap().default_reasoning_effort, "low");
+        let chat = coding_tool(&state, "create_chat", json!({"workingDirectory":root.path(),"accountId":"account","title":"Inherited preset","startRun":false})).await.unwrap();
+        let defaults = providers::runtime_defaults(&state, chat["chatId"].as_str().unwrap()).await.unwrap().unwrap();
+        assert_eq!(defaults["model"], "exact-beta");
+        assert_eq!(defaults["reasoningEffort"], "low");
+        let override_chat = coding_tool(&state, "create_chat", json!({"workingDirectory":root.path(),"accountId":"account","title":"Chat override","startRun":false,"model":"exact-alpha","reasoningEffort":"high"})).await.unwrap();
+        let overrides = providers::runtime_defaults(&state, override_chat["chatId"].as_str().unwrap()).await.unwrap().unwrap();
+        assert_eq!(overrides["model"], "exact-alpha");
+        assert_eq!(overrides["reasoningEffort"], "high");
+        save_document(&state.db, "provider-settings", &json!({"id":"model-presets","default":presets["default"],"providers":{}})).await.unwrap();
+        assert_eq!(providers::runtime_defaults(&state, chat["chatId"].as_str().unwrap()).await.unwrap().unwrap(), defaults);
+        account["runtimeDefaults"] = json!({"model":"exact-beta"});
+        let defaults = providers::account_runtime_defaults(&state.db, &account).await.unwrap();
+        assert_eq!(defaults["model"], "exact-beta");
+        assert!(defaults.get("reasoningEffort").is_none());
+        save_document(&state.db, "provider-settings", &json!({"id":"model-presets","default":{"model":"missing","reasoningEffort":"low"},"providers":{}})).await.unwrap();
+        assert!(providers::model_options(&state, &client).await.is_err());
+    }
+
     #[tokio::test]
     async fn account_homes_are_isolated_and_duplicate_locations_are_rejected() {
         let (_root, state) = fixture().await;

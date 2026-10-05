@@ -46,7 +46,7 @@ export function useProviderAccountDialogState(
   const [codexHome, setCodexHome] = useState("")
   const [defaultModel, setDefaultModel] = useState("")
   const [defaultPermissionMode, setDefaultPermissionMode] = useState<ChatComposerAccessMode>("askForApproval")
-  const [defaultReasoningEffort, setDefaultReasoningEffort] = useState<ChatComposerReasoningEffort>("medium")
+  const [defaultReasoningEffort, setDefaultReasoningEffort] = useState<ChatComposerReasoningEffort | "">("")
   const [defaultServiceTier, setDefaultServiceTier] = useState<ChatComposerServiceTier>("standard")
   const [deleting, setDeleting] = useState(false)
   const [displayName, setDisplayName] = useState("")
@@ -76,7 +76,8 @@ export function useProviderAccountDialogState(
     setCodexHome(readCodexHomeValue(account, provider))
     setDefaultModel(readRecordString(account.runtimeDefaults, "model") || defaultRuntimeDefaultValue(provider.id, "model"))
     setDefaultPermissionMode(readComposerAccessMode(readRecordString(account.runtimeDefaults, "permissionMode") || defaultRuntimeDefaultValue(provider.id, "permissionMode")))
-    setDefaultReasoningEffort(readComposerReasoningEffort(readRecordString(account.runtimeDefaults, "reasoningEffort") || defaultRuntimeDefaultValue(provider.id, "reasoningEffort")))
+    const savedEffort = readRecordString(account.runtimeDefaults, "reasoningEffort")
+    setDefaultReasoningEffort(savedEffort ? readComposerReasoningEffort(savedEffort) : "")
     setDefaultServiceTier(readComposerServiceTier(readRecordString(account.runtimeDefaults, "serviceTier") || defaultRuntimeDefaultValue(provider.id, "serviceTier")))
     setDisplayName(account.displayName)
     setPersonality(readCodexPersonalityValue(account.settings))
@@ -116,7 +117,8 @@ export function useProviderAccountDialogState(
       runtimeDefaults.permissionMode = composerAccessModeValue(defaultPermissionMode)
     }
     if (hasDefaultReasoningField) {
-      runtimeDefaults.reasoningEffort = composerReasoningEffortValue(defaultReasoningEffort)
+      if (defaultReasoningEffort) runtimeDefaults.reasoningEffort = composerReasoningEffortValue(defaultReasoningEffort)
+      else delete runtimeDefaults.reasoningEffort
     }
     if (hasDefaultServiceTierField) {
       runtimeDefaults.serviceTier = composerServiceTierValue(defaultServiceTier)

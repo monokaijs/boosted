@@ -343,6 +343,10 @@ fn router(
     let protected = Router::new()
         .route("/providers", get(providers::list_providers))
         .route(
+            "/provider-model-presets",
+            get(providers::read_model_presets).put(providers::update_model_presets),
+        )
+        .route(
             "/provider-accounts",
             get(providers::list_accounts).post(providers::create_account),
         )
@@ -989,6 +993,7 @@ async fn load_codex_options(client: &CodexClient) -> AppResult<CodexOptions> {
         access_modes: access_options(),
         default_model,
         default_access_mode: "fullAccess".into(),
+        has_model_preset: false,
     })
 }
 
@@ -1000,7 +1005,12 @@ async fn read_codex_options(
         Some(id) => providers::client_for_thread(&state, id).await?,
         None => state.codex.client().await?,
     };
-    Ok(Json(load_codex_options(&client).await?))
+    // Existing chats keep their runtime; presets initialize new shared chats/tasks.
+    Ok(Json(if query.contains_key("threadId") || query.get("catalog").is_some_and(|value| value == "true") {
+        load_codex_options(&client).await?
+    } else {
+        providers::model_options(&state, &client).await?
+    }))
 }
 
 fn codex_image_extension(mime_type: &str) -> Option<&'static str> {
@@ -1400,7 +1410,11 @@ async fn create_codex_chat(
         ));
     }
     let client = state.codex.client().await?;
-    let options = load_codex_options(&client).await?;
+    let options = if input.model.is_some() {
+        load_codex_options(&client).await?
+    } else {
+        providers::model_options(&state, &client).await?
+    };
     let requested_model = input.model.as_deref().unwrap_or(&options.default_model);
     let selected_model = options
         .models
@@ -1423,6 +1437,10 @@ async fn create_codex_chat(
         .get("thread")
         .ok_or_else(|| AppError::Internal("Codex returned no thread".into()))?;
     let chat = codex_chat(thread);
+    if input.model.is_none() {
+        let defaults = providers::provider_model_defaults(&state.db, "codex").await?;
+        providers::save_document(&state.db, "chat-runtime", &json!({"id":chat.id,"model":selected_model.model,"reasoningEffort":defaults["reasoningEffort"].as_str().unwrap_or(&selected_model.default_reasoning_effort)})).await?;
+    }
     state
         .started_codex_threads
         .write()
@@ -1637,6 +1655,7 @@ async fn send_codex_message_locked(
     let requested_model = input
         .model
         .as_deref()
+        .or_else(|| runtime_defaults.as_ref()?.get("model")?.as_str())
         .or_else(|| resumed.get("model").and_then(Value::as_str))
         .or_else(|| resumed.pointer("/thread/model").and_then(Value::as_str))
         .unwrap_or(&codex_options.default_model);
@@ -1648,6 +1667,12 @@ async fn send_codex_message_locked(
     let reasoning_effort = input
         .reasoning_effort
         .as_deref()
+        .or_else(|| {
+            let defaults = runtime_defaults.as_ref()?;
+            (defaults["model"].as_str() == Some(selected_model.model.as_str()))
+                .then(|| defaults["reasoningEffort"].as_str())
+                .flatten()
+        })
         .unwrap_or(&selected_model.default_reasoning_effort);
     if !selected_model.supported_reasoning_efforts.is_empty()
         && !selected_model
@@ -2997,7 +3022,11 @@ async fn handle_live_ws(mut socket: WebSocket, state: AppState) {
 async fn start_plan(state: AppState, task_id: String, prompt: String) -> AppResult<()> {
     let client = state.codex.client().await?;
     let task = state.db.task(&task_id).await?;
-    let codex_options = load_codex_options(&client).await?;
+    let codex_options = if task.model.is_some() {
+        load_codex_options(&client).await?
+    } else {
+        providers::model_options(&state, &client).await?
+    };
     let requested_model = task
         .model
         .as_deref()

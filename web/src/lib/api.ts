@@ -156,6 +156,7 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   setUserDisabled: (id: string, disabled: boolean) => request<User>(`/users/${id}`, json("PATCH", { disabled })),
   startCodexLogin: () => request<CodexLogin>("/codex/login", json("POST")),
   codexOptions: () => request<CodexOptions>("/codex/options"),
+  codexModelCatalog: () => request<CodexOptions>("/codex/options?catalog=true"),
   threadCodexOptions: (threadId: string) => request<CodexOptions>(`/codex/options?threadId=${encodeURIComponent(threadId)}`),
   uploadCodexAttachment: (file: File) => {
     const form = new FormData();

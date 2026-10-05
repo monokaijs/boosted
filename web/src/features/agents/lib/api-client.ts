@@ -1,6 +1,7 @@
 import { api } from '@/lib/api';
 import type { AssistantState, AssistantSummary, AssistantMessageRequest, CreateAssistantRequest } from '../types/assistant';
 import type { AgentUsage } from './usage';
+import type { ProviderModelPresets } from '../types/providers';
 import type { ProviderDefinitionResponse, ProviderAccountResponse, CreateProviderAccountRequest, UpdateProviderAccountRequest, AuthenticateProviderAccountResponse, ProviderModelListResponse, ProviderAccountLimitsResponse } from '../types/providers';
 export type * from '../types/providers';
 const encode = encodeURIComponent;
@@ -19,6 +20,10 @@ export const apiClient = {
     cancelFollowUp: (id: string, followUpId: string) => request<AssistantState>(`/agents/${encode(id)}/follow-ups/${encode(followUpId)}`, 'DELETE'),
   },
   providers: { list: () => request<ProviderDefinitionResponse[]>('/providers') },
+  modelPresets: {
+    read: () => request<ProviderModelPresets>('/provider-model-presets'),
+    update: (body: ProviderModelPresets) => request<ProviderModelPresets>('/provider-model-presets', 'PUT', body),
+  },
   providerAccounts: {
     list: () => request<ProviderAccountResponse[]>('/provider-accounts'),
     create: (body: CreateProviderAccountRequest) => request<ProviderAccountResponse>('/provider-accounts', 'POST', body),

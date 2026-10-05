@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bot, Check, CheckCircle2, ChevronDown, ChevronRight, CircleStop, Download, ExternalLink, FileDiff, FolderOpen, ListChecks, ListTodo, LoaderCircle, Paperclip, Play, Plus, Send, Sparkles, TerminalSquare, UserRound } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -88,6 +88,7 @@ export function NewChatPanel() {
   const [prompt, setPrompt] = useWorkspaceState(`new-chat:${projectId ?? "none"}:draft`, "");
   const [model, setModel] = useState(() => localStorage.getItem(machinePreferenceKey("boosted.codex.model")) ?? "");
   const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem(machinePreferenceKey("boosted.codex.effort")) ?? "");
+  const hasModelOverride = useRef(false);
   const [collaborationMode, setCollaborationMode] = useState<CodexCollaborationMode>(() => localStorage.getItem(machinePreferenceKey("boosted.codex.mode")) === "plan" ? "plan" : "default");
   const [accessMode, setAccessMode] = useState<CodexAccessOption["id"]>(() => {
     const stored = localStorage.getItem(machinePreferenceKey("boosted.codex.access"));
@@ -104,10 +105,11 @@ export function NewChatPanel() {
 
   useEffect(() => {
     if (!codexOptions.data) return;
-    const nextModel = codexOptions.data.models.find((entry) => entry.model === model || entry.id === model)
+    const usePreset = codexOptions.data.hasModelPreset && !hasModelOverride.current;
+    const nextModel = (usePreset ? undefined : codexOptions.data.models.find((entry) => entry.model === model || entry.id === model))
       ?? codexOptions.data.models.find((entry) => entry.model === codexOptions.data?.defaultModel)
       ?? codexOptions.data.models[0];
-    if (nextModel && nextModel.model !== model) {
+    if (nextModel && (nextModel.model !== model || (usePreset && nextModel.defaultReasoningEffort !== reasoningEffort))) {
       setModel(nextModel.model);
       setReasoningEffort(nextModel.defaultReasoningEffort);
       localStorage.setItem(machinePreferenceKey("boosted.codex.model"), nextModel.model);
@@ -123,6 +125,7 @@ export function NewChatPanel() {
   }, [accessMode, codexOptions.data, model, reasoningEffort]);
 
   function selectModel(value: string) {
+    hasModelOverride.current = true;
     const next = codexOptions.data?.models.find((entry) => entry.model === value);
     setModel(value);
     localStorage.setItem(machinePreferenceKey("boosted.codex.model"), value);
@@ -133,6 +136,7 @@ export function NewChatPanel() {
   }
 
   function selectReasoningEffort(value: string) {
+    hasModelOverride.current = true;
     setReasoningEffort(value);
     localStorage.setItem(machinePreferenceKey("boosted.codex.effort"), value);
   }

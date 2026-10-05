@@ -139,6 +139,9 @@ export type ProviderSettingsResponse = {
   settings: JsonObject
 }
 
+export type ModelPreset = { model: string; reasoningEffort: string }
+export type ProviderModelPresets = { default: ModelPreset; providers: Record<string, ModelPreset> }
+
 export type ProviderAccountResponse = {
   authState?: JsonObject | null
   createdAt: string

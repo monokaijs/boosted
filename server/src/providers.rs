@@ -173,6 +173,135 @@ pub(crate) async fn list_providers(State(state): State<AppState>) -> Json<Value>
         json!([{"id":"codex","label":"OpenAI Codex","icon":"codex", "capabilities":["auth","chat","history","limits","models","accountSwitchHooks","localRuntime","threadLifecycle","fork","config"],"composerFeatures":["accessMode","imageAttachment"],"defaultSettings":{"accountsHome":state.providers.home,"sharedChatHome":"~/.codex"},"settingsFields":[],"accountFields":[{"key":"codexHome","label":"Codex home","type":"path"},{"key":"personality","label":"Personality","type":"string"}],"runtimeFields":[{"key":"model","label":"Model","type":"string"},{"key":"reasoningEffort","label":"Reasoning","type":"string"},{"key":"permissionMode","label":"Access","type":"string"},{"key":"serviceTier","label":"Speed","type":"string"}],"authModes":[{"mode":"device","label":"Device login"}]}]),
     )
 }
+
+pub(crate) async fn model_presets(db: &Database) -> AppResult<Value> {
+    match document(db, "provider-settings", "model-presets").await {
+        Ok(value) => Ok(value),
+        Err(AppError::NotFound(_)) => {
+            Ok(json!({"default":{"model":"","reasoningEffort":""},"providers":{}}))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) async fn read_model_presets(State(state): State<AppState>) -> AppResult<Json<Value>> {
+    Ok(Json(model_presets(&state.db).await?))
+}
+
+pub(crate) async fn update_model_presets(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    Json(input): Json<Value>,
+) -> AppResult<Json<Value>> {
+    ensure_admin(&user)?;
+    fn validate_preset(value: &Value) -> AppResult<Value> {
+        let model = value["model"]
+            .as_str()
+            .ok_or_else(|| AppError::BadRequest("Preset model must be a string".into()))?
+            .trim();
+        let effort = value["reasoningEffort"].as_str().ok_or_else(|| {
+            AppError::BadRequest("Preset reasoning effort must be a string".into())
+        })?;
+        if model.chars().count() > 200
+            || !matches!(
+                effort,
+                "" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+            )
+        {
+            return Err(AppError::BadRequest("Invalid model preset".into()));
+        }
+        Ok(json!({"model":model,"reasoningEffort":effort}))
+    }
+    let default = validate_preset(&input["default"])?;
+    let overrides = input["providers"]
+        .as_object()
+        .ok_or_else(|| AppError::BadRequest("Provider presets must be an object".into()))?;
+    let mut providers = serde_json::Map::new();
+    for (id, preset) in overrides {
+        if id != "codex" {
+            return Err(AppError::BadRequest("Unknown provider".into()));
+        }
+        providers.insert(id.clone(), validate_preset(preset)?);
+    }
+    let value = json!({"id":"model-presets","default":default,"providers":providers});
+    save_document(&state.db, "provider-settings", &value).await?;
+    Ok(Json(value))
+}
+
+pub(crate) async fn provider_model_defaults(db: &Database, provider_id: &str) -> AppResult<Value> {
+    let presets = model_presets(db).await?;
+    Ok(resolve_model_defaults(&presets, provider_id))
+}
+
+fn resolve_model_defaults(presets: &Value, provider_id: &str) -> Value {
+    let preset = presets["providers"]
+        .get(provider_id)
+        .unwrap_or(&presets["default"]);
+    let mut defaults = json!({});
+    for key in ["model", "reasoningEffort"] {
+        if let Some(value) = preset[key].as_str().filter(|value| !value.is_empty()) {
+            defaults[key] = json!(value);
+        }
+    }
+    defaults
+}
+
+pub(crate) async fn account_runtime_defaults(db: &Database, account: &Value) -> AppResult<Value> {
+    let mut defaults =
+        provider_model_defaults(db, account["providerId"].as_str().unwrap_or("codex")).await?;
+    if let Some(overrides) = account["runtimeDefaults"].as_object() {
+        // An account-specific model uses its own effort, rather than inheriting an
+        // effort that may only be supported by the provider preset's model.
+        if overrides
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|model| !model.is_empty())
+        {
+            defaults.as_object_mut().unwrap().remove("reasoningEffort");
+        }
+        for (key, value) in overrides {
+            if matches!(key.as_str(), "model" | "reasoningEffort")
+                && value.as_str().is_none_or(str::is_empty)
+            {
+                continue;
+            }
+            defaults[key] = value.clone();
+        }
+    }
+    Ok(defaults)
+}
+
+pub(crate) async fn model_options(
+    state: &AppState,
+    client: &CodexClient,
+) -> AppResult<CodexOptions> {
+    let mut options = load_codex_options(client).await?;
+    let presets = model_presets(&state.db).await?;
+    let defaults = resolve_model_defaults(&presets, "codex");
+    // Saving an automatic preset also replaces the composer's remembered choice.
+    options.has_model_preset = presets.get("id").is_some();
+    let requested = defaults["model"].as_str().unwrap_or(&options.default_model);
+    let model = options
+        .models
+        .iter_mut()
+        .find(|model| model.model == requested || model.id == requested)
+        .ok_or_else(|| AppError::BadRequest(format!("Preset model {requested} is unavailable")))?;
+    if let Some(effort) = defaults["reasoningEffort"].as_str() {
+        if !model.supported_reasoning_efforts.is_empty()
+            && !model
+                .supported_reasoning_efforts
+                .iter()
+                .any(|option| option.id == effort)
+        {
+            return Err(AppError::BadRequest(
+                "Preset reasoning effort is not supported by this model".into(),
+            ));
+        }
+        model.default_reasoning_effort = effort.into();
+    }
+    options.default_model = model.model.clone();
+    Ok(options)
+}
 pub(crate) async fn list_accounts(State(state): State<AppState>) -> AppResult<Json<Vec<Value>>> {
     let accounts = documents(&state.db, "accounts").await?;
     let mut refreshed = Vec::new();
@@ -193,7 +322,7 @@ pub(crate) async fn create_account(
         ));
     }
     let now = Utc::now().to_rfc3339();
-    let account = json!({"id":Uuid::new_v4().to_string(),"providerId":"codex","displayName":input["displayName"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or("OpenAI Codex account"),"settings":input.get("settings").cloned().unwrap_or(json!({})),"runtimeDefaults":input.get("runtimeDefaults").cloned().unwrap_or(json!({"permissionMode":"default","reasoningEffort":"medium"})),"status":"DISCONNECTED","createdAt":now,"updatedAt":now});
+    let account = json!({"id":Uuid::new_v4().to_string(),"providerId":"codex","displayName":input["displayName"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or("OpenAI Codex account"),"settings":input.get("settings").cloned().unwrap_or(json!({})),"runtimeDefaults":input.get("runtimeDefaults").cloned().unwrap_or(json!({"permissionMode":"default"})),"status":"DISCONNECTED","createdAt":now,"updatedAt":now});
     validate_account(&state, &account).await?;
     save_document(&state.db, "accounts", &account).await?;
     Ok((StatusCode::CREATED, Json(account)))
