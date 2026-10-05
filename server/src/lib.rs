@@ -458,6 +458,10 @@ fn router(
         .route("/projects/{id}/file", get(read_project_file))
         .route("/projects/{id}/git/branches", get(list_project_branches))
         .route(
+            "/projects/{id}/git/branch",
+            get(read_project_branch).post(switch_project_branch),
+        )
+        .route(
             "/projects/{id}/integrations",
             get(list_integrations).post(create_integration),
         )
@@ -1074,10 +1078,6 @@ async fn upload_codex_attachment(
     Err(AppError::BadRequest("image attachment is required".into()))
 }
 
-async fn delete_codex_attachment(
-    State(state): State<AppState>,
-    AxumPath(id): AxumPath<String>,
-) -> AppResult<StatusCode> {
 async fn download_codex_attachment(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -1086,6 +1086,10 @@ async fn download_codex_attachment(
     file_response(&path).await
 }
 
+async fn delete_codex_attachment(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> AppResult<StatusCode> {
     let path = codex_attachment_path(&state.uploads_dir, &id)?;
     tokio::fs::remove_file(path).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -2178,6 +2182,32 @@ async fn list_project_branches(
 ) -> AppResult<Json<Vec<String>>> {
     let project = state.db.project(&id).await?;
     Ok(Json(git::branches(Path::new(&project.repo_path)).await?))
+}
+
+async fn read_project_branch(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> AppResult<Json<Value>> {
+    let project = state.db.project(&id).await?;
+    Ok(Json(
+        json!({"branch": git::current_branch(Path::new(&project.repo_path)).await?}),
+    ))
+}
+
+#[derive(Deserialize)]
+struct ProjectBranchSwitch {
+    branch: String,
+}
+
+async fn switch_project_branch(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<ProjectBranchSwitch>,
+) -> AppResult<Json<Value>> {
+    let project = state.db.project(&id).await?;
+    let repo = Path::new(&project.repo_path);
+    git::switch_branch(repo, &input.branch).await?;
+    Ok(Json(json!({"branch": git::current_branch(repo).await?})))
 }
 
 async fn create_project(
@@ -3668,6 +3698,28 @@ mod tests {
         assert!(codex_attachment_path(root.path(), "not-a-uuid.png").is_err());
     }
     #[test]
+    fn codex_media_outside_the_workspace_requires_an_actual_attachment_reference() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let image = outside.path().join("image.png");
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&image, b"image").unwrap();
+        std::fs::write(&secret, b"secret").unwrap();
+        let thread = json!({"turns":[{"items":[{"type":"userMessage", "content":[{"type":"localImage", "path":image}]}]}]});
+        assert_eq!(
+            codex_file_path(workspace.path(), &thread, image.to_str().unwrap()).unwrap(),
+            image.canonicalize().unwrap()
+        );
+        assert!(matches!(
+            codex_file_path(workspace.path(), &thread, secret.to_str().unwrap()),
+            Err(AppError::Forbidden)
+        ));
+        assert!(matches!(
+            codex_file_path(workspace.path(), &json!({}), image.to_str().unwrap()),
+            Err(AppError::Forbidden)
+        ));
+    }
+    #[test]
     fn workspace_file_references_are_confined_and_accept_source_locations() {
         let workspace = tempfile::tempdir().expect("temporary workspace");
         let outside = tempfile::tempdir().expect("outside directory");
@@ -3698,28 +3750,6 @@ mod tests {
         let traversal = format!(
             "../{}/secret.txt",
             outside
-    fn codex_media_outside_the_workspace_requires_an_actual_attachment_reference() {
-        let workspace = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let image = outside.path().join("image.png");
-        let secret = outside.path().join("secret.txt");
-        std::fs::write(&image, b"image").unwrap();
-        std::fs::write(&secret, b"secret").unwrap();
-        let thread = json!({"turns":[{"items":[{"type":"userMessage", "content":[{"type":"localImage", "path":image}]}]}]});
-        assert_eq!(
-            codex_file_path(workspace.path(), &thread, image.to_str().unwrap()).unwrap(),
-            image.canonicalize().unwrap()
-        );
-        assert!(matches!(
-            codex_file_path(workspace.path(), &thread, secret.to_str().unwrap()),
-            Err(AppError::Forbidden)
-        ));
-        assert!(matches!(
-            codex_file_path(workspace.path(), &json!({}), image.to_str().unwrap()),
-            Err(AppError::Forbidden)
-        ));
-    }
-    #[test]
                 .path()
                 .file_name()
                 .and_then(|name| name.to_str())

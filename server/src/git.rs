@@ -59,6 +59,92 @@ pub async fn branches(repo: &Path) -> AppResult<Vec<String>> {
         .collect())
 }
 
+pub async fn switch_branch(repo: &Path, branch: &str) -> AppResult<()> {
+    if !branches(repo).await?.iter().any(|entry| entry == branch) {
+        return Err(AppError::BadRequest(
+            "selected Git branch is unavailable".into(),
+        ));
+    }
+    git(repo, &["switch", "--no-guess", "--", branch]).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod branch_tests {
+    use super::*;
+
+    async fn repository() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "-b", "main"]).await.unwrap();
+        tokio::fs::write(repo.path().join("file.txt"), "main\n")
+            .await
+            .unwrap();
+        git(repo.path(), &["add", "file.txt"]).await.unwrap();
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        )
+        .await
+        .unwrap();
+        git(repo.path(), &["branch", "feature"]).await.unwrap();
+        repo
+    }
+
+    #[tokio::test]
+    async fn switches_existing_local_branches_and_rejects_other_targets() {
+        let repo = repository().await;
+        switch_branch(repo.path(), "feature").await.unwrap();
+        assert_eq!(current_branch(repo.path()).await.unwrap(), "feature");
+        for invalid in ["missing", "HEAD", "--detach"] {
+            assert!(switch_branch(repo.path(), invalid).await.is_err());
+            assert_eq!(current_branch(repo.path()).await.unwrap(), "feature");
+        }
+    }
+
+    #[tokio::test]
+    async fn preserves_local_changes_when_branch_switch_is_blocked() {
+        let repo = repository().await;
+        switch_branch(repo.path(), "feature").await.unwrap();
+        tokio::fs::write(repo.path().join("file.txt"), "feature\n")
+            .await
+            .unwrap();
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-am",
+                "feature",
+            ],
+        )
+        .await
+        .unwrap();
+        switch_branch(repo.path(), "main").await.unwrap();
+        tokio::fs::write(repo.path().join("file.txt"), "unsaved work\n")
+            .await
+            .unwrap();
+        assert!(switch_branch(repo.path(), "feature").await.is_err());
+        assert_eq!(current_branch(repo.path()).await.unwrap(), "main");
+        assert_eq!(
+            tokio::fs::read_to_string(repo.path().join("file.txt"))
+                .await
+                .unwrap(),
+            "unsaved work\n"
+        );
+    }
+}
+
 pub async fn create_worktree(
     repo: &Path,
     path: &Path,

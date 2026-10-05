@@ -188,6 +188,8 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   projectFiles: (projectId: string, path = "") => request<FileEntry[]>(`/projects/${projectId}/files?path=${encodeURIComponent(path)}`),
   readProjectFile: (projectId: string, path: string) => request<FileContent>(`/projects/${projectId}/file?path=${encodeURIComponent(path)}`),
   projectBranches: (projectId: string) => request<string[]>(`/projects/${projectId}/git/branches`),
+  projectBranch: (projectId: string) => request<{ branch: string }>(`/projects/${projectId}/git/branch`),
+  switchProjectBranch: (projectId: string, branch: string) => request<{ branch: string }>(`/projects/${projectId}/git/branch`, json("POST", { branch })),
   uploadTaskAttachment: (file: File) => {
     const form = new FormData();
     form.append("file", file);
@@ -197,9 +199,9 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   tasks: (projectId?: string) => request<Task[]>(`/tasks${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`),
   task: (id: string) => request<Task>(`/tasks/${id}`),
   createTask: (projectId: string, title: string, description: string, options: { baseBranch?: string; model?: string; reasoningEffort?: string; accessMode?: CodexAccessOption["id"]; attachmentIds?: string[] } = {}) => request<Task>("/tasks", json("POST", { projectId, title, description, ...options })),
+  taskAttachment: (taskId: string, id: string) => requestBlob(`/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(id)}`),
   downloadTaskAttachment: async (taskId: string, attachment: TaskAttachment) => {
     const file = await requestBlob(`/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(attachment.id)}`);
-  taskAttachment: (taskId: string, id: string) => requestBlob(`/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(id)}`),
     saveBlob(file.blob, file.name ?? attachment.name);
   },
   integrations: (projectId: string) => request<Integration[]>(`/projects/${projectId}/integrations`),

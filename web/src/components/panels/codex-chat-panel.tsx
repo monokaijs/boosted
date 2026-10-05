@@ -28,6 +28,7 @@ import { conversationQueryOptions } from "@/lib/query-client";
 import { chatActivity, setCachedChatStatus } from "@/lib/codex-chat-status";
 import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import type { CodexAccessOption, CodexAttachment, CodexChatMessage, CodexChatThread, CodexCollaborationMode } from "@/lib/types";
+import "./chat-panel.css";
 
 function CodexSendButton({ disabled, hasAttachments, onSendAttachments }: { disabled: boolean; hasAttachments: boolean; onSendAttachments: () => void }) {
   const empty = useAuiState((state) => state.composer.isEmpty);
@@ -38,7 +39,7 @@ function CodexSendButton({ disabled, hasAttachments, onSendAttachments }: { disa
 
 function UserMessage() {
   return (
-    <MessagePrimitive.Root className="mx-auto flex w-full max-w-3xl justify-end gap-3 py-3">
+    <MessagePrimitive.Root className="chat-message-enter mx-auto flex w-full max-w-3xl justify-end gap-3 py-3">
       <div className="min-w-0 max-w-[84%]">
         <div className="mb-1 text-right text-[10px] text-muted-foreground">You</div>
         <div className="selectable-text rounded-lg bg-primary/10 px-3 py-2 text-left text-[13px] leading-5"><CodexMessageText /></div>
@@ -71,7 +72,7 @@ function AssistantMessage() {
   }
 
   return (
-    <MessagePrimitive.Root className="mx-auto flex w-full max-w-3xl gap-3 py-3">
+    <MessagePrimitive.Root className="chat-message-enter mx-auto flex w-full max-w-3xl gap-3 py-3">
       <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border border-border bg-secondary text-muted-foreground"><Bot className="size-3.5" /></div>
       <div className="min-w-0 max-w-[calc(100%-2.25rem)] flex-1">
         <div className="mb-1 text-[10px] text-muted-foreground">Codex</div>

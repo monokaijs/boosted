@@ -1,11 +1,14 @@
+/// <reference types="node" />
+
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import { applyCodexEvent } from "@/lib/codex-chat-state";
-import type { Task } from "@/lib/types";
+import type { Task, TaskEvent } from "@/lib/types";
 
-const api = vi.hoisted(() => ({ projects: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexApprovals: vi.fn(), codexAttachment: vi.fn(), uploadCodexAttachment: vi.fn(), workspaceFile: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn() }));
+const api = vi.hoisted(() => ({ projects: vi.fn(), projectBranches: vi.fn(), projectBranch: vi.fn(), switchProjectBranch: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexApprovals: vi.fn(), codexAttachment: vi.fn(), uploadCodexAttachment: vi.fn(), workspaceFile: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn() }));
 vi.mock("@/lib/api", () => ({ api }));
 vi.mock("@/lib/api-context", () => ({ useBoostedApiClient: () => api }));
 import { NewChatPanel, TaskPanel } from "./chat-panel";
@@ -30,6 +33,9 @@ beforeEach(() => {
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   useAppStore.setState({ selectedProjectId: "project-a", selectedTaskId: "task-a", activeMachineId: undefined });
   api.projects.mockResolvedValue([{ id: "project-a", name: "Project", repoPath: "/repo" }]);
+  api.projectBranches.mockResolvedValue(["main", "feature"]);
+  api.projectBranch.mockResolvedValue({ branch: "main" });
+  api.switchProjectBranch.mockResolvedValue({ branch: "feature" });
   api.codexOptions.mockResolvedValue({ models: [{ id: "model", model: "model", displayName: "Model", defaultReasoningEffort: "high", supportedReasoningEfforts: [{ id: "high" }], inputModalities: [] }], defaultModel: "model", defaultAccessMode: "fullAccess", accessModes: [{ id: "fullAccess", label: "Full access" }] });
   api.createCodexChat.mockResolvedValue({ id: "chat-a" });
   api.sendCodexMessage.mockResolvedValue({ threadId: "chat-a", turnId: "turn-a" });
@@ -47,7 +53,190 @@ beforeEach(() => {
   });
 });
 
+describe("sending in place", () => {
+  for (const newChat of [true, false]) {
+    describe(newChat ? "new chat" : "task chat", () => {
+      it.each(["click", "keyboard", "submit"])("sends via %s without native navigation and rejects repeated sends while pending", async (method) => {
+        let finish!: (result: Task | { id: string }) => void;
+        const mutation = newChat ? api.createCodexChat : api.sendMessage;
+        mutation.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+        renderPanel(newChat ? <NewChatPanel /> : <TaskPanel />);
+        const input = await screen.findByPlaceholderText(newChat ? "Ask anything…" : "Ask for a plan revision, or approve the plan…");
+        const form = input.closest("form")!;
+        const nativeSubmit = vi.fn();
+        form.addEventListener("submit", nativeSubmit);
+        const href = window.location.href;
+        fireEvent.change(input, { target: { value: "  Stay in this page  " } });
+        const button = screen.getByRole("button", { name: newChat ? "Create chat" : "Send message" });
+        expect(button).toHaveAttribute("type", "button");
+        if (method === "click") fireEvent.click(button);
+        else if (method === "keyboard") {
+          expect(fireEvent.keyDown(input, { key: "Enter", ctrlKey: newChat })).toBe(false);
+        } else {
+          expect(fireEvent.submit(form)).toBe(false);
+        }
+        if (method !== "submit") expect(nativeSubmit).not.toHaveBeenCalled();
+        await waitFor(() => expect(mutation).toHaveBeenCalledTimes(1));
+        expect(button).toBeDisabled();
+        // Programmatic submit and shortcuts must obey the pending guard too.
+        expect(fireEvent.submit(form)).toBe(false);
+        expect(fireEvent.keyDown(input, { key: "Enter", ctrlKey: newChat })).toBe(false);
+        expect(mutation).toHaveBeenCalledTimes(1);
+        await act(async () => finish(newChat ? { id: "chat-a" } : task));
+        await waitFor(() => expect(input).toHaveValue(""));
+        expect(input).toBeInTheDocument();
+        expect(input.closest("form")).toBe(form);
+        expect(window.location.href).toBe(href);
+        if (newChat) {
+          expect(api.sendCodexMessage).toHaveBeenCalledWith("chat-a", "Stay in this page", expect.any(String), expect.any(Object));
+          expect(useAppStore.getState().selectedCodexChatId).toBe("chat-a");
+        } else expect(api.sendMessage).toHaveBeenCalledWith("task-a", "Stay in this page");
+      });
+
+      it("preserves multiline editing and composition, and cancels empty submissions", async () => {
+        renderPanel(newChat ? <NewChatPanel /> : <TaskPanel />);
+        const input = await screen.findByPlaceholderText(newChat ? "Ask anything…" : "Ask for a plan revision, or approve the plan…");
+        expect(fireEvent.submit(input.closest("form")!)).toBe(false);
+        fireEvent.change(input, { target: { value: "Draft" } });
+        expect(fireEvent.keyDown(input, { key: "Enter", shiftKey: true, ctrlKey: newChat })).toBe(true);
+        expect(fireEvent.keyDown(input, { key: "Enter", isComposing: true, ctrlKey: newChat })).toBe(true);
+        if (newChat) expect(fireEvent.keyDown(input, { key: "Enter" })).toBe(true);
+        expect(api.createCodexChat).not.toHaveBeenCalled();
+        expect(api.sendMessage).not.toHaveBeenCalled();
+        expect(input).toHaveValue("Draft");
+      });
+
+      it("keeps a failed send and its draft in place", async () => {
+        const mutation = newChat ? api.createCodexChat : api.sendMessage;
+        mutation.mockRejectedValueOnce(new Error("Unable to send"));
+        renderPanel(newChat ? <NewChatPanel /> : <TaskPanel />);
+        const input = await screen.findByPlaceholderText(newChat ? "Ask anything…" : "Ask for a plan revision, or approve the plan…");
+        fireEvent.change(input, { target: { value: "Retry this draft" } });
+        fireEvent.click(screen.getByRole("button", { name: newChat ? "Create chat" : "Send message" }));
+        expect(await screen.findByText("Unable to send")).toBeInTheDocument();
+        expect(input).toHaveValue("Retry this draft");
+        expect(input).toBeInTheDocument();
+      });
+    });
+  }
+});
+
+describe("message entrance", () => {
+  it("animates task messages on entrance and preserves their nodes on updates", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const messages: TaskEvent[] = [
+      { id: 1, taskId: task.id, kind: "user_message", payload: { text: "User message" }, createdAt: "now" },
+      { id: 2, taskId: task.id, kind: "agent_message", payload: { text: "Assistant message" }, createdAt: "now" },
+    ];
+    api.taskEvents.mockResolvedValue(messages);
+    const view = render(<QueryClientProvider client={client}><TaskPanel /></QueryClientProvider>);
+    const user = (await screen.findByText("User message")).closest("article");
+    const assistant = screen.getByText("Assistant message").closest("article");
+    expect(user).toHaveClass("chat-message-enter");
+    expect(assistant).toHaveClass("chat-message-enter");
+    act(() => client.setQueryData(["events", task.id], [...messages.slice(0, 1), { ...messages[1], payload: { text: "Updated assistant message" } }, { ...messages[0], id: 3, payload: { text: "Next message" } }]));
+    expect((await screen.findByText("Updated assistant message")).closest("article")).toBe(assistant);
+    expect(screen.getByText("User message").closest("article")).toBe(user);
+    expect(screen.getByText("Next message").closest("article")).toHaveClass("chat-message-enter");
+    view.unmount(); client.clear();
+  });
+
+  it("animates Codex user and assistant messages without remounting streamed text", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(<QueryClientProvider client={client}><CodexChatPanel threadId="chat-a" /></QueryClientProvider>);
+    const assistant = (await screen.findByRole("heading", { name: "Proposed work" })).closest(".chat-message-enter");
+    expect(assistant).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("Message Codex..."), { target: { value: "New user message" } });
+    fireEvent.click(screen.getByTitle("Send message"));
+    expect((await screen.findByText("New user message")).closest(".chat-message-enter")).toBeInTheDocument();
+    act(() => applyCodexEvent(client, { threadId: "chat-a", turnId: "turn-a", method: "item/agentMessage/delta", itemId: "plan-a", delta: " More detail." }));
+    expect(await screen.findByText("Keep the plan in this chat. More detail.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Proposed work" }).closest(".chat-message-enter")).toBe(assistant);
+    view.unmount(); client.clear();
+  });
+
+  it("gates the blur and fly-up animation on no-preference with no persistent fill", () => {
+    // jsdom does not evaluate reduced-motion media queries or run animations;
+    // inspect the parsed CSS rules to verify the motion preference contract.
+    const style = document.createElement("style");
+    style.textContent = readFileSync(`${import.meta.dirname}/chat-panel.css`, "utf8");
+    document.head.append(style);
+    try {
+      const rules = Array.from(style.sheet!.cssRules);
+      const keyframes = rules.find((rule) => rule.cssText.startsWith("@keyframes")) as CSSKeyframesRule;
+      expect(keyframes.name).toBe("chat-message-enter");
+      const frames = Array.from(keyframes.cssRules) as CSSKeyframeRule[];
+      expect(frames[0].style.opacity).toBe("0");
+      expect(frames[0].style.filter).toBe("blur(3px)");
+      expect(frames[0].style.transform).toBe("translateY(6px)");
+      expect(frames[1].style.opacity).toBe("1");
+      expect(frames[1].style.filter).toBe("blur(0)");
+      expect(frames[1].style.transform).toBe("translateY(0)");
+      const media = rules.find((rule) => rule.type === CSSRule.MEDIA_RULE) as CSSMediaRule;
+      expect(media.conditionText).toBe("(prefers-reduced-motion: no-preference)");
+      expect(rules.filter((rule) => rule.type === CSSRule.STYLE_RULE)).toHaveLength(0);
+      const animation = media.cssRules[0] as CSSStyleRule;
+      expect(animation.selectorText).toBe(".chat-message-enter");
+      expect(animation.style.animation).toBe("chat-message-enter 240ms cubic-bezier(0.16, 1, 0.3, 1)");
+      expect(animation.style.getPropertyValue("animation-fill-mode")).toBe("");
+    } finally { style.remove(); }
+  });
+});
+
 describe("planning in chats", () => {
+  it("shows the checked-out branch, removes Local, and waits for branch switching before sending", async () => {
+    api.projects.mockResolvedValue([{ id: "project-a", name: "Project", repoPath: "/repo", defaultBranch: "obsolete" }]);
+    let finishSwitch!: (result: { branch: string }) => void;
+    api.switchProjectBranch.mockImplementationOnce(() => new Promise((resolve) => { finishSwitch = resolve; }));
+    renderPanel(<NewChatPanel />);
+    const selector = await screen.findByRole("button", { name: "Select branch" });
+    await waitFor(() => expect(selector).toHaveTextContent("main"));
+    expect(screen.queryByText("Local")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("Ask anything…"), { target: { value: "Work on feature" } });
+    fireEvent.pointerDown(selector, { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "feature" }));
+    await waitFor(() => expect(api.switchProjectBranch).toHaveBeenCalledWith("project-a", "feature"));
+    expect(screen.getByRole("button", { name: "Create chat" })).toBeDisabled();
+    fireEvent.submit(screen.getByPlaceholderText("Ask anything…").closest("form")!);
+    expect(api.createCodexChat).not.toHaveBeenCalled();
+    await act(async () => finishSwitch({ branch: "feature" }));
+    await waitFor(() => expect(selector).toHaveTextContent("feature"));
+    expect(screen.getByRole("button", { name: "Create chat" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Create chat" }));
+    await waitFor(() => expect(api.createCodexChat).toHaveBeenCalledWith("/repo", expect.any(String)));
+  });
+
+  it("keeps the actual branch selected when checkout fails", async () => {
+    api.switchProjectBranch.mockRejectedValueOnce(new Error("Your local changes would be overwritten"));
+    renderPanel(<NewChatPanel />);
+    const selector = await screen.findByRole("button", { name: "Select branch" });
+    await waitFor(() => expect(selector).toHaveTextContent("main"));
+    fireEvent.pointerDown(selector, { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "feature" }));
+    expect(await screen.findByText("Your local changes would be overwritten")).toBeInTheDocument();
+    expect(selector).toHaveTextContent("main");
+    expect(selector).toBeEnabled();
+  });
+
+  it("loads the branch for the newly selected project", async () => {
+    api.projects.mockResolvedValue([
+      { id: "project-a", name: "Project", repoPath: "/repo", defaultBranch: "main" },
+      { id: "project-b", name: "Other project", repoPath: "/other", defaultBranch: "main" },
+    ]);
+    api.projectBranch.mockImplementation(async (id: string) => ({ branch: id === "project-a" ? "feature" : "release" }));
+    api.projectBranches.mockImplementation(async (id: string) => id === "project-a" ? ["main", "feature"] : ["main", "release"]);
+    renderPanel(<NewChatPanel />);
+    const selector = await screen.findByRole("button", { name: "Select branch" });
+    await waitFor(() => expect(selector).toHaveTextContent("feature"));
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Project" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "Other project" }));
+    await waitFor(() => expect(selector).toHaveTextContent("release"));
+    expect(api.projectBranch).toHaveBeenCalledWith("project-b");
+    fireEvent.pointerDown(selector, { button: 0, ctrlKey: false });
+    expect(await screen.findByRole("menuitemradio", { name: "release" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByRole("menuitemradio", { name: "feature" })).not.toBeInTheDocument();
+  });
+
   it("uses a configured preset instead of the remembered model and keeps a composer override", async () => {
     localStorage.setItem(machinePreferenceKey("boosted.codex.model"), "old-model");
     localStorage.setItem(machinePreferenceKey("boosted.codex.effort"), "high");

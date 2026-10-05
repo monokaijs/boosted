@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, Check, CheckCircle2, ChevronDown, ChevronRight, CircleStop, ExternalLink, FileDiff, FolderOpen, ListChecks, ListTodo, LoaderCircle, Play, Plus, Send, Sparkles, TerminalSquare, UserRound } from "lucide-react";
+import { Bot, Check, CheckCircle2, ChevronDown, ChevronRight, CircleStop, ExternalLink, FileDiff, FolderOpen, GitBranch, ListChecks, ListTodo, LoaderCircle, Play, Plus, Send, Sparkles, TerminalSquare, UserRound } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AttachmentPreview } from "@/components/attachment-preview";
@@ -18,6 +18,7 @@ import { conversationQueryOptions } from "@/lib/query-client";
 import { taskStatusMeta } from "@/lib/status";
 import type { CodexAccessOption, CodexCollaborationMode, TaskEvent } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import "./chat-panel.css";
 
 function textPayload(event: TaskEvent) {
   return String(event.payload.text ?? event.payload.message ?? event.payload.command ?? "");
@@ -65,7 +66,7 @@ function TimelineEvent({ event }: { event: TaskEvent }) {
   const user = event.kind === "user_message";
   const error = event.kind === "error";
   return (
-    <article className={cn("group flex gap-3 py-3", user && "flex-row-reverse")}>
+    <article className={cn("chat-message-enter group flex gap-3 py-3", user && "flex-row-reverse")}>
       <div className={cn("mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border", user ? "border-primary/20 bg-primary/10 text-primary" : error ? "border-destructive/25 bg-destructive/10 text-destructive" : "border-border bg-secondary text-muted-foreground")}>{user ? <UserRound className="size-3.5" /> : <Bot className="size-3.5" />}</div>
       <div className={cn("min-w-0 max-w-[84%]", user && "text-right")}>
         <div className="mb-1 text-[10px] text-muted-foreground">{user ? event.actorName ?? "You" : error ? "Error" : "Codex"}</div>
@@ -100,6 +101,19 @@ export function NewChatPanel() {
   const queryClient = useQueryClient();
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const project = projects.data?.find((entry) => entry.id === projectId);
+  const branches = useQuery({ queryKey: ["branches", projectId], queryFn: () => api.projectBranches(projectId!), enabled: Boolean(projectId) });
+  const branch = useQuery({ queryKey: ["project-branch", projectId], queryFn: () => api.projectBranch(projectId!), enabled: Boolean(projectId), staleTime: 0 });
+  const switchBranch = useMutation({
+    mutationFn: ({ id, branch }: { id: string; branch: string }) => api.switchProjectBranch(id, branch),
+    onMutate: ({ id }) => queryClient.cancelQueries({ queryKey: ["project-branch", id], exact: true }),
+    onSuccess: (result, { id }) => {
+      queryClient.setQueryData(["project-branch", id], result);
+      void queryClient.invalidateQueries({ queryKey: ["branches", id] });
+      void queryClient.invalidateQueries({ queryKey: ["files", `project:${id}`] });
+      void queryClient.invalidateQueries({ queryKey: ["file", "project", id] });
+    },
+  });
+  useEffect(() => { switchBranch.reset(); }, [projectId]);
   const codexOptions = useQuery({ queryKey: ["codex-options"], queryFn: api.codexOptions, staleTime: 60_000 });
   const selectedModel = codexOptions.data?.models.find((entry) => entry.model === model || entry.id === model);
   const selectedAccess = codexOptions.data?.accessModes.find((entry) => entry.id === accessMode);
@@ -162,9 +176,13 @@ export function NewChatPanel() {
     },
   });
 
+  function sendMessage() {
+    if (project && prompt.trim() && model && reasoningEffort && !switchBranch.isPending && !create.isPending) create.mutate();
+  }
+
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (project && prompt.trim() && model && reasoningEffort) create.mutate();
+    sendMessage();
   }
 
   return (
@@ -175,7 +193,7 @@ export function NewChatPanel() {
           <>
             <div className="new-task-context">
               <DropdownMenu>
-                <DropdownMenuTrigger asChild><button type="button" className="new-task-option"><span>{project.name}</span><ChevronDown /></button></DropdownMenuTrigger>
+                <DropdownMenuTrigger asChild><button type="button" className="new-task-option" disabled={create.isPending || switchBranch.isPending}><span>{project.name}</span><ChevronDown /></button></DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-64">
                   <DropdownMenuLabel>Project</DropdownMenuLabel>
                   <DropdownMenuRadioGroup value={project.id} onValueChange={(id) => { const next = projects.data?.find((entry) => entry.id === id); if (next) selectProject(next); }}>
@@ -184,9 +202,17 @@ export function NewChatPanel() {
                 </DropdownMenuContent>
               </DropdownMenu>
               <span className="context-divider" />
-              <span className="inline-flex items-center gap-1.5"><TerminalSquare />Local</span>
-              <span className="context-divider" />
-              <span className="inline-flex items-center gap-1.5 font-mono">{project.defaultBranch}</span>
+              <DropdownMenu onOpenChange={(open) => { if (open) { void branches.refetch(); void branch.refetch(); } }}>
+                <DropdownMenuTrigger asChild><button type="button" className="new-task-option font-mono" aria-label="Select branch" disabled={create.isPending || switchBranch.isPending || !branch.data}>{switchBranch.isPending ? <LoaderCircle className="animate-spin" /> : <GitBranch />}<span>{branch.data?.branch ?? (branch.isPending ? "Loading branch…" : "Branch unavailable")}</span><ChevronDown /></button></DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-64">
+                  <DropdownMenuLabel>Branch</DropdownMenuLabel>
+                  <DropdownMenuRadioGroup value={branch.data?.branch} onValueChange={(next) => { if (next !== branch.data?.branch) switchBranch.mutate({ id: project.id, branch: next }); }}>
+                    {branches.data?.map((entry) => <DropdownMenuRadioItem key={entry} value={entry}><span className="truncate font-mono">{entry}</span></DropdownMenuRadioItem>)}
+                  </DropdownMenuRadioGroup>
+                  {branches.isPending && <p className="px-2 py-1 text-xs text-muted-foreground">Loading branches…</p>}
+                  {branches.data?.length === 0 && <p className="px-2 py-1 text-xs text-muted-foreground">No local branches</p>}
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
             <form className="new-task-composer" onSubmit={submit}>
               <Textarea
@@ -195,7 +221,7 @@ export function NewChatPanel() {
                 placeholder="Ask anything…"
                 value={prompt}
                 onChange={(event) => setPrompt(event.target.value)}
-                onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) event.currentTarget.form?.requestSubmit(); }}
+                onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); sendMessage(); } }}
               />
               <div className="new-task-footer">
                 <span className="new-task-plus" aria-hidden="true"><Plus /></span>
@@ -221,10 +247,11 @@ export function NewChatPanel() {
                   </DropdownMenuContent>
                 </DropdownMenu>
                 <span className="context-divider" />
-                <Button className="new-task-send-button" variant="ghost" aria-label="Create chat" disabled={!prompt.trim() || !model || !reasoningEffort || create.isPending}>{create.isPending ? <LoaderCircle className="animate-spin" /> : <Send />}<span className="new-task-send-label">Send</span></Button>
+                <Button type="button" onClick={sendMessage} className="new-task-send-button" variant="ghost" aria-label="Create chat" disabled={!prompt.trim() || !model || !reasoningEffort || create.isPending || switchBranch.isPending}>{create.isPending ? <LoaderCircle className="animate-spin" /> : <Send />}<span className="new-task-send-label">Send</span></Button>
               </div>
             </form>
             {create.error && <p className="mt-2 text-xs text-destructive">{create.error.message}</p>}
+            {(branch.error || branches.error || switchBranch.error) && <p className="mt-2 text-xs text-destructive">{switchBranch.error?.message ?? branch.error?.message ?? branches.error?.message}</p>}
             {codexOptions.error && <p className="mt-2 text-xs text-destructive">{codexOptions.error.message}</p>}
             <p className="new-chat-hint">⌘ Enter to send</p>
           </>
@@ -269,9 +296,13 @@ export function TaskPanel() {
   const StatusIcon = meta?.icon;
   const active = task.data?.status === "planning" || task.data?.status === "running";
 
+  function sendMessage() {
+    if (message.trim() && !send.isPending) send.mutate();
+  }
+
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (message.trim()) send.mutate();
+    sendMessage();
   }
 
   return (
@@ -326,9 +357,9 @@ export function TaskPanel() {
             placeholder={task.data?.status === "queued" ? "Send instructions to Codex and start planning…" : task.data?.status === "needs_input" ? "Reply to Codex…" : task.data?.status === "ready" ? "Ask for a plan revision, or approve the plan…" : "Message Codex…"}
             value={message}
             onChange={(event) => setMessage(event.target.value)}
-            onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }}
+            onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); sendMessage(); } }}
           />
-          <Button size="icon" disabled={!message.trim() || send.isPending}><Send /></Button>
+          <Button type="button" onClick={sendMessage} size="icon" aria-label="Send message" disabled={!message.trim() || send.isPending}><Send /></Button>
         </div>
         {send.error && <p className="mx-auto mt-1.5 max-w-3xl text-xs text-destructive">{send.error.message}</p>}
       </form>
