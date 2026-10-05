@@ -80,6 +80,7 @@ for line in sys.stdin:
         result = {"thread": thread}
         if p.get("ephemeral"):
             assert "leader-managed" in p["baseInstructions"]
+            thread["dynamicTools"] = p["dynamicTools"]
             identity_line = p["developerInstructions"].split("agentIdentity=", 1)[1].splitlines()[0]
             thread["agentIdentity"] = json.loads(identity_line)
     elif method == "thread/name/set":
@@ -118,6 +119,11 @@ for line in sys.stdin:
         purpose = execution["purpose"]
         directive = gc["originalUserRequest"]["content"]
         thread = threads[current_thread]
+        tool_names = {tool["name"] for tool in thread["dynamicTools"]}
+        assert "create_group_task" in tool_names
+        for name in ("create_chat", "send_message", "watch_chat", "block_group_task", "submit_group_result"):
+            assert (name in tool_names) == (purpose == "execute"), (purpose, name)
+        assert ("review_group_task" in tool_names) == (purpose == "review")
         turn_id = "turn"
         emit({"id": message["id"], "result": {"turn": {"id": turn_id}}})
         assert "private-only" not in raw

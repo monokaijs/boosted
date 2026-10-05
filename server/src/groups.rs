@@ -2263,7 +2263,7 @@ pub(crate) fn tools(base: Value, purpose: &str) -> Value {
         ),
         (
             "create_group_task",
-            "Only the group leader may create assignments. Inspect existing tasks and memberRoles, then assign one distinct task to a specific owner. Dependencies must be existing tasks.",
+            "Only the group leader may create assignments. For a human project-work request in a message turn, inspect existing tasks and memberRoles, then assign one distinct task to a specific owner. Creation automatically queues a separate execution turn with coding-chat tools; those tools are intentionally absent from message turns. Dependencies must be existing tasks.",
             json!({"title":{"type":"string"},"instructions":{"type":"string"},"expectedResult":{"type":"string"},"ownerId":{"type":"string"},"dependencyIds":{"type":"array","items":{"type":"string"}},"workingDirectory":{"type":"string"},"fileResponsibilities":{"type":"array","items":{"type":"string"}}}),
             json!(["title", "instructions", "expectedResult", "ownerId"]),
         ),
@@ -2293,6 +2293,14 @@ pub(crate) fn tools(base: Value, purpose: &str) -> Value {
 pub(crate) async fn execute_tool(
     state: &AppState,
     c: &GroupContext,
+        let available = match name {
+            "block_group_task" | "submit_group_result" => purpose == "execute",
+            "review_group_task" => purpose == "review",
+            _ => true,
+        };
+        if !available {
+            continue;
+        }
     name: &str,
     args: &Value,
     call: &str,

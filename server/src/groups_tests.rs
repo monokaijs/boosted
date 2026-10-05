@@ -1,6 +1,22 @@
 use super::*;
 use std::time::Duration;
 
+#[tokio::test]
+async fn group_list_tracks_incoming_messages_without_counting_user_or_role_updates() {
+    let (_root, state, peer) = fixture().await;
+    let g = group(&state, &peer, false).await;
+    let Json(initial) = list(State(state.clone())).await.unwrap();
+    assert!(initial.iter().find(|summary| summary.id == id(&g)).unwrap().last_message_at.is_none());
+    for (index, sender_type, content) in [(1, "agent", "Reply"), (2, "user", "Next task"), (3, "agent", " ")] {
+        let message = json!({"id":format!("message-{index}"),"groupId":id(&g),"sequence":index,"senderType":sender_type,"content":content,"createdAt":format!("2026-10-05T09:0{index}:00Z")});
+        sqlx::query("INSERT INTO group_messages VALUES(?,?,?)")
+            .bind(id(&message)).bind(id(&g)).bind(message.to_string())
+            .execute(&state.db.pool).await.unwrap();
+    }
+    let Json(summaries) = list(State(state.clone())).await.unwrap();
+    assert_eq!(summaries.iter().find(|summary| summary.id == id(&g)).unwrap().last_message_at.as_deref(), Some("2026-10-05T09:01:00Z"));
+}
+
 fn user() -> AuthUser {
     AuthUser {
         id: "admin".into(),
@@ -155,6 +171,105 @@ async fn settle(state: &AppState, group: &str) -> Value {
     })
     .await
     .expect("Group did not settle")
+}
+
+#[test]
+fn group_tools_match_the_current_turn_purpose() {
+    let base: Value = serde_json::from_str(include_str!("agent-tools.json")).unwrap();
+    for purpose in ["message", "execute", "review"] {
+        let specs = tools(base.clone(), purpose);
+        let available = |name: &str| {
+            specs
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == name)
+        };
+        for name in [
+            "read_group_context",
+            "create_group_task",
+            "claim_group_task",
+            "send_group_message",
+        ] {
+            assert!(available(name), "{name} must be available during {purpose}");
+        }
+        for name in [
+            "create_chat",
+            "send_message",
+            "watch_chat",
+            "block_group_task",
+            "submit_group_result",
+        ] {
+            assert_eq!(
+                available(name),
+                purpose == "execute",
+                "{name} during {purpose}"
+            );
+        }
+        assert_eq!(available("review_group_task"), purpose == "review");
+    }
+}
+
+#[tokio::test]
+async fn leader_message_queues_assignment_without_execution_tools_or_human_intervention() {
+    let (_root, state, peer) = fixture().await;
+    let g = group(&state, &peer, true).await;
+    let source = human(
+        &state,
+        id(&g),
+        "Investigate torrent downloads",
+        vec![],
+        "torrent",
+    )
+    .await;
+    let leader = context_for(&state, id(&g), "pock", id(&source), None, "message").await;
+    for (name, args) in [
+        (
+            "block_group_task",
+            json!({"reason":"Coding tools unavailable"}),
+        ),
+        (
+            "submit_group_result",
+            json!({"result":"Done","verification":"Checked"}),
+        ),
+        (
+            "review_group_task",
+            json!({"revision":1,"decision":"approve","evidence":"Checked"}),
+        ),
+    ] {
+        let error = execute_tool(&state, &leader, name, &args, name, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Tool unavailable in this group turn");
+    }
+    assert!(all(&state.db, "group_receipts", id(&g))
+        .await
+        .unwrap()
+        .is_empty());
+    let task = execute_tool(
+        &state,
+        &leader,
+        "create_group_task",
+        &json!({"title":"Investigate torrent downloads","instructions":"Find why downloads never start","expectedResult":"Evidence and verified fix","ownerId":peer}),
+        "assign",
+        &[source.clone()],
+    ).await.unwrap();
+    assert_eq!(task["status"], "queued");
+    assert_eq!(task["workingDirectory"], g["workingDirectory"]);
+    let deliveries: Vec<String> = sqlx::query_scalar(
+        "SELECT data FROM group_deliveries WHERE group_id=? AND json_extract(data,'$.taskId')=?",
+    )
+    .bind(id(&g))
+    .bind(id(&task))
+    .fetch_all(&state.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(deliveries.len(), 1);
+    let delivery: Value = serde_json::from_str(&deliveries[0]).unwrap();
+    assert_eq!(delivery["agentId"], peer);
+    assert_eq!(delivery["purpose"], "execute");
+    assert_eq!(delivery["status"], "queued");
+    assert_eq!(delivery["rootId"], source["id"]);
 }
 
 #[tokio::test]
