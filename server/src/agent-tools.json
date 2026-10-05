@@ -2,7 +2,7 @@
   {
     "type": "function",
     "name": "select_agent_model",
-    "description": "Escalate your own reasoning for the current task while preserving this conversation and tool results. Use gpt-6.1-sol for complex coding, debugging or multi-step analysis; reserve gpt-6-astra for exceptionally difficult reasoning that needs greater capability. Routine replies and tool operations should stay on the fast default. Send a useful short user update before escalating when appropriate. Call this tool by itself; after success, stop immediately without further tools. The server hands off automatically. This does not change any coding chat's model or account defaults.",
+    "description": "Escalate your own reasoning for the current task while preserving this conversation and tool results. Use gpt-6.1-sol at medium reasoning effort for complex coding, debugging or multi-step analysis; reserve gpt-6-astra for exceptionally difficult reasoning that needs greater capability. Routine replies and tool operations should stay on gpt-6.1-sol at low reasoning effort. Send a useful short user update before escalating when appropriate. Call this tool by itself; after success, stop immediately without further tools. The server hands off automatically. This does not change any coding chat's model or account defaults.",
     "inputSchema": {
       "type": "object",
       "properties": {

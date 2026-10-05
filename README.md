@@ -40,7 +40,7 @@ Existing installations migrate automatically. Browser clients retain the current
 
 ## Agents and provider accounts
 
-Agents start each turn with GPT-6 Luna at low reasoning effort for quick replies and routine actions. They can choose GPT-6.1 Sol at medium effort for complex work, or GPT-6 Astra at high effort for especially demanding reasoning. A handoff keeps the same conversation and tool results, and the next user or background turn starts on Luna again. Model selections appear in action receipts. Agent routing is independent of provider defaults and existing coding-chat models.
+Agents start each turn with GPT-6.1 Sol at low reasoning effort for quick replies and routine actions. They can choose GPT-6.1 Sol at medium effort for complex work, or GPT-6 Astra at high effort for especially demanding reasoning. A handoff keeps the same conversation and tool results, and the next user or background turn starts on Sol at low effort again. Model selections appear in action receipts. Agent routing is independent of provider defaults and existing coding-chat models.
 
 Open **Agents** from the workspace rail (or **More → Agents** on mobile). Agents have separate persistent conversations, names, personalities, and avatars, and can manage coding chats across all registered projects. Create additional agents with **New agent**. Update an agent's identity in conversation, upload an avatar from its profile, or ask it to generate one.
 

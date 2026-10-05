@@ -14,6 +14,7 @@ scenario = "simple"
 thread_id = None
 turn_id = None
 current_model = None
+current_effort = None
 handoff_call = None
 
 
@@ -52,18 +53,18 @@ for line in sys.stdin:
     if method == "initialize":
         emit({"id": message["id"], "result": {}})
     elif method == "model/list":
-        models = [{"model": "gpt-6-luna", "isDefault": True,
-                   "supportedReasoningEfforts": [{"reasoningEffort": "low"}]}]
+        models = []
         if scenario != "unavailable":
-            models.append({"model": "gpt-6.1-sol", "supportedReasoningEfforts": [
-                {"reasoningEffort": "low" if scenario == "bad-effort" else "medium"}]})
+            efforts = ["low"] if scenario == "bad-effort" else ["low", "medium"]
+            models.append({"model": "gpt-6.1-sol", "isDefault": True,
+                           "supportedReasoningEfforts": [{"reasoningEffort": effort} for effort in efforts]})
         models.append({"model": "gpt-6-astra", "supportedReasoningEfforts": [
             {"reasoningEffort": "high"}]})
         emit({"id": message["id"], "result": {"data": models}})
     elif method == "thread/start":
         thread_count += 1
         thread_id = "agent-thread-" + str(thread_count)
-        assert params["model"] == "gpt-6-luna"
+        assert params["model"] == "gpt-6.1-sol"
         assert params["allowProviderModelFallback"] is False
         assert params["config"]["model_reasoning_effort"] == "low"
         identity_line = params["developerInstructions"].split("agentIdentity=", 1)[1].splitlines()[0]
@@ -73,11 +74,12 @@ for line in sys.stdin:
         turn_count += 1
         turn_id = "turn-" + str(turn_count)
         current_model = params["model"]
+        current_effort = params["effort"]
         assert params["threadId"] == thread_id
         assert params["approvalPolicy"] == "never"
         assert params["serviceTier"] == "default"
         emit({"id": message["id"], "result": {"turn": {"id": turn_id}}})
-        if params["model"] == "gpt-6-luna":
+        if params["model"] == "gpt-6.1-sol" and params["effort"] == "low":
             assert params["effort"] == "low"
             prompt = json.loads(params["input"][0]["text"])
             assert prompt["agentIdentity"] == agent_identity
@@ -100,7 +102,7 @@ for line in sys.stdin:
         assert params["turnId"] == turn_id
         if scenario == "failure":
             complete("failed", {"message": "Synthetic usage limit"})
-        elif scenario != "cancel" or current_model == "gpt-6-luna":
+        elif scenario != "cancel" or current_effort == "low":
             # Simulate buffered requests racing with interruption. Duplicate replies are
             # cached, and new mutations must be rejected until the handoff completes.
             tool("select_agent_model", *handoff_call)
