@@ -1,5 +1,5 @@
 //! Shared presentation for persisted and live app-server items.
-use crate::models::CodexChatMessage;
+use crate::models::{CodexChatMessage, CodexMessageAttachment};
 use serde_json::{Value, json};
 
 fn code_block(text: &str, language: &str) -> String {
@@ -9,17 +9,189 @@ fn code_block(text: &str, language: &str) -> String {
 }
 
 fn details(value: &Value) -> String {
+    let mut value = value.clone();
+    redact_attachment_data(&mut value);
     code_block(
-        &serde_json::to_string_pretty(value).unwrap_or_default(),
+        &serde_json::to_string_pretty(&value).unwrap_or_default(),
         "json",
     )
+}
+
+fn redact_attachment_data(value: &mut Value) {
+    if input_attachment(value).is_some() {
+        if let Some(fields) = value.as_object_mut() {
+            for key in [
+                "data",
+                "file_data",
+                "input_audio",
+                "url",
+                "image_url",
+                "imageUrl",
+                "dataUrl",
+            ] {
+                if let Some(data) = fields.get_mut(key) {
+                    if key == "data"
+                        || key == "input_audio"
+                        || data.as_str().is_some_and(|data| data.starts_with("data:"))
+                    {
+                        *data = json!("[Attachment data]");
+                    }
+                }
+            }
+        }
+    }
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                redact_attachment_data(value);
+            }
+        }
+        Value::Object(fields) => {
+            for value in fields.values_mut() {
+                redact_attachment_data(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn input_attachment(input: &Value) -> Option<CodexMessageAttachment> {
+    let kind = input["type"].as_str()?;
+    if !matches!(
+        kind,
+        "image"
+            | "localImage"
+            | "input_image"
+            | "inputImage"
+            | "audio"
+            | "localAudio"
+            | "input_audio"
+            | "file"
+            | "input_file"
+            | "document"
+            | "video"
+            | "resource_link"
+    ) {
+        return None;
+    }
+    let mut path = input["path"]
+        .as_str()
+        .filter(|path| !path.is_empty())
+        .map(str::to_string);
+    let source = ["url", "image_url", "imageUrl", "file_url", "uri", "dataUrl"]
+        .iter()
+        .find_map(|key| input[key].as_str().or_else(|| input[key]["url"].as_str()));
+    if path.is_none() {
+        path = source
+            .and_then(|source| source.strip_prefix("file://"))
+            .map(str::to_string);
+    }
+    let mut url = source
+        .filter(|url| {
+            url.starts_with("data:") || url.starts_with("https://") || url.starts_with("http://")
+        })
+        .map(str::to_string);
+    let mut mime_type = input["mimeType"]
+        .as_str()
+        .or_else(|| input["mime_type"].as_str())
+        .map(str::to_string);
+    if url.is_none() {
+        if let Some(data) = input.pointer("/input_audio/data").and_then(Value::as_str) {
+            let format = input
+                .pointer("/input_audio/format")
+                .and_then(Value::as_str)
+                .unwrap_or("wav");
+            let mime = if format == "mp3" {
+                "audio/mpeg".to_string()
+            } else {
+                format!("audio/{format}")
+            };
+            url = Some(format!("data:{mime};base64,{data}"));
+            mime_type = Some(mime);
+        } else if let (Some(data), Some(mime)) = (input["data"].as_str(), mime_type.as_deref()) {
+            url = Some(format!("data:{mime};base64,{data}"));
+        } else if let Some(data) = input["file_data"]
+            .as_str()
+            .filter(|data| data.starts_with("data:"))
+        {
+            url = Some(data.to_string());
+        }
+    }
+    if path.is_none() && url.is_none() {
+        return None;
+    }
+    if mime_type.is_none() {
+        mime_type = url
+            .as_deref()
+            .and_then(|url| url.strip_prefix("data:"))
+            .and_then(|data| data.split([';', ',']).next())
+            .map(str::to_string)
+            .or_else(|| {
+                path.as_deref()
+                    .and_then(|path| mime_guess::from_path(path).first_raw().map(str::to_string))
+            });
+    }
+    if mime_type.is_none() {
+        mime_type = match kind {
+            "image" | "localImage" | "input_image" | "inputImage" => Some("image/*".to_string()),
+            "audio" | "localAudio" | "input_audio" => Some("audio/*".to_string()),
+            "video" => Some("video/*".to_string()),
+            _ => None,
+        };
+    }
+    let name = input["name"]
+        .as_str()
+        .or_else(|| input["filename"].as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            path.as_deref().and_then(|path| {
+                std::path::Path::new(path)
+                    .file_name()?
+                    .to_str()
+                    .map(str::to_string)
+            })
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "{} attachment",
+                if kind.contains("image") || kind == "localImage" || kind == "inputImage" {
+                    "Image"
+                } else if kind.contains("audio") || kind == "localAudio" {
+                    "Audio"
+                } else {
+                    "File"
+                }
+            )
+        });
+    Some(CodexMessageAttachment {
+        name,
+        mime_type,
+        path,
+        url,
+    })
+}
+
+fn collect_attachments(value: &Value, attachments: &mut Vec<CodexMessageAttachment>) {
+    if let Some(attachment) = input_attachment(value) {
+        attachments.push(attachment);
+    } else if let Some(values) = value.as_array() {
+        for value in values {
+            collect_attachments(value, attachments);
+        }
+    } else if let Some(fields) = value.as_object() {
+        for key in ["content", "contentItems", "output", "result"] {
+            if let Some(value) = fields.get(key) {
+                collect_attachments(value, attachments);
+            }
+        }
+    }
 }
 
 fn input_text(content: &[Value]) -> String {
     let has_images = content.iter().any(|input| {
         matches!(
             input["type"].as_str(),
-            Some("image" | "localImage" | "input_image")
+            Some("image" | "localImage" | "input_image" | "inputImage")
         )
     });
     content
@@ -31,21 +203,30 @@ fn input_text(content: &[Value]) -> String {
                     Some("<image>" | "</image>")
                 ))
         })
-        .map(|input| match input.get("type").and_then(Value::as_str) {
-            Some("text" | "input_text" | "output_text") => {
-                input["text"].as_str().unwrap_or_default().to_string()
+        .map(|input| {
+            if input_attachment(input).is_some() {
+                String::new()
+            } else {
+                match input.get("type").and_then(Value::as_str) {
+                    Some("text" | "input_text" | "output_text") => {
+                        input["text"].as_str().unwrap_or_default().to_string()
+                    }
+                    Some("image" | "localImage" | "input_image" | "inputImage") => {
+                        "[Image attachment]".into()
+                    }
+                    Some("audio" | "localAudio" | "input_audio") => "[Audio attachment]".into(),
+                    Some("encrypted_content") => "[Encrypted tool content]".into(),
+                    Some("skill") => format!("${}", input["name"].as_str().unwrap_or("skill")),
+                    Some("mention") => format!("@{}", input["name"].as_str().unwrap_or("mention")),
+                    _ => format!(
+                        "[{} attachment]\n\n{}",
+                        input["type"].as_str().unwrap_or("Unknown"),
+                        details(input)
+                    ),
+                }
             }
-            Some("image" | "localImage" | "input_image") => "[Image attachment]".into(),
-            Some("audio" | "localAudio" | "input_audio") => "[Audio attachment]".into(),
-            Some("encrypted_content") => "[Encrypted tool content]".into(),
-            Some("skill") => format!("${}", input["name"].as_str().unwrap_or("skill")),
-            Some("mention") => format!("@{}", input["name"].as_str().unwrap_or("mention")),
-            _ => format!(
-                "[{} attachment]\n\n{}",
-                input["type"].as_str().unwrap_or("Unknown"),
-                details(input)
-            ),
         })
+        .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -169,6 +350,31 @@ pub(crate) fn codex_item_message(
     created_at: Option<String>,
     fallback_id: &str,
 ) -> Option<CodexChatMessage> {
+    let mut attachments = Vec::new();
+    collect_attachments(item, &mut attachments);
+    match item["type"].as_str()? {
+        "imageView" => {
+            if let Some(attachment) =
+                input_attachment(&json!({"type":"localImage", "path":item["path"]}))
+            {
+                attachments.push(attachment);
+            }
+        }
+        "imageGeneration" => {
+            let image =
+                if let Some(path) = item["savedPath"].as_str().filter(|path| !path.is_empty()) {
+                    json!({"type":"localImage", "path":path})
+                } else if let Some(data) = item["result"].as_str().filter(|data| !data.is_empty()) {
+                    json!({"type":"image", "url":format!("data:image/png;base64,{data}")})
+                } else {
+                    Value::Null
+                };
+            if let Some(attachment) = input_attachment(&image) {
+                attachments.push(attachment);
+            }
+        }
+        _ => {}
+    }
     let normalized = match item["type"].as_str()? {
         "userMessage" => {
             let content = input_text(
@@ -177,11 +383,13 @@ pub(crate) fn codex_item_message(
                     .map(Vec::as_slice)
                     .unwrap_or_default(),
             );
-            (!content.is_empty()).then(|| ("user".into(), "message".into(), content))
+            (!content.is_empty() || !attachments.is_empty())
+                .then(|| ("user".into(), "message".into(), content))
         }
         "agentMessage" => {
             let text = item["text"].as_str().unwrap_or_default();
             (!text.is_empty()
+                || !attachments.is_empty()
                 || item["questions"]
                     .as_array()
                     .is_some_and(|questions| !questions.is_empty()))
@@ -195,6 +403,7 @@ pub(crate) fn codex_item_message(
         content,
         kind,
         created_at,
+        attachments,
         questions: item
             .get("questions")
             .filter(|questions| questions.is_array())
@@ -290,11 +499,15 @@ mod tests {
         assert!(message.content.contains("important"));
         let input =
             json!({"type":"userMessage","content":[{"type":"document","path":"/repo/report.pdf"}]});
-        assert!(
-            codex_item_message(&input, None, "fallback")
-                .unwrap()
-                .content
-                .contains("/repo/report.pdf")
+        let message = codex_item_message(&input, None, "fallback").unwrap();
+        assert!(message.content.is_empty());
+        assert_eq!(
+            message.attachments[0].path.as_deref(),
+            Some("/repo/report.pdf")
+        );
+        assert_eq!(
+            message.attachments[0].mime_type.as_deref(),
+            Some("application/pdf")
         );
     }
 
@@ -303,7 +516,7 @@ mod tests {
         let item = json!({"type":"userMessage","content":[{"type":"text","text":"<image>"},{"type":"image","url":"data:..."},{"type":"text","text":"</image>"},{"type":"text","text":"Describe this"}]});
         assert_eq!(
             codex_item_message(&item, None, "id").unwrap().content,
-            "[Image attachment]\n\nDescribe this"
+            "Describe this"
         );
         assert_eq!(
             input_text(&[json!({"type":"text","text":"<image>"})]),
@@ -328,7 +541,7 @@ mod tests {
             ),
             (
                 json!({"type":"functionCallOutput","name":"lookup","output":[{"type":"input_text","text":"Answer"},{"type":"input_image","image_url":"data:..."}]}),
-                "Answer\n\n[Image attachment]",
+                "Answer",
             ),
         ] {
             assert!(
@@ -338,6 +551,59 @@ mod tests {
                     .contains(expected)
             );
         }
+    }
+
+    #[test]
+    fn attachments_survive_live_and_persisted_messages_without_text_placeholders() {
+        let item = json!({"id":"user", "type":"userMessage", "content":[
+            {"type":"localImage", "path":"/uploads/photo.png"},
+            {"type":"image", "url":"https://example.com/photo.jpg"},
+            {"type":"input_audio", "input_audio":{"format":"mp3", "data":"YQ=="}},
+            {"type":"input_file", "filename":"notes.txt", "file_data":"data:text/plain;base64,YQ=="}
+        ]});
+        for message in [
+            codex_item_message(&item, None, "fallback").unwrap(),
+            codex_live_item_message(&item, "client").unwrap(),
+        ] {
+            assert!(message.content.is_empty());
+            assert_eq!(message.attachments.len(), 4);
+            assert_eq!(message.attachments[0].name, "photo.png");
+            assert_eq!(message.attachments[1].mime_type.as_deref(), Some("image/*"));
+            assert_eq!(
+                message.attachments[2].url.as_deref(),
+                Some("data:audio/mpeg;base64,YQ==")
+            );
+            assert_eq!(message.attachments[3].name, "notes.txt");
+        }
+    }
+
+    #[test]
+    fn tool_images_are_viewable_without_dumping_bytes_into_the_transcript() {
+        let item = json!({"type":"mcpToolCall", "tool":"screenshot", "result":{"content":[{"type":"image", "mimeType":"image/png", "data":"aW1hZ2U="}]}});
+        let message = codex_item_message(&item, None, "tool").unwrap();
+        assert_eq!(
+            message.attachments[0].url.as_deref(),
+            Some("data:image/png;base64,aW1hZ2U=")
+        );
+        assert!(!message.content.contains("aW1hZ2U="));
+        let generated = codex_item_message(
+            &json!({"type":"imageGeneration", "savedPath":"/tmp/generated.png", "result":"bytes"}),
+            None,
+            "tool",
+        )
+        .unwrap();
+        assert_eq!(
+            generated.attachments[0].path.as_deref(),
+            Some("/tmp/generated.png")
+        );
+        let fallback = codex_item_message(
+            &json!({"type":"userMessage", "content":[{"type":"image"}]}),
+            None,
+            "user",
+        )
+        .unwrap();
+        assert_eq!(fallback.content, "[Image attachment]");
+        assert!(fallback.attachments.is_empty());
     }
 
     #[test]

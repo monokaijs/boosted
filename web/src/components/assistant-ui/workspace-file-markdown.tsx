@@ -1,5 +1,7 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ComponentPropsWithoutRef, type ReactNode } from "react";
+import { createContext, useContext, useMemo, type ComponentPropsWithoutRef, type ReactNode } from "react";
 import { defaultUrlTransform, type Components } from "react-markdown";
+import { AttachmentPreview } from "@/components/attachment-preview";
+import type { MessageAttachment } from "@/lib/types";
 import { api, type WorkspaceFileScope } from "@/lib/api";
 
 const WorkspaceFileContext = createContext<WorkspaceFileScope | undefined>(undefined);
@@ -52,33 +54,19 @@ type MarkdownAnchorProps = ComponentPropsWithoutRef<"a"> & { node?: unknown };
 function WorkspaceFileLink({ node: _node, href, children, onClick: _onClick, ...props }: MarkdownAnchorProps) {
   const scope = useContext(WorkspaceFileContext);
   const path = localWorkspacePath(href);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-
   if (!scope || !path) {
     const external = Boolean(href && /^[a-z][a-z\d+.-]*:/i.test(href));
     return <a {...props} href={href} target={external ? "_blank" : props.target} rel={external ? "noreferrer" : props.rel}>{children}</a>;
   }
+  return <AttachmentPreview name={workspaceFileName(path)} sourceKey={`${scope.kind}:${scope.id}:${path}`} load={() => api.workspaceFile(scope, path)} label={children} className="border-0 bg-transparent text-primary underline underline-offset-4" />;
+}
 
-  return (
-    <a
-      {...props}
-      href="#"
-      aria-busy={busy}
-      title={error ?? `Download ${workspaceFileName(path)} from the Boosted server`}
-      onClick={(event) => {
-        event.preventDefault();
-        if (busy) return;
-        setBusy(true);
-        setError(undefined);
-        void api.downloadWorkspaceFile(scope, path, workspaceFileName(path))
-          .catch((cause) => setError(cause instanceof Error ? cause.message : "Unable to download file."))
-          .finally(() => setBusy(false));
-      }}
-    >
-      {children}{busy ? " …" : ""}
-    </a>
-  );
+export function WorkspaceAttachment({ attachment, compact }: { attachment: MessageAttachment; compact?: boolean }) {
+  const scope = useContext(WorkspaceFileContext);
+  const { name, mimeType, path, url, uploadId } = attachment;
+  return <AttachmentPreview name={name} mimeType={mimeType} src={url} compact={compact}
+    sourceKey={uploadId ?? (path ? `${scope?.kind}:${scope?.id}:${path}` : url)}
+    load={uploadId ? () => api.codexAttachment(uploadId) : scope && path ? () => api.workspaceFile(scope, path) : undefined} />;
 }
 
 type MarkdownImageProps = ComponentPropsWithoutRef<"img"> & { node?: unknown };
@@ -86,47 +74,7 @@ type MarkdownImageProps = ComponentPropsWithoutRef<"img"> & { node?: unknown };
 function WorkspaceFileImage({ node: _node, src, alt, ...props }: MarkdownImageProps) {
   const scope = useContext(WorkspaceFileContext);
   const path = localWorkspacePath(src);
-  const [blobUrl, setBlobUrl] = useState<string>();
-  const [error, setError] = useState<string>();
-
-  useEffect(() => {
-    if (!scope || !path) return;
-    let active = true;
-    let objectUrl: string | undefined;
-    setBlobUrl(undefined);
-    setError(undefined);
-    void api.workspaceFile(scope, path)
-      .then(({ blob }) => {
-        if (!blob.type.startsWith("image/")) throw new Error("Linked file is not an image.");
-        objectUrl = URL.createObjectURL(blob);
-        if (active) setBlobUrl(objectUrl);
-        else URL.revokeObjectURL(objectUrl);
-      })
-      .catch((cause) => {
-        if (active) setError(cause instanceof Error ? cause.message : "Unable to load image.");
-      });
-    return () => {
-      active = false;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [path, scope]);
-
-  if (!scope || !path) return <img {...props} src={src} alt={alt} />;
-  if (blobUrl) return <img {...props} src={blobUrl} alt={alt} />;
-  if (error) {
-    return (
-      <button
-        type="button"
-        className="workspace-file-image-status text-destructive"
-        title={error}
-        onClick={() => void api.downloadWorkspaceFile(scope, path, workspaceFileName(path))
-          .catch((cause) => setError(cause instanceof Error ? cause.message : "Unable to download file."))}
-      >
-        {alt || workspaceFileName(path)} (download)
-      </button>
-    );
-  }
-  return <span className="workspace-file-image-status text-muted-foreground">Loading {alt || workspaceFileName(path)}…</span>;
+  return <AttachmentPreview name={path ? workspaceFileName(path) : alt || "Image attachment"} mimeType="image/*" src={path ? undefined : src} sourceKey={path ? `${scope?.kind}:${scope?.id}:${path}` : src} load={scope && path ? () => api.workspaceFile(scope, path) : undefined} className={props.className} />;
 }
 
 export const workspaceFileMarkdownComponents: Components = {

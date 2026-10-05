@@ -140,6 +140,19 @@ pub struct CodexChatMessage {
     pub created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub questions: Option<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<CodexMessageAttachment>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexMessageAttachment {
+    pub name: String,
+    pub mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

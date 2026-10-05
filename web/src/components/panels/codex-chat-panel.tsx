@@ -12,14 +12,13 @@ import {
   useAuiState,
   useExternalStoreRuntime,
 } from "@assistant-ui/react";
-import { ArrowDown, Bot, ChevronDown, ChevronRight, Image, LoaderCircle, MessageSquareText, Plus, Send, Square, UserRound, Wrench, X } from "lucide-react";
-import { MarkdownText } from "@/components/assistant-ui/markdown-text";
+import { ArrowDown, Bot, ChevronDown, ChevronRight, LoaderCircle, MessageSquareText, Plus, Send, Square, UserRound, Wrench, X } from "lucide-react";
 import { CodexMessageText } from "@/components/assistant-ui/codex-message-content";
 import { CodexQuestionForm } from "@/components/assistant-ui/codex-question-form";
 import { CodexModeSelect } from "@/components/assistant-ui/codex-mode-select";
 import { CodexAsyncQuestionProvider, CodexAsyncQuestions } from "@/components/assistant-ui/codex-async-questions";
 import { codexQuestionReply, parseCodexMessage } from "@/lib/codex-message-format";
-import { WorkspaceFileProvider } from "@/components/assistant-ui/workspace-file-markdown";
+import { WorkspaceAttachment, WorkspaceFileProvider } from "@/components/assistant-ui/workspace-file-markdown";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useBoostedApiClient } from "@/lib/api-context";
@@ -29,6 +28,13 @@ import { conversationQueryOptions } from "@/lib/query-client";
 import { chatActivity, setCachedChatStatus } from "@/lib/codex-chat-status";
 import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import type { CodexAccessOption, CodexAttachment, CodexChatMessage, CodexChatThread, CodexCollaborationMode } from "@/lib/types";
+
+function CodexSendButton({ disabled, hasAttachments, onSendAttachments }: { disabled: boolean; hasAttachments: boolean; onSendAttachments: () => void }) {
+  const empty = useAuiState((state) => state.composer.isEmpty);
+  return empty && hasAttachments
+    ? <Button type="button" size="icon-sm" title="Send message" disabled={disabled} onClick={onSendAttachments}><Send /></Button>
+    : <Button asChild size="icon-sm" disabled={disabled} title="Send message"><ComposerPrimitive.Send><Send /></ComposerPrimitive.Send></Button>;
+}
 
 function UserMessage() {
   return (
@@ -58,7 +64,7 @@ function AssistantMessage() {
             <Wrench className="size-3 shrink-0" />
             <span className="truncate font-mono text-[10px]">{kind === "reasoning" ? "Reasoning summary" : label}</span>
           </summary>
-          <div className="max-h-72 overflow-auto border-t border-border/50 px-3 py-2 text-xs"><MessagePrimitive.Parts components={{ Text: MarkdownText }} /></div>
+          <div className="max-h-72 overflow-auto border-t border-border/50 px-3 py-2 text-xs"><CodexMessageText /></div>
         </details>
       </MessagePrimitive.Root>
     );
@@ -91,7 +97,7 @@ function toAssistantMessage(message: CodexChatMessage): ThreadMessageLike {
     role: message.role,
     content: [{ type: "text", text: message.content }],
     createdAt: message.createdAt ? new Date(message.createdAt) : undefined,
-    metadata: { custom: { kind: message.kind, questions: message.questions, label: message.kind === "tool" ? toolLabel(message.content) : undefined } },
+    metadata: { custom: { kind: message.kind, attachments: message.attachments, questions: message.questions, label: message.kind === "tool" ? toolLabel(message.content) : undefined } },
   };
   assistantMessageCache.set(message, converted);
   return converted;
@@ -140,6 +146,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
   });
   const [attachments, setAttachments] = useWorkspaceState<CodexAttachment[]>(`${sessionKey}:attachments`, []);
   const [isUploading, setIsUploading] = useState(false);
+  const sendingRef = useRef(false);
   const codexOptions = useQuery({ queryKey: ["codex-options", thread.chat.id], queryFn: () => api.threadCodexOptions(thread.chat.id), staleTime: 60_000 });
   const approvals = useQuery({ queryKey: ["codex-approvals", thread.chat.id], queryFn: () => api.codexApprovals(thread.chat.id), refetchInterval: isRunning ? 2000 : false });
   const selectedModel = codexOptions.data?.models.find((entry) => entry.model === model || entry.id === model);
@@ -172,13 +179,15 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
     const text = message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
     if ((!text && attachments.length === 0) || !model || !reasoningEffort) return;
     const clientMessageId = createClientMessageId();
-    const optimisticContent = [text, ...attachments.map(() => "[Image attachment]")].filter(Boolean).join("\n\n");
-    await queryClient.cancelQueries({ queryKey: ["codex-chat", thread.chat.id], exact: true });
-    if (useWorkspaceStore.getState().generation !== generation) return;
-    setMessages((current) => upsertCodexMessage(current, { id: clientMessageId, role: "user", content: optimisticContent, kind: "message", createdAt: new Date().toISOString() }));
-    setIsRunning(true);
-    setError(undefined);
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    const optimisticAttachments = attachments.map((attachment) => ({ name: attachment.name, mimeType: attachment.mimeType, uploadId: attachment.id }));
     try {
+      await queryClient.cancelQueries({ queryKey: ["codex-chat", thread.chat.id], exact: true });
+      if (useWorkspaceStore.getState().generation !== generation) return;
+      setMessages((current) => upsertCodexMessage(current, { id: clientMessageId, role: "user", content: text, attachments: optimisticAttachments, kind: "message", createdAt: new Date().toISOString() }));
+      setIsRunning(true);
+      setError(undefined);
       const started = await api.sendCodexMessage(thread.chat.id, text, clientMessageId, { model, reasoningEffort, accessMode, collaborationMode, approvalPolicy: accessMode === thread.runtimeDefaults?.accessMode ? thread.runtimeDefaults?.approvalPolicy : "never", attachmentIds: attachments.map((attachment) => attachment.id) });
       if (useWorkspaceStore.getState().generation !== generation) return;
       setAttachments([]);
@@ -202,7 +211,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
       setIsRunning(false);
       setError(cause instanceof Error ? cause.message : "Unable to send message.");
       throw cause;
-    }
+    } finally { sendingRef.current = false; }
   }, [api, accessMode, attachments, collaborationMode, model, queryClient, reasoningEffort, selectCodexChat, setAttachments, setError, setIsRunning, setMessages, thread.chat.id, thread.chat.title, thread.runtimeDefaults?.accessMode, thread.runtimeDefaults?.approvalPolicy]);
 
   const uploadFiles = useCallback(async (incoming: File[]) => {
@@ -317,6 +326,12 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
     onCancel: cancelTurn,
   });
 
+  const sendAttachmentMessage = () => {
+    if (!isRunning && !isUploading && model && reasoningEffort && attachments.length > 0) {
+      runtime.thread.append({ role: "user", content: [] });
+    }
+  };
+
   return (
     <WorkspaceFileProvider scope={{ kind: "codex", id: thread.chat.id }}>
       <AssistantRuntimeProvider runtime={runtime}>
@@ -337,9 +352,13 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
                 <div className="flex justify-end gap-2">{(["decline", "accept"] as const).map((decision) => <Button key={decision} size="sm" variant={decision === "accept" ? "default" : "outline"} onClick={async () => { try { await api.answerCodexApproval(thread.chat.id, approval.id, decision); await approvals.refetch(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not answer approval."); } }}>{decision === "accept" ? "Approve" : "Decline"}</Button>)}</div>
               </div>)}
               {error && <div className="mb-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-[11px] text-destructive">{error}</div>}
-              <ComposerPrimitive.Root className="rounded-lg border border-border p-2 focus-within:border-ring/60">
-                {attachments.length > 0 && <div className="mb-1.5 flex flex-wrap gap-1.5">{attachments.map((attachment) => <span key={attachment.id} className="inline-flex max-w-48 items-center gap-1.5 rounded-md border border-border bg-background/55 px-2 py-1 text-[10px] text-muted-foreground"><Image className="size-3 shrink-0" /><span className="truncate">{attachment.name}</span><button type="button" className="rounded-sm hover:text-foreground" aria-label={`Remove ${attachment.name}`} onClick={() => removeAttachment(attachment)}><X className="size-3" /></button></span>)}</div>}
-                <ComposerPrimitive.Input className="max-h-40 min-h-14 w-full resize-none bg-transparent px-1 py-1 text-[13px] leading-5 outline-none placeholder:text-muted-foreground" placeholder="Message Codex..." onPaste={pasteImages} autoFocus />
+              <ComposerPrimitive.Root className="rounded-lg border border-border p-2 focus-within:border-ring/60" onSubmit={(event) => {
+                if (attachments.length > 0 && runtime.thread.composer.getState().isEmpty) { event.preventDefault(); sendAttachmentMessage(); }
+              }}>
+                {attachments.length > 0 && <div className="mb-1.5 flex flex-wrap gap-1.5">{attachments.map((attachment) => <span key={attachment.id} className="relative inline-block"><WorkspaceAttachment attachment={{ name: attachment.name, mimeType: attachment.mimeType, uploadId: attachment.id }} compact /><button type="button" className="absolute right-1 top-1 rounded-full bg-background p-0.5 text-muted-foreground hover:text-foreground" aria-label={`Remove ${attachment.name}`} onClick={() => removeAttachment(attachment)}><X className="size-3" /></button></span>)}</div>}
+                <ComposerPrimitive.Input className="max-h-40 min-h-14 w-full resize-none bg-transparent px-1 py-1 text-[13px] leading-5 outline-none placeholder:text-muted-foreground" placeholder="Message Codex..." onPaste={pasteImages} onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && attachments.length > 0 && runtime.thread.composer.getState().isEmpty) { event.preventDefault(); sendAttachmentMessage(); }
+                }} autoFocus />
                 <div className="codex-composer-controls mt-1 flex h-7 items-center gap-1 text-[10px] text-muted-foreground">
                   <input ref={fileInputRef} className="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={uploadImages} />
                   <Button type="button" variant="ghost" size="icon-sm" className="size-6" title={supportsImages ? "Attach images" : "Selected model does not support images"} disabled={!supportsImages || attachments.length >= 4 || isRunning || isUploading} onClick={() => fileInputRef.current?.click()}>{isUploading ? <LoaderCircle className="animate-spin" /> : <Plus />}</Button>
@@ -357,7 +376,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
                     <DropdownMenuContent align="end" side="top" className="w-72 max-w-[calc(100vw-1rem)]"><DropdownMenuLabel>Codex access</DropdownMenuLabel><DropdownMenuRadioGroup value={accessMode} onValueChange={selectAccess}>{codexOptions.data?.accessModes.map((entry) => <DropdownMenuRadioItem key={entry.id} value={entry.id}><span><span className="block font-medium text-foreground">{entry.label}</span><span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">{entry.description}</span></span></DropdownMenuRadioItem>)}</DropdownMenuRadioGroup></DropdownMenuContent>
                   </DropdownMenu>
                   <span className="mx-1 h-4 w-px bg-border" />
-                  <AuiIf condition={(state) => !state.thread.isRunning}><Button asChild size="icon-sm" disabled={!model || !reasoningEffort || isUploading} title="Send message"><ComposerPrimitive.Send><Send /></ComposerPrimitive.Send></Button></AuiIf>
+                  <AuiIf condition={(state) => !state.thread.isRunning}><CodexSendButton disabled={!model || !reasoningEffort || isUploading} hasAttachments={attachments.length > 0} onSendAttachments={sendAttachmentMessage} /></AuiIf>
                   <AuiIf condition={(state) => state.thread.isRunning}><Button asChild variant="secondary" size="icon-sm" title="Stop Codex"><ComposerPrimitive.Cancel><Square /></ComposerPrimitive.Cancel></Button></AuiIf>
                 </div>
               </ComposerPrimitive.Root>

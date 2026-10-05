@@ -163,6 +163,7 @@ export function createBoostedApiClient(options: ApiClientOptions) {
     form.append("file", file);
     return request<CodexAttachment>("/codex/attachments", { method: "POST", body: form });
   },
+  codexAttachment: (id: string) => requestBlob(`/codex/attachments/${encodeURIComponent(id)}`),
   removeCodexAttachment: (id: string) => request<void>(`/codex/attachments/${encodeURIComponent(id)}`, { method: "DELETE" }),
   codexChats: (cwd: string) => request<CodexChat[]>(`/codex/chats${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ""}`),
   createCodexChat: (cwd: string, model?: string) => request<CodexChat>("/codex/chats", json("POST", { cwd, model })),
@@ -198,6 +199,7 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   createTask: (projectId: string, title: string, description: string, options: { baseBranch?: string; model?: string; reasoningEffort?: string; accessMode?: CodexAccessOption["id"]; attachmentIds?: string[] } = {}) => request<Task>("/tasks", json("POST", { projectId, title, description, ...options })),
   downloadTaskAttachment: async (taskId: string, attachment: TaskAttachment) => {
     const file = await requestBlob(`/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(attachment.id)}`);
+  taskAttachment: (taskId: string, id: string) => requestBlob(`/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(id)}`),
     saveBlob(file.blob, file.name ?? attachment.name);
   },
   integrations: (projectId: string) => request<Integration[]>(`/projects/${projectId}/integrations`),

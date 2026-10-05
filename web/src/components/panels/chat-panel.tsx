@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, Check, CheckCircle2, ChevronDown, ChevronRight, CircleStop, Download, ExternalLink, FileDiff, FolderOpen, ListChecks, ListTodo, LoaderCircle, Paperclip, Play, Plus, Send, Sparkles, TerminalSquare, UserRound } from "lucide-react";
+import { Bot, Check, CheckCircle2, ChevronDown, ChevronRight, CircleStop, ExternalLink, FileDiff, FolderOpen, ListChecks, ListTodo, LoaderCircle, Play, Plus, Send, Sparkles, TerminalSquare, UserRound } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { AttachmentPreview } from "@/components/attachment-preview";
 import { Badge } from "@/components/ui/badge";
 import { CodexModeSelect } from "@/components/assistant-ui/codex-mode-select";
 import { WorkspaceFileProvider, workspaceFileMarkdownComponents, workspaceMarkdownUrlTransform } from "@/components/assistant-ui/workspace-file-markdown";
@@ -295,7 +296,7 @@ export function TaskPanel() {
       )}
       <ScrollArea className="chat-scroll min-h-0 flex-1 px-4">
         <div className="mx-auto max-w-3xl py-3">
-          {task.data && <section className="mb-4 rounded-lg border border-border bg-background/25 p-4"><div className="aui-markdown text-xs"><ReactMarkdown components={workspaceFileMarkdownComponents} remarkPlugins={[remarkGfm]} urlTransform={workspaceMarkdownUrlTransform}>{task.data.description}</ReactMarkdown></div>{task.data.source && <a className="mt-3 inline-flex items-center gap-1.5 text-[11px] capitalize text-primary hover:underline" href={task.data.source.externalUrl} target="_blank" rel="noreferrer">Imported from {task.data.source.provider} · {task.data.source.externalId}<ExternalLink className="size-3" /></a>}{task.data.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{task.data.attachments.map((attachment) => <Button key={attachment.id} type="button" variant="secondary" size="sm" onClick={() => void api.downloadTaskAttachment(task.data!.id, attachment)}><Paperclip />{attachment.name}<Download /></Button>)}</div>}</section>}
+          {task.data && <section className="mb-4 rounded-lg border border-border bg-background/25 p-4"><div className="aui-markdown text-xs"><ReactMarkdown components={workspaceFileMarkdownComponents} remarkPlugins={[remarkGfm]} urlTransform={workspaceMarkdownUrlTransform}>{task.data.description}</ReactMarkdown></div>{task.data.source && <a className="mt-3 inline-flex items-center gap-1.5 text-[11px] capitalize text-primary hover:underline" href={task.data.source.externalUrl} target="_blank" rel="noreferrer">Imported from {task.data.source.provider} · {task.data.source.externalId}<ExternalLink className="size-3" /></a>}{task.data.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{task.data.attachments.map((attachment) => <AttachmentPreview key={attachment.id} name={attachment.name} mimeType={attachment.mimeType} sourceKey={`${task.data!.id}:${attachment.id}`} load={() => api.taskAttachment(task.data!.id, attachment.id)} />)}</div>}</section>}
           {task.data?.status === "queued" && <div className="mb-4 grid gap-2 rounded-lg border border-border bg-background/25 p-4"><div className="flex items-center gap-2 text-xs font-medium"><Sparkles className="size-4 text-primary" />Ready to plan</div><p className="text-xs leading-5 text-muted-foreground">Start planning to let Codex inspect the repository and turn this task into concrete steps. You can answer any follow-up questions here.</p></div>}
           {task.data?.plan && <section className="mb-4 rounded-lg border border-border bg-background/25 p-3" aria-label="Task plan">
             <div className="mb-2 flex items-center gap-2">

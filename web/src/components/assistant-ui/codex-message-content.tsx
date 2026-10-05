@@ -1,8 +1,9 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useAuiState } from "@assistant-ui/react";
+import type { MessageAttachment } from "@/lib/types";
 import { parseCodexMessage } from "@/lib/codex-message-format";
-import { workspaceFileMarkdownComponents, workspaceMarkdownUrlTransform } from "@/components/assistant-ui/workspace-file-markdown";
+import { WorkspaceAttachment, workspaceFileMarkdownComponents, workspaceMarkdownUrlTransform } from "@/components/assistant-ui/workspace-file-markdown";
 
 function Markdown({ text }: { text: string }) {
   return <div className="aui-markdown"><ReactMarkdown components={workspaceFileMarkdownComponents} remarkPlugins={[remarkGfm]} urlTransform={workspaceMarkdownUrlTransform}>{text}</ReactMarkdown></div>;
@@ -13,7 +14,7 @@ function artifactLink(path: string, label: string) {
   return `[${title}](<${encodeURI(path).replace(/>/g, "%3E")}>)`;
 }
 
-export function CodexMessageContent({ content, user = false }: { content: string; user?: boolean }) {
+export function CodexMessageContent({ content, user = false, attachments = [] }: { content: string; user?: boolean; attachments?: MessageAttachment[] }) {
   return <div className="space-y-2">{parseCodexMessage(content).map((part, index) => {
     switch (part.type) {
       case "text": return user
@@ -37,11 +38,12 @@ export function CodexMessageContent({ content, user = false }: { content: string
         <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words border-t border-border/50 px-3 py-2 text-[11px]">{part.text}</pre>
       </details>;
     }
-  })}</div>;
+  })}{attachments.length > 0 && <div aria-label="Message attachments" className="flex flex-wrap gap-2">{attachments.map((attachment, index) => <WorkspaceAttachment key={index} attachment={attachment} />)}</div>}</div>;
 }
 
 export function CodexMessageText() {
   const content = useAuiState((state) => state.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n\n"));
   const user = useAuiState((state) => state.message.role === "user");
-  return <CodexMessageContent content={content} user={user} />;
+  const attachments = useAuiState((state) => state.message.metadata.custom.attachments as MessageAttachment[] | undefined);
+  return <CodexMessageContent content={content} user={user} attachments={attachments} />;
 }

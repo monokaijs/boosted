@@ -57,6 +57,15 @@ export interface CodexChatMessage {
   kind: "message" | "reasoning" | "plan" | "tool" | "system";
   createdAt?: string;
   questions?: { title: string; options?: string[] | null }[];
+  attachments?: MessageAttachment[];
+}
+
+export interface MessageAttachment {
+  name: string;
+  mimeType?: string | null;
+  path?: string;
+  url?: string;
+  uploadId?: string;
 }
 
 export interface CodexQuestion {

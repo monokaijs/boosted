@@ -5,7 +5,7 @@ import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import { applyCodexEvent } from "@/lib/codex-chat-state";
 import type { Task } from "@/lib/types";
 
-const api = vi.hoisted(() => ({ projects: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexApprovals: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn() }));
+const api = vi.hoisted(() => ({ projects: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexApprovals: vi.fn(), codexAttachment: vi.fn(), uploadCodexAttachment: vi.fn(), workspaceFile: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn() }));
 vi.mock("@/lib/api", () => ({ api }));
 vi.mock("@/lib/api-context", () => ({ useBoostedApiClient: () => api }));
 import { NewChatPanel, TaskPanel } from "./chat-panel";
@@ -157,5 +157,52 @@ describe("planning in chats", () => {
     renderPanel(<TaskPanel />);
     expect(await screen.findByText("Plan approved")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve and run" })).not.toBeInTheDocument();
+  });
+});
+
+
+describe("Codex attachments", () => {
+  beforeEach(() => {
+    vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => "blob:image"), revokeObjectURL: vi.fn() }));
+    api.codexAttachment.mockResolvedValue({ blob: new Blob(["image"], { type: "image/png" }) });
+    api.workspaceFile.mockResolvedValue({ blob: new Blob(["image"], { type: "image/png" }) });
+  });
+
+  it("renders image-only saved and live messages with a viewer", async () => {
+    api.codexChat.mockResolvedValueOnce({
+      chat: { id: "chat-a", title: "Images", status: "idle", cwd: "/repo", model: "model" },
+      messages: [{ id: "saved", role: "user", kind: "message", content: "", attachments: [{ name: "saved.png", mimeType: "image/png", path: "/uploads/saved.png" }] }],
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const result = render(<QueryClientProvider client={client}><CodexChatPanel threadId="chat-a" /></QueryClientProvider>);
+    expect(await screen.findByRole("img", { name: "saved.png" })).toBeInTheDocument();
+    expect(api.workspaceFile).toHaveBeenCalledWith({ kind: "codex", id: "chat-a" }, "/uploads/saved.png");
+    act(() => applyCodexEvent(client, { threadId: "chat-a", turnId: "turn", method: "item/completed", message: { id: "live", role: "assistant", kind: "tool", content: "**Screenshot**", attachments: [{ name: "live.png", mimeType: "image/png", path: "/uploads/live.png" }] } }));
+    fireEvent.click(await screen.findByText("Screenshot", { selector: "span" }));
+    fireEvent.click(await screen.findByRole("button", { name: "View live.png" }));
+    expect(screen.getByRole("dialog", { name: "live.png" })).toBeInTheDocument();
+    expect(screen.queryByText("[Image attachment]")).not.toBeInTheDocument();
+    result.unmount(); client.clear();
+  });
+
+  it.each(["click", "keyboard", "submit"])("shows uploaded images in the draft and optimistic image-only message sent by %s", async (method) => {
+    api.codexOptions.mockResolvedValueOnce({ models: [{ id: "model", model: "model", displayName: "Model", defaultReasoningEffort: "high", supportedReasoningEfforts: [{ id: "high" }], inputModalities: ["image"] }], defaultModel: "model", defaultAccessMode: "fullAccess", accessModes: [{ id: "fullAccess", label: "Full access" }] });
+    api.uploadCodexAttachment.mockResolvedValueOnce({ id: "upload.png", name: "photo.png", mimeType: "image/png" });
+    let finish!: (result: { threadId: string; turnId: string }) => void;
+    api.sendCodexMessage.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const { container } = renderPanel(<CodexChatPanel threadId="chat-a" />);
+    await screen.findByPlaceholderText("Message Codex...");
+    await waitFor(() => expect(screen.getByTitle("Attach images")).toBeEnabled());
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [new File(["image"], "photo.png", { type: "image/png" })] } });
+    expect(await screen.findByRole("img", { name: "photo.png" })).toBeInTheDocument();
+    const input = screen.getByPlaceholderText("Message Codex...");
+    if (method === "click") fireEvent.click(screen.getByTitle("Send message"));
+    else if (method === "keyboard") fireEvent.keyDown(input, { key: "Enter" });
+    else fireEvent.submit(input.closest("form")!);
+    await waitFor(() => expect(api.sendCodexMessage).toHaveBeenCalledWith("chat-a", "", expect.any(String), expect.objectContaining({ attachmentIds: ["upload.png"] })));
+    await waitFor(() => expect(screen.getAllByRole("img", { name: "photo.png" })).toHaveLength(2));
+    expect(screen.queryByText("[Image attachment]")).not.toBeInTheDocument();
+    await act(async () => finish({ threadId: "chat-a", turnId: "turn" }));
+    await waitFor(() => expect(screen.getAllByRole("img", { name: "photo.png" })).toHaveLength(1));
   });
 });

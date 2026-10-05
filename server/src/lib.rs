@@ -432,7 +432,10 @@ fn router(
             "/codex/attachments",
             post(upload_codex_attachment).layer(DefaultBodyLimit::max(12 * 1024 * 1024)),
         )
-        .route("/codex/attachments/{id}", delete(delete_codex_attachment))
+        .route(
+            "/codex/attachments/{id}",
+            get(download_codex_attachment).delete(delete_codex_attachment),
+        )
         .route(
             "/codex/chats",
             get(list_codex_chats).post(create_codex_chat),
@@ -1075,6 +1078,14 @@ async fn delete_codex_attachment(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> AppResult<StatusCode> {
+async fn download_codex_attachment(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> AppResult<Response> {
+    let path = codex_attachment_path(&state.uploads_dir, &id)?;
+    file_response(&path).await
+}
+
     let path = codex_attachment_path(&state.uploads_dir, &id)?;
     tokio::fs::remove_file(path).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1529,8 +1540,8 @@ async fn download_codex_file(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<FileQuery>,
 ) -> AppResult<Response> {
-    let result = providers::client_for_thread(&state, &id)
-        .await?
+    let client = providers::client_for_thread(&state, &id).await?;
+    let result = client
         .request(
             "thread/read",
             json!({ "threadId": id, "includeTurns": false }),
@@ -1541,7 +1552,55 @@ async fn download_codex_file(
         .and_then(Value::as_str)
         .filter(|cwd| !cwd.is_empty())
         .ok_or_else(|| AppError::NotFound("chat working directory not found".into()))?;
-    download_workspace_file(Path::new(cwd), &query.path).await
+    if let Ok(path) = workspace_file_path(Path::new(cwd), &query.path) {
+        return file_response(&path).await;
+    }
+    // Uploaded image IDs already have their own authenticated download route.
+    // Avoid fetching the entire transcript again for each uploaded thumbnail.
+    let requested = Path::new(&query.path);
+    if requested.parent() == Some(state.uploads_dir.as_path()) {
+        if let Some(id) = requested.file_name().and_then(|id| id.to_str()) {
+            let path = codex_attachment_path(&state.uploads_dir, id)?;
+            return file_response(&path).await;
+        }
+    }
+    let result = client
+        .request(
+            "thread/read",
+            json!({ "threadId": id, "includeTurns": true }),
+        )
+        .await?;
+    let path = codex_file_path(Path::new(cwd), &result["thread"], &query.path)?;
+    file_response(&path).await
+}
+
+// Outside-workspace media is readable only when the thread actually references it.
+fn codex_file_path(root: &Path, thread: &Value, reference: &str) -> AppResult<PathBuf> {
+    match workspace_file_path(root, reference) {
+        Ok(path) => Ok(path),
+        Err(error) => {
+            let referenced = codex_messages(thread).iter().any(|message| {
+                message
+                    .attachments
+                    .iter()
+                    .any(|attachment| attachment.path.as_deref() == Some(reference))
+            });
+            if !referenced {
+                return Err(error);
+            }
+            let requested = Path::new(reference);
+            let path = if requested.is_absolute() {
+                requested.to_path_buf()
+            } else {
+                root.join(requested)
+            }
+            .canonicalize()?;
+            if !path.is_file() {
+                return Err(AppError::BadRequest("path is not a file".into()));
+            }
+            Ok(path)
+        }
+    }
 }
 
 async fn send_codex_message(
@@ -2792,8 +2851,12 @@ async fn download_task_artifact(
 
 async fn download_workspace_file(root: &Path, reference: &str) -> AppResult<Response> {
     let path = workspace_file_path(root, reference)?;
-    let bytes = tokio::fs::read(&path).await?;
-    let content_type = mime_guess::from_path(&path).first_or_octet_stream();
+    file_response(&path).await
+}
+
+async fn file_response(path: &Path) -> AppResult<Response> {
+    let bytes = tokio::fs::read(path).await?;
+    let content_type = mime_guess::from_path(path).first_or_octet_stream();
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -3635,6 +3698,28 @@ mod tests {
         let traversal = format!(
             "../{}/secret.txt",
             outside
+    fn codex_media_outside_the_workspace_requires_an_actual_attachment_reference() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let image = outside.path().join("image.png");
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&image, b"image").unwrap();
+        std::fs::write(&secret, b"secret").unwrap();
+        let thread = json!({"turns":[{"items":[{"type":"userMessage", "content":[{"type":"localImage", "path":image}]}]}]});
+        assert_eq!(
+            codex_file_path(workspace.path(), &thread, image.to_str().unwrap()).unwrap(),
+            image.canonicalize().unwrap()
+        );
+        assert!(matches!(
+            codex_file_path(workspace.path(), &thread, secret.to_str().unwrap()),
+            Err(AppError::Forbidden)
+        ));
+        assert!(matches!(
+            codex_file_path(workspace.path(), &json!({}), image.to_str().unwrap()),
+            Err(AppError::Forbidden)
+        ));
+    }
+    #[test]
                 .path()
                 .file_name()
                 .and_then(|name| name.to_str())
