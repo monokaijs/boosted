@@ -941,7 +941,7 @@ select {
     overscroll-behavior: contain;
   }
 
-  .dialog-content:not(.settings-dialog):not(.settings-navigation-drawer):not(.task-create-dialog):not(.group-details-panel):not(.group-editor) {
+  .dialog-content:not(.settings-dialog):not(.settings-navigation-drawer):not(.task-create-dialog):not(.group-details-panel):not(.group-editor):not(.question-wizard-dialog) {
     padding: 16px;
   }
 

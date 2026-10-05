@@ -337,7 +337,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
     <WorkspaceFileProvider scope={{ kind: "codex", id: thread.chat.id }}>
       <AssistantRuntimeProvider runtime={runtime}>
         <CodexDraftSync runtime={runtime} sessionKey={sessionKey} />
-        <CodexAsyncQuestionProvider value={{ answered: answeredQuestions, reply: replyToQuestions }}>
+        <CodexAsyncQuestionProvider value={{ requestScope: `${api.profileId}:${thread.chat.id}`, answered: answeredQuestions, reply: replyToQuestions }}>
         <ThreadPrimitive.Root className="min-h-0 flex-1">
           <ThreadPrimitive.Viewport className="codex-thread-viewport relative flex h-full flex-col overflow-y-auto px-4">
           <ThreadPrimitive.Empty><div className="empty-state min-h-48 flex-1"><MessageSquareText className="size-8" /><p>Send a message to continue this Codex chat.</p></div></ThreadPrimitive.Empty>
@@ -346,7 +346,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
             <ThreadPrimitive.ScrollToBottom asChild behavior="smooth"><Button className="absolute -top-9 right-0 z-20 shrink-0 rounded-full shadow-lg" variant="secondary" size="icon-sm" title="Scroll to bottom"><ArrowDown /></Button></ThreadPrimitive.ScrollToBottom>
             <div className="mx-auto w-full max-w-3xl">
               {approvals.data?.map((approval) => approval.method === "item/tool/requestUserInput"
-                ? <div key={approval.id} className="mb-2"><CodexQuestionForm questions={approval.params.questions ?? []} onSubmit={async (answers) => { await api.answerCodexQuestions(thread.chat.id, approval.id, answers); await approvals.refetch(); }} /></div>
+                ? <div key={approval.id} className="mb-2"><CodexQuestionForm requestId={`${api.profileId}:${thread.chat.id}:approval:${approval.id}`} questions={approval.params.questions ?? []} onSubmit={async (answers) => { await api.answerCodexQuestions(thread.chat.id, approval.id, answers); void approvals.refetch(); }} /></div>
                 : <div className="mb-2 rounded-md border border-border bg-secondary px-3 py-2 text-xs" key={approval.id}>
                 <p className="font-medium">{approval.method.includes("commandExecution") ? "Command approval requested" : "File change approval requested"}</p>
                 <pre className="my-2 max-h-40 overflow-auto whitespace-pre-wrap break-words text-[11px]">{String(approval.params.command ?? approval.params.reason ?? "Codex needs permission to continue.")}</pre>

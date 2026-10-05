@@ -6,6 +6,7 @@ import type { CodexChatMessage } from "@/lib/types";
 
 type Questions = NonNullable<CodexChatMessage["questions"]>;
 type QuestionContext = {
+  requestScope: string;
   answered: Set<string>;
   reply: (messageId: string, questions: Questions, answers: Record<string, { answers: string[] }>) => Promise<void>;
 };
@@ -21,7 +22,7 @@ export function CodexAsyncQuestions() {
   const questions = useAuiState((state) => state.message.metadata.custom.questions as Questions | undefined);
   if (!context || !questions?.length) return null;
   if (questions.every((_, index) => context.answered.has(codexQuestionItemId(messageId, index)))) return null;
-  return <div className="mt-3"><CodexQuestionForm questions={questions.map((question, index) => ({
+  return <div className="mt-3"><CodexQuestionForm requestId={`${context.requestScope}:async:${messageId}`} questions={questions.map((question, index) => ({
     id: String(index), header: "Codex question", question: question.title,
     options: question.options?.map((label) => ({ label, description: "" })),
   }))} onSubmit={(answers) => context.reply(messageId, questions, answers)} /></div>;

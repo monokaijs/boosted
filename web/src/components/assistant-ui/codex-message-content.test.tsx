@@ -35,12 +35,14 @@ describe("Codex transcript rendering", () => {
 
   it("submits only explicitly supplied answers for all questions", async () => {
     const onSubmit = vi.fn(async () => {});
-    render(<CodexQuestionForm questions={[
+    render(<CodexQuestionForm requestId="request" questions={[
       { id: "q1", header: "Choice", question: "Which one?", options: [{ label: "First", description: "Details" }, { label: "Second", description: "" }] },
       { id: "q2", header: "Text", question: "Why?" },
     ]} onSubmit={onSubmit} />);
-    expect(screen.getByRole("button", { name: "Send answers" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Answer questions" }));
+    expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
     fireEvent.click(screen.getByRole("radio", { name: "First" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
     expect(screen.getByRole("button", { name: "Send answers" })).toBeDisabled();
     fireEvent.change(screen.getByRole("textbox", { name: "Answer: Why?" }), { target: { value: "My reason" } });
     fireEvent.click(screen.getByRole("button", { name: "Send answers" }));
@@ -50,7 +52,8 @@ describe("Codex transcript rendering", () => {
 
   it("keeps answers available after a submission failure and permits retry", async () => {
     const onSubmit = vi.fn().mockRejectedValueOnce(new Error("Connection lost")).mockResolvedValueOnce(undefined);
-    render(<CodexQuestionForm questions={[{ id: "q", header: "Question", question: "Answer?" }]} onSubmit={onSubmit} />);
+    render(<CodexQuestionForm requestId="request" questions={[{ id: "q", header: "Question", question: "Answer?" }]} onSubmit={onSubmit} />);
+    fireEvent.click(screen.getByRole("button", { name: "Answer question" }));
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Custom answer" } });
     fireEvent.click(screen.getByRole("button", { name: "Send answers" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Connection lost");
