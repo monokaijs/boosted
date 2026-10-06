@@ -13,6 +13,7 @@ assert not any(os.environ.get(key) for key in ("OPENAI_API_KEY", "CODEX_API_KEY"
 threads = {}
 counter = 0
 run_counter = 0
+pending_questions = {}
 models = [
     {"id": "catalog-alpha", "model": "exact-alpha", "isDefault": True, "defaultReasoningEffort": "medium", "supportedReasoningEfforts": [{"reasoningEffort": "medium"}, {"reasoningEffort": "high"}]},
     {"id": "catalog-beta", "model": "exact-beta", "defaultReasoningEffort": "low", "supportedReasoningEfforts": [{"reasoningEffort": "low"}]},
@@ -37,6 +38,15 @@ for line in sys.stdin:
         log.write(json.dumps({"home": str(home), **message}) + "\n")
     method = message.get("method")
     params = message.get("params", {})
+    if not method and message.get("id") in pending_questions:
+        thread, turn = pending_questions.pop(message["id"])
+        assert message["result"]["answers"]["approach"]["answers"]
+        turn["status"] = "completed"
+        response(thread)
+        emit({"method": "turn/plan/updated", "params": {"threadId": thread["id"], "turnId": turn["id"], "plan": [{"step": "Implement the chosen approach and verify it", "status": "pending"}]}})
+        emit({"method": "item/completed", "params": {"threadId": thread["id"], "turnId": turn["id"], "item": {"type": "plan", "text": "Use existing conventions, implement the change, and run relevant tests."}}})
+        emit({"method": "turn/completed", "params": {"threadId": thread["id"], "turn": turn}})
+        continue
     if method == "initialized":
         continue
     result = {}
@@ -90,6 +100,10 @@ for line in sys.stdin:
             if text == "COMPLETE":
                 turn["status"] = "completed"
                 event = {"method": "turn/completed", "params": {"threadId": thread["id"], "turn": turn}}
+            if params.get("collaborationMode", {}).get("mode") == "plan" and "FIXTURE_PLAN_QUESTIONS" in text:
+                request_id = "question-" + run_id
+                pending_questions[request_id] = (thread, turn)
+                event = {"id": request_id, "method": "item/tool/requestUserInput", "params": {"threadId": thread["id"], "turnId": run_id, "questions": [{"id": "approach", "question": "Which approach should we use?", "options": [{"label": "Existing conventions", "description": "Reuse the established implementation"}]}]}}
         elif method == "turn/interrupt":
             thread = threads[params["threadId"]]
             turn = next(turn for turn in thread["turns"] if turn["id"] == params["turnId"])

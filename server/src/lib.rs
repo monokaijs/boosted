@@ -19,6 +19,7 @@ mod markdown_checkboxes;
 mod models;
 mod process;
 mod providers;
+mod task_planning;
 pub mod updater;
 
 use axum::{
@@ -142,6 +143,7 @@ struct EmbeddedWeb;
 #[derive(Clone)]
 struct PendingInput {
     request_id: Value,
+    request_token: String,
     question_ids: Vec<String>,
     questions: Vec<Value>,
     client: CodexClient,
@@ -2927,23 +2929,37 @@ async fn answer_task_questions(
     AxumPath(id): AxumPath<String>,
     Json(input): Json<TaskAnswersCreate>,
 ) -> AppResult<Json<Task>> {
-    let pending = state
-        .pending_inputs
-        .write()
-        .await
-        .remove(&id)
+    submit_task_answers(&state, &id, &input.answers, Some(&user.id), None, None).await?;
+    Ok(Json(state.db.task(&id).await?))
+}
+
+async fn submit_task_answers(
+    state: &AppState,
+    id: &str,
+    answers: &Value,
+    actor_id: Option<&str>,
+    agent_id: Option<&str>,
+    expected_request_id: Option<&str>,
+) -> AppResult<()> {
+    let mut inputs = state.pending_inputs.write().await;
+    let pending = inputs
+        .get(id)
         .ok_or_else(|| AppError::Conflict("Codex is no longer waiting for input".into()))?;
-    let response = match validated_task_answers(&pending.question_ids, &input.answers) {
-        Ok(response) => response,
-        Err(error) => {
-            state
-                .pending_inputs
-                .write()
-                .await
-                .insert(id.clone(), pending);
-            return Err(error);
+    if let Some(expected) = expected_request_id {
+        let task = state.db.task(id).await?;
+        if pending.request_token != expected
+            || pending.resume_status != "planning"
+            || task.status != "needs_input"
+            || task.active_turn_id.is_none()
+        {
+            return Err(AppError::Conflict(
+                "Planning questions changed or are no longer pending".into(),
+            ));
         }
     };
+    let response = validated_task_answers(&pending.question_ids, answers)?;
+    let pending = inputs.remove(id).unwrap();
+    drop(inputs);
     if let Err(error) = pending
         .client
         .respond(pending.request_id.clone(), response)
@@ -2953,21 +2969,38 @@ async fn answer_task_questions(
             .pending_inputs
             .write()
             .await
-            .insert(id.clone(), pending);
+            .entry(id.to_owned())
+            .or_insert(pending);
         return Err(error);
     }
+    let agent_name = match agent_id {
+        Some(agent_id) => Some(state.agents.get(agent_id).await?["profile"]["name"].clone()),
+        None => None,
+    };
     state
         .event(
-            &id,
+            id,
             "user_message",
-            Some(&user.id),
-            json!({"text":task_answer_summary(&pending.questions, &input.answers),"questions":pending.questions.clone(),"answers":input.answers}),
+            actor_id,
+            json!({"text":task_answer_summary(&pending.questions, answers),"questions":pending.questions.clone(),"answers":answers,"agentId":agent_id,"agentName":agent_name}),
         )
         .await?;
-    state
-        .set_task_state(&id, &pending.resume_status, None)
-        .await?;
-    Ok(Json(state.db.task(&id).await?))
+    // A fast completion can arrive as soon as the response is sent. Preserve it.
+    let resumed =
+        sqlx::query("UPDATE tasks SET status=?,updated_at=? WHERE id=? AND status='needs_input'")
+            .bind(&pending.resume_status)
+            .bind(Utc::now().to_rfc3339())
+            .bind(id)
+            .execute(&state.db.pool)
+            .await?
+            .rows_affected();
+    if resumed > 0 {
+        state.emit(
+            "task.updated",
+            json!({"taskId":id,"status":pending.resume_status}),
+        );
+    }
+    Ok(())
 }
 
 async fn start_task_plan(
@@ -3740,6 +3773,7 @@ async fn consume_turn(
                     task_id.into(),
                     PendingInput {
                         request_id,
+                        request_token: Uuid::new_v4().to_string(),
                         question_ids,
                         questions: questions.clone(),
                         client: client.clone(),

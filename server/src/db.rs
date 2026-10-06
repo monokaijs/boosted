@@ -299,7 +299,7 @@ impl Database {
     }
 
     pub async fn events(&self, task_id: &str, after: i64) -> AppResult<Vec<TaskEvent>> {
-        let rows = sqlx::query("SELECT e.id,e.task_id,e.kind,e.actor_id,u.username actor_name,e.payload_json,e.created_at FROM task_events e LEFT JOIN users u ON u.id=e.actor_id WHERE e.task_id=? AND e.id>? ORDER BY e.id LIMIT 2000").bind(task_id).bind(after).fetch_all(&self.pool).await?;
+        let rows = sqlx::query("SELECT e.id,e.task_id,e.kind,e.actor_id,COALESCE(u.username,json_extract(e.payload_json,'$.agentName')) actor_name,e.payload_json,e.created_at FROM task_events e LEFT JOIN users u ON u.id=e.actor_id WHERE e.task_id=? AND e.id>? ORDER BY e.id LIMIT 2000").bind(task_id).bind(after).fetch_all(&self.pool).await?;
         Ok(rows
             .iter()
             .map(|row| TaskEvent {

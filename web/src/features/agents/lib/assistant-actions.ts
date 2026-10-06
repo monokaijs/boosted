@@ -7,6 +7,7 @@ const chatTools = new Set([
   "move_chat", "set_failover", "fork_chat", "rename_chat", "set_chat_access",
   "clear_chat", "delete_chat", "create_group_task", "submit_group_result",
   "review_group_task", "block_group_task",
+  "plan_project_tasks", "send_task_plan_message", "answer_task_plan_questions", "watch_task_plan",
 ])
 
 export function isChatActionVisible(action: AssistantAction): boolean {

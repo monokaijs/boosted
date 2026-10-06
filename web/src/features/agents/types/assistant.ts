@@ -25,7 +25,7 @@ export type AssistantMessage = {
 
 export type AssistantFollowUp = {
   id: string
-  kind: "run" | "schedule"
+  kind: "run" | "schedule" | "task-plan"
   instructions: string
   status: "waiting" | "ready" | "processing" | "completed" | "failed" | "cancelled"
   createdAt: string
@@ -33,6 +33,9 @@ export type AssistantFollowUp = {
   intervalMinutes?: number
   chatId?: string
   runId?: string
+  taskId?: string
+  projectId?: string
+  title?: string
   result?: { status: string; error?: string | null; title?: string; messages?: string[] }
   error?: string | null
   lastDeliveredAt?: string

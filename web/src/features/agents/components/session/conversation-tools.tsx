@@ -12,6 +12,8 @@ const labels: Record<string, string> = {
   computer_status: "Inspect computer", computer_screenshot: "Capture screen", computer_action: "Control computer",
   commandExecution: "Run command", fileChange: "Edit files", mcpToolCall: "Call MCP tool", webSearch: "Search the web", imageView: "View image",
   watch_chat: "Watch coding run", schedule_follow_up: "Schedule follow-up", list_follow_ups: "Read follow-ups", cancel_follow_up: "Cancel follow-up",
+  list_project_tasks: "Read project tasks", read_task_plan: "Read task plan", plan_project_tasks: "Plan project tasks",
+  send_task_plan_message: "Request plan revision", answer_task_plan_questions: "Answer planning questions", watch_task_plan: "Watch task plan",
   get_profile: "Read assistant profile", update_profile: "Update name and personality",
   generate_avatar: "Generate avatar",
   select_agent_model: "Adjust reasoning",

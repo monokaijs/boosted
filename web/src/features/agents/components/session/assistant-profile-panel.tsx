@@ -135,7 +135,7 @@ export function AssistantProfilePanel({ open, onOpenChange, agentId, name, state
                 {activeFollowUps.length ? <div className="divide-y divide-border rounded-xl border border-border">
                   {activeFollowUps.map((followUp) => <div className="px-4 py-3" key={followUp.id}>
                     <div className="flex items-start gap-2">
-                      <div className="min-w-0 flex-1"><p className="text-xs">{followUp.kind === "run" ? "Watching coding task" : "Scheduled follow-up"}</p><p className="mt-1 text-[11px] capitalize text-muted-foreground">{followUp.status}</p></div>
+                      <div className="min-w-0 flex-1"><p className="text-xs">{followUp.kind === "task-plan" ? `Planning · ${followUp.title ?? "Task"}` : followUp.kind === "run" ? "Watching coding task" : "Scheduled follow-up"}</p><p className="mt-1 text-[11px] capitalize text-muted-foreground">{followUp.status}</p></div>
                       <button aria-label="Cancel follow-up" className="session-icon-button disabled:opacity-40" disabled={Boolean(cancellingFollowUp)} type="button" onClick={() => {
                         setCancellingFollowUp(followUp.id); setFollowUpError(null)
                         void onCancelFollowUp(followUp.id).catch((cause) => setFollowUpError(cause instanceof Error ? cause.message : "Unable to cancel follow-up.")).finally(() => setCancellingFollowUp(null))

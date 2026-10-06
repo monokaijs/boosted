@@ -1695,6 +1695,16 @@ pub(crate) async fn add_followup(
     followup["status"] = json!("waiting");
     let mut result = followup.clone();
     update_session(state, &context.session_id, |session| {
+        if let Some(existing) = session["followUps"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|f| task_planning::same_watch(f, &followup))
+        {
+            task_planning::merge_watch(existing, &followup);
+            result = existing.clone();
+            return Ok(());
+        }
         if followup["kind"] == "run" {
             if let Some(existing) = session["followUps"].as_array().unwrap().iter().find(|f| {
                 f["kind"] == "run"
@@ -1973,11 +1983,19 @@ pub(crate) async fn tick(state: &AppState) -> AppResult<()> {
             continue;
         }
         let mut changed = false;
+        let agent_id = session["agentId"].as_str().unwrap_or_default().to_owned();
         for f in session["followUps"].as_array_mut().unwrap() {
             if f["status"] != "waiting" {
                 continue;
             }
-            if f["kind"] == "schedule"
+            if f["kind"] == "task-plan" {
+                let before = f.clone();
+                if let Some(outcome) = task_planning::advance(state, &agent_id, f).await? {
+                    f["status"] = json!("ready");
+                    f["result"] = outcome;
+                }
+                changed |= *f != before;
+            } else if f["kind"] == "schedule"
                 && f["dueAt"]
                     .as_str()
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
@@ -1996,7 +2014,22 @@ pub(crate) async fn tick(state: &AppState) -> AppResult<()> {
             }
         }
         if changed {
-            save_document(&state.db, SESSIONS, &session).await?;
+            let updates = session["followUps"].as_array().unwrap().clone();
+            session = update_session(state, session["id"].as_str().unwrap(), |latest| {
+                for f in latest["followUps"].as_array_mut().unwrap() {
+                    if f["status"] == "waiting" {
+                        if let Some(update) = updates.iter().find(|u| u["id"] == f["id"]) {
+                            for field in ["status", "result", "startRequested", "pendingAnswers"] {
+                                if let Some(value) = update.get(field) {
+                                    f[field] = value.clone();
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .await?;
         }
         let pending = session["messages"]
             .as_array()
@@ -2052,6 +2085,62 @@ mod tests {
             username: role.into(),
             role: role.into(),
         }
+    }
+
+    #[tokio::test]
+    async fn task_plan_watches_remain_in_the_originating_external_session() {
+        let (root, state) = fixture().await;
+        sqlx::query("INSERT INTO users(id,username,password_hash,role,created_at) VALUES('admin','admin','','admin','now')").execute(&state.db.pool).await.unwrap();
+        sqlx::query("INSERT INTO projects(id,name,repo_path,default_branch,created_by,created_at) VALUES('project','Test',?,'main','admin','now')").bind(root.path().to_string_lossy().to_string()).execute(&state.db.pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks(id,project_id,title,description,status,branch_name,worktree_path,created_by,created_at,updated_at) VALUES('task','project','Task','Review the plan','ready','boosted/task',?,'admin','now','now')").bind(root.path().to_string_lossy().to_string()).execute(&state.db.pool).await.unwrap();
+        save_document(&state.db, SESSIONS, &json!({"id":"session","integrationId":"integration","agentId":"pock","provider":"telegram","chatName":"Planning","messages":[{"id":"request","role":"user","content":"Plan tasks; ask only critical questions."}],"followUps":[]})).await.unwrap();
+        let context = context_for_session(&state.db, "session").await.unwrap();
+        let args =
+            json!({"taskId":"task","instructions":"Plan tasks; ask only critical questions."});
+        let first = scope(
+            context.clone(),
+            agents::tool_action(
+                &state,
+                "pock",
+                "watch_task_plan",
+                &args,
+                &[json!({"id":"request"})],
+            ),
+        )
+        .await
+        .unwrap();
+        let again = scope(
+            context.clone(),
+            agents::tool_action(
+                &state,
+                "pock",
+                "watch_task_plan",
+                &args,
+                &[json!({"id":"feedback"})],
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["id"], again["id"]);
+        assert!(
+            state.agents.get("pock").await.unwrap()["followUps"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let mut watches = followups(&state, &context).await.unwrap();
+        assert_eq!(watches.as_array().unwrap().len(), 1);
+        assert_eq!(
+            watches[0]["sourceMessageIds"],
+            json!(["request", "feedback"])
+        );
+        assert_eq!(
+            task_planning::advance(&state, "pock", &mut watches[0])
+                .await
+                .unwrap()
+                .unwrap()["task"]["status"],
+            "ready"
+        );
     }
 
     #[test]

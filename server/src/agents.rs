@@ -1121,7 +1121,7 @@ async fn run_turn_with_client(
                 .unwrap_or_default(),
         )
     } else {
-        "Manage project work through watched Boosted coding chats. Native tools are only for read-only inspection and independent review; do not execute the project task yourself. Resolve project paths, dispatch a concrete coding prompt, inspect results, and continue the same chat until the requested outcome is verified or user input is required.".to_owned()
+        "Manage project implementation through watched Boosted coding chats, and requested taskboard planning through the task planning tools. A planning-only request ends at reviewed plans; it does not authorize implementation. Native tools are only for read-only inspection and independent review; do not execute the project task yourself. Resolve project paths, dispatch concrete instructions, inspect results, and continue the same session until the requested outcome is verified or user input is required.".to_owned()
     };
     let agent_identity = json!({"agentId":id,"name":snapshot["profile"]["name"]});
     let thread = client.request("thread/start", json!({
@@ -1714,6 +1714,12 @@ pub(crate) async fn tool_action(
 ) -> AppResult<Value> {
     let required = |field: &str, limit| text(args, field, limit);
     match name {
+        "list_project_tasks"
+        | "read_task_plan"
+        | "plan_project_tasks"
+        | "watch_task_plan"
+        | "send_task_plan_message"
+        | "answer_task_plan_questions" => task_planning::tool(state, id, name, args, current).await,
         "select_agent_model" => select_agent_model(args).await,
         "computer_status" | "computer_screenshot" | "computer_action" => {
             state.agents.computer.execute(id, name, args).await
@@ -2289,7 +2295,11 @@ pub(crate) async fn tool_action(
         _ => Err(AppError::BadRequest("Unknown agent tool".into())),
     }
 }
-async fn add_followup(state: &AppState, id: &str, mut followup: Value) -> AppResult<Value> {
+pub(crate) async fn add_followup(
+    state: &AppState,
+    id: &str,
+    mut followup: Value,
+) -> AppResult<Value> {
     if groups::context().is_some() {
         if followup["kind"] != "run" {
             return Err(AppError::Conflict(
@@ -2306,6 +2316,16 @@ async fn add_followup(state: &AppState, id: &str, mut followup: Value) -> AppRes
     followup["status"] = json!("waiting");
     let mut result = followup.clone();
     change(state, id, |a| {
+        if let Some(existing) = a["followUps"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|f| task_planning::same_watch(f, &followup))
+        {
+            task_planning::merge_watch(existing, &followup);
+            result = existing.clone();
+            return Ok(());
+        }
         if followup["kind"] == "run" {
             if let Some(existing) = a["followUps"].as_array().unwrap().iter().find(|f| {
                 f["kind"] == "run"
@@ -2988,13 +3008,22 @@ async fn tick(state: &AppState) -> AppResult<()> {
     for agent in agents {
         let id = agent["id"].as_str().unwrap();
         let mut ready = Vec::new();
+        let mut planning_updates = HashMap::new();
         for f in agent["followUps"]
             .as_array()
             .unwrap()
             .iter()
             .filter(|f| f["status"] == "waiting")
         {
-            if f["kind"] == "schedule" {
+            if f["kind"] == "task-plan" {
+                let mut updated = f.clone();
+                if let Some(outcome) = task_planning::advance(state, id, &mut updated).await? {
+                    ready.push((f["id"].clone(), outcome));
+                }
+                if updated != *f {
+                    planning_updates.insert(f["id"].clone(), updated);
+                }
+            } else if f["kind"] == "schedule" {
                 if f["dueAt"]
                     .as_str()
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
@@ -3048,10 +3077,14 @@ async fn tick(state: &AppState) -> AppResult<()> {
                 }
             }
         }
-        if !ready.is_empty() {
+        if !ready.is_empty() || !planning_updates.is_empty() {
             change(state, id, |a| {
                 for f in a["followUps"].as_array_mut().unwrap() {
                     if f["status"] == "waiting" {
+                        if let Some(updated) = planning_updates.get(&f["id"]) {
+                            f["startRequested"] = updated["startRequested"].clone();
+                            f["pendingAnswers"] = updated["pendingAnswers"].clone();
+                        }
                         if let Some((_, result)) = ready.iter().find(|(id, _)| *id == f["id"]) {
                             f["status"] = json!("ready");
                             f["result"] = result.clone();
@@ -3338,6 +3371,360 @@ mod tests {
     #[cfg(unix)]
     async fn coding_tool(state: &AppState, name: &str, args: Value) -> AppResult<Value> {
         execute_tool(state, "pock", name, &args, &Uuid::new_v4().to_string(), &[]).await
+    }
+    #[cfg(unix)]
+    async fn planning_task(state: &AppState, root: &Path, id: &str, description: &str) {
+        sqlx::query("INSERT INTO tasks(id,project_id,title,description,status,branch_name,worktree_path,created_by,created_at,updated_at) VALUES(?,'project',?,?,'queued',?,?,'admin','now',?)")
+            .bind(id).bind(format!("Task {id}")).bind(description).bind(format!("boosted/{id}"))
+            .bind(root.to_string_lossy().to_string()).bind(id).execute(&state.db.pool).await.unwrap();
+        sqlx::query("INSERT INTO task_options(task_id,base_branch,model,reasoning_effort,access_mode) VALUES(?,'main','exact-alpha','high','fullAccess')")
+            .bind(id).execute(&state.db.pool).await.unwrap();
+    }
+    #[cfg(unix)]
+    async fn wait_task_status(state: &AppState, id: &str, status: &str) -> Task {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let task = state.db.task(id).await.unwrap();
+                if task.status == status {
+                    return task;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    #[cfg(unix)]
+    async fn wait_plan_revision(state: &AppState, id: &str, revision: i64) -> Task {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let task = state.db.task(id).await.unwrap();
+                if task.active_turn_id.is_some()
+                    && task.plan.as_ref().is_some_and(|p| p.revision == revision)
+                {
+                    return task;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_planning_queues_all_tasks_with_a_limit_and_persistent_cancellation() {
+        let (root, state, home) = coding_fixture().await;
+        for i in 0..6 {
+            planning_task(&state, root.path(), &format!("task-{i}"), "Plan the change").await;
+        }
+        planning_task(&state, root.path(), "done-task", "Already done").await;
+        state
+            .set_task_state("done-task", "done", None)
+            .await
+            .unwrap();
+        let args = json!({"projectId":"project","instructions":"Plan all tasks; decide routine details and ask only critical questions."});
+        let first = coding_tool(&state, "plan_project_tasks", args.clone())
+            .await
+            .unwrap();
+        let again = coding_tool(&state, "plan_project_tasks", args)
+            .await
+            .unwrap();
+        assert_eq!(first["tasks"].as_array().unwrap().len(), 6);
+        assert_eq!(again["tasks"], first["tasks"]);
+        assert_eq!(first["skipped"][0]["taskId"], "done-task");
+        tick(&state).await.unwrap();
+        let tasks = state.db.tasks("project").await.unwrap();
+        assert_eq!(tasks.iter().filter(|t| t.status == "planning").count(), 4);
+        assert_eq!(tasks.iter().filter(|t| t.status == "queued").count(), 2);
+        for task in tasks.iter().filter(|t| t.status == "planning") {
+            wait_plan_revision(&state, &task.id, 1).await;
+        }
+        let queued = tasks.iter().find(|t| t.status == "queued").unwrap();
+        let watches = state.agents.get("pock").await.unwrap()["followUps"].clone();
+        let cancelled = watches
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["taskId"] == queued.id)
+            .unwrap();
+        coding_tool(
+            &state,
+            "cancel_follow_up",
+            json!({"followUpId":cancelled["id"]}),
+        )
+        .await
+        .unwrap();
+        let restored = AgentManager::load(&state.db).await.unwrap();
+        let restored = restored.get("pock").await.unwrap();
+        assert_eq!(restored["followUps"].as_array().unwrap().len(), 6);
+        assert_eq!(
+            restored["followUps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["taskId"] == queued.id)
+                .unwrap()["status"],
+            "cancelled"
+        );
+        let active = tasks.iter().find(|t| t.status == "planning").unwrap();
+        state
+            .set_task_state(&active.id, "failed", Some("Run stopped by user"))
+            .await
+            .unwrap();
+        tick(&state).await.unwrap();
+        assert_eq!(state.db.task(&queued.id).await.unwrap().status, "queued");
+        assert_eq!(
+            state
+                .db
+                .tasks("project")
+                .await
+                .unwrap()
+                .iter()
+                .filter(|t| t.status == "planning")
+                .count(),
+            4
+        );
+        for task in state
+            .db
+            .tasks("project")
+            .await
+            .unwrap()
+            .iter()
+            .filter(|t| t.status == "planning")
+        {
+            wait_plan_revision(&state, &task.id, 1).await;
+        }
+        let log = std::fs::read_to_string(home.join("rpc-log.jsonl")).unwrap();
+        let requests: Vec<Value> = log
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r["method"] == "turn/start")
+                .count(),
+            5
+        );
+        assert!(
+            requests
+                .iter()
+                .filter(|r| r["method"] == "turn/start")
+                .all(|r| r["params"]["collaborationMode"]["mode"] == "plan"
+                    && r["params"]["sandboxPolicy"]["type"] == "readOnly")
+        );
+        state
+            .providers
+            .client(&state.db, "account")
+            .await
+            .unwrap()
+            .shutdown()
+            .await;
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn task_planning_answers_exact_questions_and_keeps_the_original_authority() {
+        let (root, state, _) = coding_fixture().await;
+        planning_task(&state, root.path(), "task", "FIXTURE_PLAN_QUESTIONS").await;
+        change(&state, "pock", |agent| {
+            agent["messages"] = json!([{"id":"request","role":"user","content":"Plan all tasks, decide routine details; only ask critical questions."}]);
+            Ok(())
+        }).await.unwrap();
+        execute_tool(&state, "pock", "plan_project_tasks", &json!({"projectId":"project","instructions":"Decide routine details; ask only critical questions."}), "plan", &[json!({"id":"request"})]).await.unwrap();
+        tick(&state).await.unwrap();
+        wait_task_status(&state, "task", "needs_input").await;
+        tick(&state).await.unwrap();
+        let snapshot = state.agents.get("pock").await.unwrap();
+        assert_eq!(snapshot["followUps"][0]["status"], "ready");
+        assert_eq!(
+            snapshot["followUps"][0]["result"]["questions"][0]["id"],
+            "approach"
+        );
+        let view = coding_tool(&state, "read_task_plan", json!({"taskId":"task"}))
+            .await
+            .unwrap();
+        let answers = json!({"taskId":"task","questionRequestId":view["questionRequestId"],"answers":{"approach":{"answers":["Reuse existing conventions, as delegated by the user."]}}});
+        let mut stale = answers.clone();
+        stale["questionRequestId"] = json!("stale");
+        assert!(
+            coding_tool(&state, "answer_task_plan_questions", stale)
+                .await
+                .is_err()
+        );
+        let mut missing = answers.clone();
+        missing["answers"] = json!({});
+        assert!(
+            coding_tool(&state, "answer_task_plan_questions", missing)
+                .await
+                .is_err()
+        );
+        assert!(state.pending_inputs.read().await.contains_key("task"));
+        change(&state, "pock", |agent| {
+            agent["followUps"][0]["status"] = json!("processing");
+            Ok(())
+        })
+        .await
+        .unwrap();
+        coding_tool(&state, "answer_task_plan_questions", answers.clone())
+            .await
+            .unwrap();
+        tick(&state).await.unwrap();
+        let task = wait_task_status(&state, "task", "ready").await;
+        assert!(task.plan.as_ref().unwrap().approved_at.is_none());
+        assert!(!task.plan.as_ref().unwrap().steps.is_empty());
+        tick(&state).await.unwrap();
+        let snapshot = state.agents.get("pock").await.unwrap();
+        assert_eq!(
+            snapshot["followUps"][1]["sourceMessageIds"],
+            json!(["request"])
+        );
+        assert_eq!(
+            snapshot["followUps"][1]["result"]["task"]["status"],
+            "ready"
+        );
+        assert!(
+            coding_tool(&state, "answer_task_plan_questions", answers)
+                .await
+                .is_err()
+        );
+        let events = state.db.events("task", 0).await.unwrap();
+        let answer = events
+            .iter()
+            .find(|e| e.payload["answers"].is_object())
+            .unwrap();
+        assert_eq!(answer.payload["agentId"], "pock");
+        assert!(answer.actor_id.is_none());
+        assert_eq!(answer.actor_name.as_deref(), Some("Pock"));
+        // A revision reuses the task's existing thread and retains the initial request.
+        let thread_id = task.provider_thread_id.clone().unwrap();
+        let revision = coding_tool(
+            &state,
+            "send_task_plan_message",
+            json!({"taskId":"task","content":"Add a concrete verification checklist."}),
+        )
+        .await
+        .unwrap();
+        tick(&state).await.unwrap();
+        let task = wait_plan_revision(&state, "task", 2).await;
+        assert_eq!(task.status, "planning");
+        assert_eq!(task.provider_thread_id.unwrap(), thread_id);
+        assert_eq!(
+            state.agents.get("pock").await.unwrap()["followUps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["id"] == revision["id"])
+                .unwrap()["sourceMessageIds"],
+            json!(["request"])
+        );
+        state
+            .providers
+            .client(&state.db, "account")
+            .await
+            .unwrap()
+            .shutdown()
+            .await;
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn task_planning_waits_for_critical_answers_and_rejects_execution_questions() {
+        let (root, state, _) = coding_fixture().await;
+        planning_task(&state, root.path(), "task", "FIXTURE_PLAN_QUESTIONS").await;
+        coding_tool(
+            &state,
+            "plan_project_tasks",
+            json!({"projectId":"project","instructions":"Ask for missing product direction."}),
+        )
+        .await
+        .unwrap();
+        tick(&state).await.unwrap();
+        wait_task_status(&state, "task", "needs_input").await;
+        let watch = coding_tool(&state, "watch_task_plan", json!({"taskId":"task","instructions":"Ask the user which product approach to take.","waitForChange":true})).await.unwrap();
+        tick(&state).await.unwrap();
+        assert_eq!(
+            state.agents.get("pock").await.unwrap()["followUps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["id"] == watch["id"])
+                .unwrap()["status"],
+            "waiting"
+        );
+        let view = task_planning::read(&state, "task").await.unwrap();
+        state
+            .pending_inputs
+            .write()
+            .await
+            .get_mut("task")
+            .unwrap()
+            .resume_status = "running".into();
+        assert!(coding_tool(&state, "answer_task_plan_questions", json!({"taskId":"task","questionRequestId":view["questionRequestId"],"answers":{"approach":{"answers":["Do it"]}}})).await.is_err());
+        assert!(
+            coding_tool(
+                &state,
+                "send_task_plan_message",
+                json!({"taskId":"task","content":"Implement this"})
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(state.db.task("task").await.unwrap().status, "needs_input");
+        // Critical answers wait for capacity, then resume automatically in the same session.
+        state
+            .pending_inputs
+            .write()
+            .await
+            .get_mut("task")
+            .unwrap()
+            .resume_status = "planning".into();
+        for i in 0..4 {
+            planning_task(
+                &state,
+                root.path(),
+                &format!("other-{i}"),
+                "Plan another change",
+            )
+            .await;
+        }
+        coding_tool(&state, "plan_project_tasks", json!({"projectId":"project","instructions":"Plan current tasks and ask critical questions."})).await.unwrap();
+        tick(&state).await.unwrap();
+        assert_eq!(
+            state
+                .db
+                .tasks("project")
+                .await
+                .unwrap()
+                .iter()
+                .filter(|t| t.status == "planning")
+                .count(),
+            4
+        );
+        let queued = coding_tool(&state, "answer_task_plan_questions", json!({"taskId":"task","questionRequestId":view["questionRequestId"],"answers":{"approach":{"answers":["Use the approach the user selected."]}}})).await.unwrap();
+        assert_eq!(queued["followUpId"], watch["id"]);
+        tick(&state).await.unwrap();
+        assert_eq!(state.db.task("task").await.unwrap().status, "needs_input");
+        let active = state
+            .db
+            .tasks("project")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.status == "planning")
+            .unwrap();
+        wait_plan_revision(&state, &active.id, 1).await;
+        state
+            .set_task_state(&active.id, "failed", Some("Run stopped by user"))
+            .await
+            .unwrap();
+        tick(&state).await.unwrap();
+        wait_task_status(&state, "task", "ready").await;
+        state
+            .providers
+            .client(&state.db, "account")
+            .await
+            .unwrap()
+            .shutdown()
+            .await;
     }
     #[cfg(unix)]
     #[tokio::test]
@@ -4849,7 +5236,8 @@ for line in sys.stdin:
   assert p['config']['web_search']=='live'
   assert 'mcp_servers' not in p['config']
   assert 'features.apply_patch_tool' not in p['config']
-  assert len(p['dynamicTools'])==30
+  assert len(p['dynamicTools'])==36
+  assert {'list_project_tasks','read_task_plan','plan_project_tasks','watch_task_plan','send_task_plan_message','answer_task_plan_questions'} <= {t['name'] for t in p['dynamicTools']}
   assert all(t['name']!='set_typing' for t in p['dynamicTools'])
   assert 'computer-control' in p['developerInstructions']
   emit({'id':m['id'],'result':{'thread':{'id':'agent-thread'}}})
