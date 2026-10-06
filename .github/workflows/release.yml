@@ -18,7 +18,8 @@ permissions:
   id-token: write
 
 concurrency:
-  group: desktop-release
+  # Separate the release queue from stalled runs of the former desktop workflow.
+  group: boosted-release
   cancel-in-progress: false
 
 env:
