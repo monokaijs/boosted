@@ -2,6 +2,7 @@ use crate::{
     error::{AppError, AppResult},
     models::Integration,
 };
+use percent_encoding::percent_decode_str;
 use reqwest::{
     Client, Response, Url,
     header::{HeaderMap, LINK},
@@ -22,6 +23,32 @@ pub struct ImportedIssue {
     pub title: String,
     pub description: String,
     pub external_url: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitlabIssueActivity {
+    pub items: Vec<GitlabActivityItem>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitlabActivityItem {
+    pub id: String,
+    pub body: String,
+    pub system: bool,
+    pub created_at: String,
+    pub updated_at: Option<String>,
+    pub author: GitlabActivityAuthor,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitlabActivityAuthor {
+    pub name: String,
+    pub username: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -761,6 +788,144 @@ fn gitlab_issues_url(
     Ok(url)
 }
 
+fn gitlab_issue_reference(base: &Url, external_url: &str) -> AppResult<(String, String)> {
+    let external = Url::parse(external_url)
+        .map_err(|_| AppError::BadRequest("GitLab issue URL is invalid".into()))?;
+    if external.scheme() != base.scheme()
+        || external.host_str() != base.host_str()
+        || external.port_or_known_default() != base.port_or_known_default()
+    {
+        return Err(AppError::BadRequest(
+            "GitLab issue URL does not match its connection".into(),
+        ));
+    }
+    let base_segments = base
+        .path_segments()
+        .map(|segments| {
+            segments
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let external_segments = external
+        .path_segments()
+        .ok_or_else(|| AppError::BadRequest("GitLab issue URL has no path".into()))?
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if !external_segments.starts_with(&base_segments) {
+        return Err(AppError::BadRequest(
+            "GitLab issue URL is outside its connection path".into(),
+        ));
+    }
+    let relative = &external_segments[base_segments.len()..];
+    let marker = relative
+        .windows(2)
+        .position(|parts| parts[0] == "-" && matches!(parts[1], "issues" | "work_items"))
+        .ok_or_else(|| AppError::BadRequest("GitLab issue URL is unsupported".into()))?;
+    let iid = relative
+        .get(marker + 2)
+        .filter(|value| value.chars().all(|character| character.is_ascii_digit()))
+        .ok_or_else(|| AppError::BadRequest("GitLab issue URL has no issue number".into()))?;
+    if marker == 0 {
+        return Err(AppError::BadRequest(
+            "GitLab issue URL has no project path".into(),
+        ));
+    }
+    let project = relative[..marker]
+        .iter()
+        .map(|segment| {
+            percent_decode_str(segment)
+                .decode_utf8()
+                .map(|value| value.into_owned())
+                .map_err(|_| AppError::BadRequest("GitLab project path is invalid".into()))
+        })
+        .collect::<AppResult<Vec<_>>>()?
+        .join("/");
+    Ok((project, (*iid).to_string()))
+}
+
+fn gitlab_issue_notes_url(base: &Url, external_url: &str) -> AppResult<Url> {
+    let (project, iid) = gitlab_issue_reference(base, external_url)?;
+    let mut url = base.clone();
+    url.set_query(None);
+    url.set_fragment(None);
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| AppError::BadRequest("GitLab URL cannot be used as a base URL".into()))?;
+        segments
+            .pop_if_empty()
+            .extend(["api", "v4", "projects", &project, "issues", &iid, "notes"]);
+    }
+    url.query_pairs_mut()
+        .append_pair("order_by", "created_at")
+        .append_pair("sort", "desc")
+        .append_pair("per_page", "100");
+    Ok(url)
+}
+
+fn parse_gitlab_activity_item(note: &Value) -> Option<GitlabActivityItem> {
+    let author = note.get("author")?;
+    Some(GitlabActivityItem {
+        id: note.get("id").and_then(json_identifier)?,
+        body: note.get("body")?.as_str()?.to_string(),
+        system: note.get("system").and_then(Value::as_bool).unwrap_or(false),
+        created_at: note.get("created_at")?.as_str()?.to_string(),
+        updated_at: note
+            .get("updated_at")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        author: GitlabActivityAuthor {
+            name: author
+                .get("name")
+                .and_then(Value::as_str)
+                .or_else(|| author.get("username").and_then(Value::as_str))
+                .unwrap_or("GitLab user")
+                .to_string(),
+            username: author
+                .get("username")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            avatar_url: author
+                .get("avatar_url")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        },
+    })
+}
+
+pub async fn fetch_gitlab_issue_activity(
+    config: &Value,
+    external_url: &str,
+) -> AppResult<GitlabIssueActivity> {
+    let (base, token) = gitlab_connection(config)?;
+    let url = gitlab_issue_notes_url(&base, external_url)?;
+    let response = integration_client()?
+        .get(url)
+        .header("PRIVATE-TOKEN", token)
+        .send()
+        .await
+        .map_err(|error| AppError::Internal(format!("GitLab activity request failed: {error}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::BadRequest(format!(
+            "GitLab returned {} while loading issue activity",
+            response.status()
+        )));
+    }
+    let value =
+        response_json_limited(response, MAX_ISSUE_RESPONSE_BYTES, "GitLab issue activity").await?;
+    let notes = value.as_array().ok_or_else(|| {
+        AppError::BadRequest("GitLab issue activity response must be an array".into())
+    })?;
+    Ok(GitlabIssueActivity {
+        truncated: notes.len() == 100,
+        items: notes
+            .iter()
+            .filter_map(parse_gitlab_activity_item)
+            .collect(),
+    })
+}
+
 fn parse_gitlab_issue(
     issue: Value,
     target: &GitlabTarget,
@@ -1104,6 +1269,29 @@ mod tests {
         response
     }
 
+    async fn mock_gitlab_issue_notes(
+        headers: AxumHeaderMap,
+        Query(query): Query<HashMap<String, String>>,
+    ) -> axum::response::Response {
+        if headers
+            .get("private-token")
+            .and_then(|value| value.to_str().ok())
+            != Some("gitlab-token")
+            || query.get("order_by").map(String::as_str) != Some("created_at")
+            || query.get("sort").map(String::as_str) != Some("desc")
+        {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Json(json!([{
+            "id": 9,
+            "body": "Added a regression test",
+            "system": false,
+            "created_at": "2026-10-06T08:00:00Z",
+            "author": {"name":"Alex","username":"alex"}
+        }]))
+        .into_response()
+    }
+
     #[test]
     fn keeps_legacy_single_project_configs_working() {
         assert_eq!(
@@ -1333,6 +1521,30 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn loads_gitlab_issue_activity_with_the_connection_token() {
+        let app = Router::new().route(
+            "/api/v4/projects/7/issues/42/notes",
+            get(mock_gitlab_issue_notes),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let activity = fetch_gitlab_issue_activity(
+            &json!({"baseUrl":format!("http://{address}"),"token":"gitlab-token"}),
+            &format!("http://{address}/7/-/issues/42"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(activity.items.len(), 1);
+        assert_eq!(activity.items[0].body, "Added a regression test");
+        assert_eq!(activity.items[0].author.username.as_deref(), Some("alex"));
+        assert!(!activity.truncated);
+
+        server.abort();
+    }
+
     #[test]
     fn follows_safe_gitlab_link_pagination_with_x_header_fallback() {
         let current = Url::parse(
@@ -1379,6 +1591,51 @@ mod tests {
                 .as_str(),
             "https://gitlab.example/root/api/v4/groups/42/issues?state=opened&scope=all&per_page=100&page=3"
         );
+    }
+
+    #[test]
+    fn builds_gitlab_issue_activity_urls_from_issue_and_work_item_links() {
+        let base = Url::parse("https://gitlab.example/root/").unwrap();
+        assert_eq!(
+            gitlab_issue_notes_url(
+                &base,
+                "https://gitlab.example/root/acme/mobile-app/-/issues/42",
+            )
+            .unwrap()
+            .as_str(),
+            "https://gitlab.example/root/api/v4/projects/acme%2Fmobile-app/issues/42/notes?order_by=created_at&sort=desc&per_page=100"
+        );
+        assert_eq!(
+            gitlab_issue_reference(
+                &base,
+                "https://gitlab.example/root/acme/design%20system/-/work_items/7",
+            )
+            .unwrap(),
+            ("acme/design system".into(), "7".into())
+        );
+        assert!(
+            gitlab_issue_reference(
+                &base,
+                "https://attacker.example/root/acme/mobile/-/issues/42"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_gitlab_system_and_user_activity() {
+        let note = json!({
+            "id": 17,
+            "body": "changed title",
+            "system": true,
+            "created_at": "2026-10-06T08:00:00Z",
+            "updated_at": "2026-10-06T08:01:00Z",
+            "author": {"name":"Alex","username":"alex","avatar_url":"https://gitlab.example/avatar.png"}
+        });
+        let parsed = parse_gitlab_activity_item(&note).unwrap();
+        assert_eq!(parsed.id, "17");
+        assert!(parsed.system);
+        assert_eq!(parsed.author.username.as_deref(), Some("alex"));
     }
 
     #[test]

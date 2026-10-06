@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, Check, CheckCircle2, ChevronDown, ChevronRight, CircleStop, ExternalLink, FileDiff, FolderOpen, GitBranch, ListChecks, ListTodo, LoaderCircle, Play, Plus, Send, Sparkles, TerminalSquare, UserRound, X } from "lucide-react";
+import { Bot, Check, CheckCircle2, ChevronDown, ChevronRight, CircleStop, ExternalLink, FileDiff, FolderOpen, GitBranch, History, ListChecks, ListTodo, LoaderCircle, MessageSquarePlus, Plus, RefreshCw, Send, Sparkles, TerminalSquare, UserRound, UsersRound, X } from "lucide-react";
 import { TaskMarkdown, type SaveCheckbox } from "@/components/assistant-ui/task-markdown";
 import { CodexQuestionForm } from "@/components/assistant-ui/codex-question-form";
 import { AttachmentPreview } from "@/components/attachment-preview";
@@ -8,31 +8,82 @@ import { Badge } from "@/components/ui/badge";
 import { CodexModeSelect } from "@/components/assistant-ui/codex-mode-select";
 import { WorkspaceFileProvider, workspaceFileMarkdownComponents, workspaceMarkdownUrlTransform } from "@/components/assistant-ui/workspace-file-markdown";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { useBoostedApiClient } from "@/lib/api-context";
 import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import { openExternalUrl } from "@/lib/runtime";
 import { useWorkspaceState } from "@/lib/workspace-state";
 import { conversationQueryOptions } from "@/lib/query-client";
 import { taskStatusMeta } from "@/lib/status";
-import type { CodexAccessOption, CodexCollaborationMode, CodexQuestion, TaskEvent } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import type { AssistantSummary } from "@/features/agents/types/assistant";
+import type { GroupSummary } from "@/features/groups/types";
+import type { CodexAccessOption, CodexCollaborationMode, CodexQuestion, Task, TaskEvent, TaskPlan } from "@/lib/types";
+import { cn, relativeTime } from "@/lib/utils";
 import "./chat-panel.css";
 
 function textPayload(event: TaskEvent) {
   return String(event.payload.text ?? event.payload.message ?? event.payload.command ?? "");
 }
 
-function taskDescriptionPreview(value: string) {
-  return value
-    .replace(/```[\s\S]*?```/g, " code ")
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/^[#>\-*+\d.\s]+/gm, "")
-    .replace(/[`*_~]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+function markdownPlanStep(plan: TaskPlan) {
+  if (plan.markdown?.trim() || plan.steps.length !== 1) return undefined;
+  const [step] = plan.steps;
+  return /(?:^|\n)\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s)|\*\*|`/.test(step.step) ? step : undefined;
+}
+
+function planText(plan: TaskPlan) {
+  const markdown = plan.markdown?.trim() ?? "";
+  const duplicate = plan.steps.length === 1 && plan.steps[0].step.trim() === markdown;
+  const steps = duplicate ? "" : plan.steps.map((step, index) => `${index + 1}. ${step.step.trim()}`).join("\n");
+  return [markdown, steps].filter(Boolean).join("\n\n## Execution steps\n\n");
+}
+
+function handoffMessage(task: Task) {
+  const plan = planText(task.plan!);
+  const context = task.description.trim() === plan.trim() ? "" : `## Task context\n\n${task.description.trim()}\n\n`;
+  const message = `# ${task.title}\n\n${context}## Approved plan\n\n${plan}\n\nImplement this plan completely, verify the result with relevant checks, and report what changed.`;
+  return message.length <= 31_500 ? message : `${message.slice(0, 31_450)}\n\n[Handoff truncated to fit the message limit.]`;
+}
+
+type PlanHandoff = { kind: "chat" } | { kind: "agent"; id: string } | { kind: "group"; id: string };
+
+function GitlabActivityPanel({ taskId, issueUrl, onClose }: { taskId: string; issueUrl: string; onClose(): void }) {
+  const activity = useQuery({ queryKey: ["task-source-activity", taskId], queryFn: () => api.taskSourceActivity(taskId) });
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [onClose]);
+  return <div className="task-source-activity-layer">
+    <button type="button" className="task-source-activity-scrim" aria-label="Close GitLab activity" onClick={onClose} />
+    <aside className="task-source-activity-panel" aria-label="GitLab issue activity">
+      <header className="task-source-activity-header">
+        <div className="min-w-0"><div className="flex items-center gap-2 text-sm font-semibold"><GitBranch className="size-4 text-[#FC6D26]" />GitLab activity</div><p className="mt-0.5 text-[11px] text-muted-foreground">Comments and system updates from the imported issue.</p></div>
+        <Button variant="ghost" size="icon-sm" aria-label="Refresh GitLab activity" title="Refresh" onClick={() => void activity.refetch()} disabled={activity.isFetching}><RefreshCw className={cn(activity.isFetching && "animate-spin")} /></Button>
+        <Button variant="ghost" size="icon-sm" aria-label="Close GitLab activity" onClick={onClose}><X /></Button>
+      </header>
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="task-source-activity-content">
+          <Button variant="secondary" size="sm" className="w-full" onClick={() => void openExternalUrl(issueUrl)}><ExternalLink />Open issue in GitLab</Button>
+          {activity.isLoading && <div className="grid justify-items-center gap-2 py-16 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Loading issue activity…</div>}
+          {activity.error && <div className="grid gap-3 py-10 text-center text-xs text-destructive"><p>{activity.error.message}</p><Button variant="secondary" size="sm" className="justify-self-center" onClick={() => void activity.refetch()}>Try again</Button></div>}
+          {!activity.isLoading && !activity.error && activity.data?.items.length === 0 && <div className="py-16 text-center text-xs text-muted-foreground">No GitLab activity yet.</div>}
+          {activity.data?.items.map((item) => <article key={item.id} className="task-source-activity-item">
+            <div className="task-source-activity-avatar">{item.author.name.trim().charAt(0).toUpperCase() || "G"}</div>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5"><span className="text-xs font-medium">{item.author.name}</span>{item.author.username && <span className="text-[10px] text-muted-foreground">@{item.author.username}</span>}<time className="ml-auto text-[10px] text-muted-foreground" dateTime={item.createdAt} title={new Date(item.createdAt).toLocaleString()}>{relativeTime(item.createdAt)}</time></div>
+              {item.system && <p className="mt-1 text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">System update</p>}
+              <TaskMarkdown className="aui-markdown selectable-text mt-1 text-xs" content={item.body} />
+            </div>
+          </article>)}
+          {activity.data?.truncated && <p className="py-4 text-center text-[10px] text-muted-foreground">Showing the 100 most recent activities.</p>}
+        </div>
+      </ScrollArea>
+    </aside>
+  </div>;
 }
 
 function questionsFromEvent(event: TaskEvent | undefined): CodexQuestion[] {
@@ -279,7 +330,9 @@ export function NewChatPanel() {
 }
 
 export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
+  const client = useBoostedApiClient();
   const selectedTaskId = useAppStore((state) => state.selectedTaskId);
+  const [sourceActivityOpen, setSourceActivityOpen] = useState(false);
   const [message, setMessage] = useWorkspaceState(`task:${selectedTaskId ?? "none"}:draft`, "");
   const queryClient = useQueryClient();
   const planRef = useRef<HTMLElement>(null);
@@ -291,6 +344,8 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
     refetchInterval: (query) => query.state.data?.status === "planning" || query.state.data?.status === "running" ? 1_000 : false,
   });
   const events = useQuery({ ...conversationQueryOptions, queryKey: ["events", selectedTaskId], queryFn: () => api.taskEvents(selectedTaskId!), enabled: Boolean(selectedTaskId), refetchInterval: task.data?.status === "running" || task.data?.status === "planning" ? 1_000 : false });
+  const agents = useQuery({ queryKey: ["agents"], queryFn: () => client.featureRequest<AssistantSummary[]>("/agents"), enabled: task.data?.status === "ready" });
+  const groups = useQuery({ queryKey: ["groups"], queryFn: () => client.featureRequest<GroupSummary[]>("/groups"), enabled: task.data?.status === "ready" });
   const send = useMutation({
     mutationFn: () => api.sendMessage(selectedTaskId!, message.trim()),
     onSuccess: () => { setMessage(""); void queryClient.invalidateQueries({ queryKey: ["events", selectedTaskId] }); void queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] }); },
@@ -311,15 +366,44 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
       void queryClient.invalidateQueries({ queryKey: ["tasks"] });
     },
   });
-  const approve = useMutation({
-    mutationFn: () => api.approvePlan(selectedTaskId!, task.data!.plan!.revision),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
-      void queryClient.invalidateQueries({ queryKey: ["tasks"] });
+  const handoff = useMutation({
+    mutationFn: async (target: PlanHandoff) => {
+      const current = task.data;
+      if (!current?.plan) throw new Error("The plan is not available yet.");
+      const content = handoffMessage(current);
+      const clientMessageId = crypto.randomUUID();
+      const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (target.kind === "agent") {
+        await client.featureRequest(`/agents/${encodeURIComponent(target.id)}/messages`, { method: "POST", body: JSON.stringify({ content, clientMessageId, timeZone }) });
+        return target;
+      }
+      if (target.kind === "group") {
+        await client.featureRequest(`/groups/${encodeURIComponent(target.id)}/messages`, { method: "POST", body: JSON.stringify({ content, clientMessageId, recipientIds: [], timeZone }) });
+        return target;
+      }
+      const options = await api.codexOptions();
+      const selectedModel = options.models.find((entry) => entry.model === current.model || entry.id === current.model)
+        ?? options.models.find((entry) => entry.model === options.defaultModel || entry.id === options.defaultModel)
+        ?? options.models[0];
+      if (!selectedModel) throw new Error("No Codex model is available for the new chat.");
+      const model = selectedModel.model;
+      const reasoningEffort = selectedModel.supportedReasoningEfforts.some((entry) => entry.id === current.reasoningEffort)
+        ? current.reasoningEffort!
+        : selectedModel.defaultReasoningEffort;
+      const chat = await api.createCodexChat(current.worktreePath, model);
+      const started = await api.sendCodexMessage(chat.id, content, clientMessageId, { model, reasoningEffort, accessMode: current.accessMode, collaborationMode: "default" });
+      return { kind: "chat", id: started.threadId || chat.id } as const;
+    },
+    onSuccess: (target) => {
+      if (target.kind === "chat") window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", { detail: { threadId: target.id, title: task.data?.title } }));
+      else if (target.kind === "agent") window.dispatchEvent(new CustomEvent("boosted:select-agent", { detail: target.id }));
+      else window.dispatchEvent(new CustomEvent("boosted:open-group", { detail: target.id }));
     },
   });
   const stop = useMutation({ mutationFn: () => api.stopTask(selectedTaskId!), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] }) });
   const ordered = useMemo(() => [...(events.data ?? [])].sort((a, b) => a.id - b.id), [events.data]);
+
+  useEffect(() => setSourceActivityOpen(false), [selectedTaskId]);
 
   if (!selectedTaskId) return <div className="empty-state"><ListTodo className="size-8" /><p>Select a task to open its details and chat.</p></div>;
   const meta = task.data ? taskStatusMeta[task.data.status] : undefined;
@@ -327,6 +411,10 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
   const active = task.data?.status === "planning" || task.data?.status === "running";
   const questionEvent = task.data?.status === "needs_input" ? [...ordered].reverse().find((event) => questionsFromEvent(event).length > 0) : undefined;
   const pendingQuestions = questionsFromEvent(questionEvent);
+  const documentStep = task.data?.plan ? markdownPlanStep(task.data.plan) : undefined;
+  const planMarkdown = task.data?.plan?.markdown?.trim() || documentStep?.step;
+  const planSteps = task.data?.plan?.steps.filter((step) => step !== documentStep && !(task.data?.plan?.steps.length === 1 && step.step.trim() === task.data.plan.markdown?.trim())) ?? [];
+  const gitlabSource = task.data?.source?.provider === "gitlab" && task.data.source.externalUrl ? task.data.source : undefined;
 
   useEffect(() => {
     if (task.data?.status === "ready" && task.data.plan) planRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
@@ -352,46 +440,69 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
 
   return (
     <WorkspaceFileProvider scope={{ kind: "task", id: selectedTaskId }} readOnly={active}>
-      <div className="panel-root">
+      <div className="panel-root relative">
       {task.data && (
-        <section className="border-b border-border bg-background/20 px-4 py-3">
-          <div className="mx-auto flex max-w-3xl items-start gap-3">
-            <div className="min-w-0 flex-1">
-              <div className="flex min-w-0 items-center gap-2">
-                <h1 className="truncate text-sm font-semibold">{task.data.title}</h1>
-                {meta && StatusIcon && <Badge variant={task.data.status === "failed" ? "danger" : task.data.status === "needs_input" ? "warning" : "outline"}><StatusIcon className={cn("size-3", meta.color, task.data.status === "running" && "animate-spin")} />{meta.label}</Badge>}
+        <header className="task-detail-header px-4 py-3">
+          <div className="mx-auto max-w-3xl">
+            <div className="flex min-w-0 flex-wrap items-start gap-3">
+              <h1 className="min-w-0 basis-64 flex-1 text-[15px] font-semibold leading-5">{task.data.title}</h1>
+              <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
+                {gitlabSource && <>
+                  <Button variant="ghost" size="sm" onClick={() => setSourceActivityOpen(true)}><History />Activity</Button>
+                  <Button asChild variant="ghost" size="sm"><a href={gitlabSource.externalUrl} target="_blank" rel="noreferrer" onClick={(event) => { event.preventDefault(); void openExternalUrl(gitlabSource.externalUrl!); }}><ExternalLink />Open in GitLab</a></Button>
+                </>}
+                {task.data.status === "queued" && <Button size="sm" onClick={() => startPlanning.mutate()} disabled={startPlanning.isPending}>{startPlanning.isPending ? <LoaderCircle className="animate-spin" /> : <Sparkles />}Start planning</Button>}
+                {active && <Button variant="ghost" size="icon-sm" onClick={() => stop.mutate()} aria-label="Stop task" title="Stop task"><CircleStop /></Button>}
+                {onClose && <Button variant="ghost" size="icon-sm" aria-label="Close task details" onClick={onClose}><X /></Button>}
               </div>
-              <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{taskDescriptionPreview(task.data.description)}</p>
-              <p className="mt-1.5 truncate font-mono text-[9px] text-muted-foreground">{task.data.branchName}</p>
             </div>
-            {task.data.status === "queued" && <Button size="sm" onClick={() => startPlanning.mutate()} disabled={startPlanning.isPending}>{startPlanning.isPending ? <LoaderCircle className="animate-spin" /> : <Sparkles />}Start planning</Button>}
-            {active && <Button variant="ghost" size="icon-sm" onClick={() => stop.mutate()} title="Stop"><CircleStop /></Button>}
-            {onClose && <Button variant="ghost" size="icon-sm" aria-label="Close task details" onClick={onClose}><X /></Button>}
+            <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+              {meta && StatusIcon && <Badge variant={task.data.status === "failed" ? "danger" : task.data.status === "needs_input" ? "warning" : "outline"}><StatusIcon className={cn("size-3", meta.color, task.data.status === "running" && "animate-spin")} />{meta.label}</Badge>}
+              <span className="inline-flex min-w-0 items-center gap-1 font-mono"><GitBranch className="size-3 shrink-0" /><span className="truncate">{task.data.branchName}</span></span>
+              {task.data.source && <span className="capitalize">{task.data.source.provider} · {task.data.source.externalId}</span>}
+              {(task.data.additions > 0 || task.data.deletions > 0) && <span><span className="text-success">+{task.data.additions}</span> <span className="text-destructive">−{task.data.deletions}</span></span>}
+            </div>
           </div>
           {startPlanning.error && <p className="mx-auto mt-2 max-w-3xl text-xs text-destructive">{startPlanning.error.message}</p>}
-        </section>
+        </header>
       )}
       <ScrollArea className="chat-scroll min-h-0 flex-1 px-4">
         <div className="mx-auto max-w-3xl py-3">
-          {task.data && <section className="mb-4 rounded-lg border border-border bg-background/25 p-4"><div className="aui-markdown text-xs"><TaskMarkdown key={`${selectedTaskId}:description`} content={task.data.description} saveCheckbox={active ? undefined : (edit) => saveCheckbox("description", undefined, edit)} components={workspaceFileMarkdownComponents} urlTransform={workspaceMarkdownUrlTransform} /></div>{task.data.source && (task.data.source.externalUrl ? <a className="mt-3 inline-flex items-center gap-1.5 text-[11px] capitalize text-primary hover:underline" href={task.data.source.externalUrl} target="_blank" rel="noreferrer" onClick={(event) => { event.preventDefault(); void openExternalUrl(task.data!.source!.externalUrl!); }}>Imported from {task.data.source.provider} · {task.data.source.externalId}<ExternalLink className="size-3" /></a> : <span className="mt-3 inline-flex text-[11px] capitalize text-muted-foreground">Imported from {task.data.source.provider} · {task.data.source.externalId}</span>)}{task.data.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{task.data.attachments.map((attachment) => <AttachmentPreview key={attachment.id} name={attachment.name} mimeType={attachment.mimeType} sourceKey={`${task.data!.id}:${attachment.id}`} load={() => api.taskAttachment(task.data!.id, attachment.id)} />)}</div>}</section>}
-          {task.data?.status === "queued" && <div className="mb-4 grid gap-2 rounded-lg border border-border bg-background/25 p-4"><div className="flex items-center gap-2 text-xs font-medium"><Sparkles className="size-4 text-primary" />Ready to plan</div><p className="text-xs leading-5 text-muted-foreground">Start planning to let Codex inspect the repository and turn this task into concrete steps. You can answer any follow-up questions here.</p></div>}
+          {task.data && <section className="mb-4 px-1 pb-2"><div className="aui-markdown text-xs"><TaskMarkdown key={`${selectedTaskId}:description`} content={task.data.description} saveCheckbox={active ? undefined : (edit) => saveCheckbox("description", undefined, edit)} components={workspaceFileMarkdownComponents} urlTransform={workspaceMarkdownUrlTransform} /></div>{task.data.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{task.data.attachments.map((attachment) => <AttachmentPreview key={attachment.id} name={attachment.name} mimeType={attachment.mimeType} sourceKey={`${task.data!.id}:${attachment.id}`} load={() => api.taskAttachment(task.data!.id, attachment.id)} />)}</div>}</section>}
+          {task.data?.status === "queued" && <div className="mb-4 grid gap-2 px-1 py-3"><div className="flex items-center gap-2 text-xs font-medium"><Sparkles className="size-4 text-primary" />Ready to plan</div><p className="text-xs leading-5 text-muted-foreground">Start planning to let Codex inspect the repository and turn this task into concrete steps. You can answer any follow-up questions here.</p></div>}
           <div className="mb-1 flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground"><span>Task chat</span><span className="h-px flex-1 bg-border" /></div>
           {ordered.length === 0 && events.isLoading && <div className="py-16 text-center text-xs text-muted-foreground">Loading conversation…</div>}
           {ordered.map((event) => <TimelineEvent key={event.id} event={event} saveCheckbox={!active && ["user_message", "agent_message", "assistant_message"].includes(event.kind) ? (edit) => saveCheckbox("event", String(event.id), edit) : undefined} />)}
           {questionEvent && pendingQuestions.length > 0 && <div className="my-3"><CodexQuestionForm requestId={`${selectedTaskId}:${questionEvent.id}`} questions={pendingQuestions} onSubmit={async (answers) => { await answerQuestions.mutateAsync(answers); }} /></div>}
-          {task.data?.plan && <section ref={planRef} className="my-4 rounded-lg border border-border bg-background/25 p-3" aria-label="Task plan">
-            <div className="mb-2 flex items-center gap-2">
+          {task.data?.plan && <section ref={planRef} className="my-4 px-1 py-3" aria-label="Task plan">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
               <ListChecks className="size-4 text-muted-foreground" /><h2 className="text-xs font-medium">Plan · revision {task.data.plan.revision}</h2>
-              {task.data.status === "ready" && <Button className="ml-auto" size="sm" onClick={() => approve.mutate()} disabled={approve.isPending}>{approve.isPending ? <LoaderCircle className="animate-spin" /> : <Play />}Approve and run</Button>}
+              {task.data.status === "ready" && <div className="ml-auto flex shrink-0">
+                <Button className="rounded-r-none" size="sm" onClick={() => handoff.mutate({ kind: "chat" })} disabled={handoff.isPending}>{handoff.isPending ? <LoaderCircle className="animate-spin" /> : <MessageSquarePlus />}Approve in new chat</Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild><Button className="-ml-px rounded-l-none px-2" size="sm" aria-label="Choose plan handover" disabled={handoff.isPending}><ChevronDown /></Button></DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-64">
+                    <DropdownMenuLabel>Handover to an agent</DropdownMenuLabel>
+                    {agents.isLoading && <DropdownMenuItem disabled><LoaderCircle className="animate-spin" />Loading agents…</DropdownMenuItem>}
+                    {!agents.isLoading && !agents.data?.length && <DropdownMenuItem disabled>No agents available</DropdownMenuItem>}
+                    {agents.data?.map((agent) => <DropdownMenuItem key={agent.id} onSelect={() => handoff.mutate({ kind: "agent", id: agent.id })}><Bot />{agent.profile.name}</DropdownMenuItem>)}
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel>Handover to a group</DropdownMenuLabel>
+                    {groups.isLoading && <DropdownMenuItem disabled><LoaderCircle className="animate-spin" />Loading groups…</DropdownMenuItem>}
+                    {!groups.isLoading && !groups.data?.length && <DropdownMenuItem disabled>No groups available</DropdownMenuItem>}
+                    {groups.data?.map((group) => <DropdownMenuItem key={group.id} onSelect={() => handoff.mutate({ kind: "group", id: group.id })}><UsersRound />{group.name}</DropdownMenuItem>)}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>}
             </div>
             {task.data.plan.explanation && <p className="selectable-text mb-2 text-xs leading-5 text-muted-foreground">{task.data.plan.explanation}</p>}
-            {task.data.plan.markdown && <div className="aui-markdown selectable-text mb-3 text-xs"><TaskMarkdown key={`${selectedTaskId}:plan:${task.data.plan.revision}`} content={task.data.plan.markdown} saveCheckbox={active ? undefined : (edit) => saveCheckbox("plan", String(task.data!.plan!.revision), edit)} components={workspaceFileMarkdownComponents} urlTransform={workspaceMarkdownUrlTransform} /></div>}
-            <ol className="grid gap-1.5">{task.data.plan.steps.map((step, index) => <li key={`${step.step}-${index}`} className="flex gap-2 text-xs leading-5" aria-current={step.status === "in_progress" ? "step" : undefined}>
+            {planMarkdown && <div className="aui-markdown selectable-text mb-3 text-xs"><TaskMarkdown key={`${selectedTaskId}:plan:${task.data.plan.revision}`} content={planMarkdown} saveCheckbox={active || documentStep ? undefined : (edit) => saveCheckbox("plan", String(task.data!.plan!.revision), edit)} components={workspaceFileMarkdownComponents} urlTransform={workspaceMarkdownUrlTransform} /></div>}
+            {planSteps.length > 0 && <ol className="grid gap-1.5">{planSteps.map((step, index) => <li key={`${step.step}-${index}`} className="flex gap-2 text-xs leading-5" aria-current={step.status === "in_progress" ? "step" : undefined}>
               <span className={cn("mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border text-[9px]", step.status === "completed" ? "border-success/30 bg-success/10 text-success" : step.status === "in_progress" ? "border-primary/40 bg-primary/10 text-primary" : "border-border text-muted-foreground")}>{step.status === "completed" ? <Check className="size-2.5" /> : index + 1}</span>
               <span className={cn("selectable-text", step.status === "completed" && "text-muted-foreground line-through")}>{step.step}</span>
-            </li>)}</ol>
+            </li>)}</ol>}
             {task.data.plan.approvedAt && task.data.status !== "ready" && <p className="mt-3 flex items-center gap-1.5 text-[11px] text-success"><Check className="size-3" />Plan approved</p>}
-            {approve.error && <p className="mt-2 text-xs text-destructive">{approve.error.message}</p>}
+            {handoff.error && <p className="mt-2 text-xs text-destructive">{handoff.error.message}</p>}
           </section>}
           {active && <div className="flex items-center gap-2 py-3 text-xs text-muted-foreground"><LoaderCircle className="size-3.5 animate-spin text-primary" />Codex is working…</div>}
           {task.data?.status === "review" && <div className="my-4 flex items-center gap-2 rounded-lg border border-success/25 bg-success/10 p-3 text-xs text-success"><CheckCircle2 className="size-4" />Execution finished. Review the Git changes before marking the task done.</div>}
@@ -410,6 +521,7 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
         </div>
         {send.error && <p className="mx-auto mt-1.5 max-w-3xl text-xs text-destructive">{send.error.message}</p>}
       </form>}
+      {sourceActivityOpen && gitlabSource && <GitlabActivityPanel taskId={selectedTaskId} issueUrl={gitlabSource.externalUrl!} onClose={() => setSourceActivityOpen(false)} />}
       </div>
     </WorkspaceFileProvider>
   );

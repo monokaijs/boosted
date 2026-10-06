@@ -230,6 +230,24 @@ export interface TaskSource {
   externalUrl?: string;
 }
 
+export interface GitlabIssueActivity {
+  items: GitlabActivityItem[];
+  truncated: boolean;
+}
+
+export interface GitlabActivityItem {
+  id: string;
+  body: string;
+  system: boolean;
+  createdAt: string;
+  updatedAt?: string;
+  author: {
+    name: string;
+    username?: string;
+    avatarUrl?: string;
+  };
+}
+
 export interface GitlabConnection {
   id: string;
   name: string;

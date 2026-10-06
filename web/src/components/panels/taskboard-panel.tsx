@@ -57,7 +57,7 @@ function TaskListRow({ task }: { task: Task }) {
       <span className="min-w-0">
         <span className="block truncate text-xs font-medium text-foreground">{task.title}</span>
         <span className="mt-1 flex min-w-0 items-center gap-3 text-[10px] text-muted-foreground">
-          <span className="inline-flex shrink-0 items-center gap-1"><Icon className={cn("size-3", meta.color, task.status === "running" && "animate-spin")} />{meta.label}</span>
+          <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap"><Icon className={cn("size-3", meta.color, task.status === "running" && "animate-spin")} />{meta.label}</span>
           <span className="inline-flex min-w-0 items-center gap-1 truncate font-mono"><GitBranch className="size-3 shrink-0" />{task.branchName}</span>
         </span>
       </span>
@@ -101,7 +101,7 @@ export function TaskboardPanel({ detailOpen = false }: { detailOpen?: boolean })
       <ScrollArea className="min-h-0 flex-1">
         {tasks.isLoading && <div className="px-3 py-10 text-center text-xs text-muted-foreground">Loading tasks…</div>}
         {!tasks.isLoading && view === "board" && !detailOpen && <DndContext sensors={sensors} onDragEnd={dragEnd}><div className="taskboard-grid grid min-h-full grid-cols-[repeat(auto-fit,minmax(min(240px,100%),1fr))] content-start gap-2 p-3">{boardStatuses.map((status) => <BoardColumn key={status} status={status} tasks={(tasks.data ?? []).filter((task) => task.status === status)} />)}</div></DndContext>}
-        {!tasks.isLoading && (view === "list" || detailOpen) && <div className="taskboard-list min-h-full p-3"><div className="overflow-hidden rounded-lg border border-border bg-background/20">{(tasks.data ?? []).map((task) => <TaskListRow key={task.id} task={task} />)}{tasks.data?.length === 0 && <div className="px-3 py-12 text-center text-xs text-muted-foreground">No tasks yet</div>}</div></div>}
+        {!tasks.isLoading && (view === "list" || detailOpen) && <div className="taskboard-list min-h-full">{(tasks.data ?? []).map((task) => <TaskListRow key={task.id} task={task} />)}{tasks.data?.length === 0 && <div className="px-3 py-12 text-center text-xs text-muted-foreground">No tasks yet</div>}</div>}
       </ScrollArea>
       {move.error && <div className="border-t border-border px-3 py-2 text-xs text-destructive">{move.error.message}</div>}
     </div>

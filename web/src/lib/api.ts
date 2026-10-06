@@ -23,6 +23,7 @@ import type {
   TaskAttachment,
   Integration,
   GitlabConnection,
+  GitlabIssueActivity,
   IntegrationDiscoveryResult,
   IntegrationSyncResult,
   WorkspaceCodexSettings,
@@ -200,6 +201,7 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   removePendingTaskAttachment: (id: string) => request<void>(`/task-attachments/${encodeURIComponent(id)}`, { method: "DELETE" }),
   tasks: (projectId: string) => request<Task[]>(`/tasks?projectId=${encodeURIComponent(projectId)}`),
   task: (id: string) => request<Task>(`/tasks/${id}`),
+  taskSourceActivity: (id: string) => request<GitlabIssueActivity>(`/tasks/${encodeURIComponent(id)}/source/activity`),
   createTask: (projectId: string, title: string, description: string, options: { baseBranch?: string; model?: string; reasoningEffort?: string; accessMode?: CodexAccessOption["id"]; attachmentIds?: string[] } = {}) => request<Task>("/tasks", json("POST", { projectId, title, description, ...options })),
   taskAttachment: (taskId: string, id: string) => requestBlob(`/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(id)}`),
   downloadTaskAttachment: async (taskId: string, attachment: TaskAttachment) => {

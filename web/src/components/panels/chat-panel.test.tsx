@@ -8,7 +8,7 @@ import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import { applyCodexEvent } from "@/lib/codex-chat-state";
 import type { Task, TaskEvent } from "@/lib/types";
 
-const api = vi.hoisted(() => ({ toggleMarkdownCheckbox: vi.fn(), projects: vi.fn(), projectBranches: vi.fn(), projectBranch: vi.fn(), switchProjectBranch: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexApprovals: vi.fn(), codexAttachment: vi.fn(), uploadCodexAttachment: vi.fn(), workspaceFile: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn(), answerTaskQuestions: vi.fn() }));
+const api = vi.hoisted(() => ({ featureRequest: vi.fn(), toggleMarkdownCheckbox: vi.fn(), projects: vi.fn(), projectBranches: vi.fn(), projectBranch: vi.fn(), switchProjectBranch: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexApprovals: vi.fn(), codexAttachment: vi.fn(), uploadCodexAttachment: vi.fn(), workspaceFile: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), taskSourceActivity: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn(), answerTaskQuestions: vi.fn() }));
 const openExternalUrl = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/api", () => ({ api }));
 vi.mock("@/lib/api-context", () => ({ useBoostedApiClient: () => api }));
@@ -43,10 +43,16 @@ beforeEach(() => {
   api.sendCodexMessage.mockResolvedValue({ threadId: "chat-a", turnId: "turn-a" });
   api.task.mockResolvedValue(task);
   api.taskEvents.mockResolvedValue([]);
+  api.taskSourceActivity.mockResolvedValue({ items: [], truncated: false });
   api.startTaskPlan.mockResolvedValue(task);
   api.approvePlan.mockResolvedValue(task);
   api.sendMessage.mockResolvedValue(task);
   api.answerTaskQuestions.mockResolvedValue(task);
+  api.featureRequest.mockImplementation(async (path: string) => {
+    if (path === "/agents") return [{ id: "coral", profile: { name: "Coral" }, status: "idle", accountId: null, createdAt: "now", updatedAt: "now" }];
+    if (path === "/groups") return [{ id: "builders", name: "Builders", memberIds: ["coral"], memberRoles: {}, projectId: "project-a", workingDirectory: "/repo", stopped: false, stopReason: null, version: 1, createdAt: "now", updatedAt: "now", createdBy: "user", initialGitState: null }];
+    return {};
+  });
   api.threadCodexOptions.mockImplementation(api.codexOptions);
   api.codexApprovals.mockResolvedValue([]);
   api.codexChat.mockResolvedValue({
@@ -69,10 +75,23 @@ it("keeps the Codex composer outside transcript scroll ownership", async () => {
 it("opens an imported task in the system browser", async () => {
   api.task.mockResolvedValue({ ...task, source: { provider: "gitlab", externalId: "issue:42", externalUrl: "https://gitlab.example/group/project/-/work_items/42" } });
   renderPanel(<TaskPanel />);
-  const link = await screen.findByRole("link", { name: /Imported from gitlab/ });
+  const link = await screen.findByRole("link", { name: "Open in GitLab" });
   expect(link).toHaveAttribute("href", "https://gitlab.example/group/project/-/work_items/42");
   fireEvent.click(link);
   expect(openExternalUrl).toHaveBeenCalledWith("https://gitlab.example/group/project/-/work_items/42");
+});
+
+it("shows imported GitLab activity in a floating panel", async () => {
+  api.task.mockResolvedValue({ ...task, source: { provider: "gitlab", externalId: "issue:42", externalUrl: "https://gitlab.example/group/project/-/issues/42" } });
+  api.taskSourceActivity.mockResolvedValue({ items: [{ id: "note-1", body: "Added **regression coverage**", system: false, createdAt: "2026-10-06T08:00:00Z", author: { name: "Alex", username: "alex" } }], truncated: false });
+  renderPanel(<TaskPanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Activity" }));
+  const panel = await screen.findByRole("complementary", { name: "GitLab issue activity" });
+  expect((await within(panel).findByText("regression coverage")).tagName).toBe("STRONG");
+  expect(within(panel).getByText("@alex")).toBeInTheDocument();
+  expect(api.taskSourceActivity).toHaveBeenCalledWith("task-a");
+  fireEvent.click(within(panel).getByRole("button", { name: "Close GitLab activity" }));
+  expect(screen.queryByRole("complementary", { name: "GitLab issue activity" })).not.toBeInTheDocument();
 });
 
 it("refreshes an active planning task and brings its completed plan into view", async () => {
@@ -224,9 +243,9 @@ describe("message entrance", () => {
       expect(frames[1].style.opacity).toBe("1");
       expect(frames[1].style.filter).toBe("blur(0)");
       expect(frames[1].style.transform).toBe("translateY(0)");
-      const media = rules.find((rule) => rule.type === CSSRule.MEDIA_RULE) as CSSMediaRule;
+      const media = rules.find((rule) => rule.type === CSSRule.MEDIA_RULE && Array.from((rule as CSSMediaRule).cssRules).some((entry) => (entry as CSSStyleRule).selectorText === ".chat-message-enter")) as CSSMediaRule;
       expect(media.conditionText).toBe("(prefers-reduced-motion: no-preference)");
-      expect(rules.filter((rule) => rule.type === CSSRule.STYLE_RULE)).toHaveLength(0);
+      expect(rules.filter((rule) => rule.type === CSSRule.STYLE_RULE && (rule as CSSStyleRule).selectorText === ".chat-message-enter")).toHaveLength(0);
       const animation = media.cssRules[0] as CSSStyleRule;
       expect(animation.selectorText).toBe(".chat-message-enter");
       expect(animation.style.animation).toBe("chat-message-enter 240ms cubic-bezier(0.16, 1, 0.3, 1)");
@@ -373,7 +392,7 @@ describe("planning in chats", () => {
     await waitFor(() => expect(api.sendCodexMessage).toHaveBeenLastCalledWith("chat-a", "Implement the plan", expect.any(String), expect.objectContaining({ collaborationMode: "default" })));
   });
 
-  it("shows full plan details and progress, approves the current revision, and accepts revisions in task chat", async () => {
+  it("shows full plan details at the end and hands approval to a new coding chat", async () => {
     api.taskEvents.mockResolvedValue([{ id: 9, taskId: "task-a", kind: "status_changed", createdAt: "now", payload: { message: "Plan is ready for approval" } }]);
     renderPanel(<TaskPanel />);
     const plan = await screen.findByRole("region", { name: "Task plan" });
@@ -383,12 +402,42 @@ describe("planning in chats", () => {
     expect(within(plan).getByText("all planning context").tagName).toBe("STRONG");
     expect(within(plan).getByText("Inspect the chat")).toHaveClass("line-through");
     expect(within(plan).getByText("Implement the change").closest("li")).toHaveAttribute("aria-current", "step");
-    fireEvent.click(within(plan).getByRole("button", { name: "Approve and run" }));
-    await waitFor(() => expect(api.approvePlan).toHaveBeenCalledWith("task-a", 3));
+    fireEvent.click(within(plan).getByRole("button", { name: "Approve in new chat" }));
+    await waitFor(() => expect(api.createCodexChat).toHaveBeenCalledWith("/repo", "model"));
+    expect(api.sendCodexMessage).toHaveBeenCalledWith("chat-a", expect.stringContaining("## Approved plan"), expect.any(String), expect.objectContaining({ collaborationMode: "default", accessMode: "fullAccess" }));
+    expect(api.approvePlan).not.toHaveBeenCalled();
     const input = screen.getByPlaceholderText("Ask for a plan revision, or approve the plan…");
     fireEvent.change(input, { target: { value: "Add a verification step" } });
     fireEvent.submit(input.closest("form")!);
     await waitFor(() => expect(api.sendMessage).toHaveBeenCalledWith("task-a", "Add a verification step"));
+  });
+
+  it("renders a legacy single-step Markdown plan as a document", async () => {
+    api.task.mockResolvedValue({ ...task, plan: { revision: 4, steps: [{ step: "## Implementation\n\n- Update the consent flow\n- Add regression tests", status: "pending" }] } });
+    renderPanel(<TaskPanel />);
+    const plan = await screen.findByRole("region", { name: "Task plan" });
+    expect(within(plan).getByRole("heading", { name: "Implementation" })).toBeInTheDocument();
+    expect(within(plan).getByText("Update the consent flow").closest("li")).toBeInTheDocument();
+    expect(within(plan).queryByText(/## Implementation/)).not.toBeInTheDocument();
+  });
+
+  it("hands a plan to an agent or group from the approval menu", async () => {
+    renderPanel(<TaskPanel />);
+    const openMenu = async () => {
+      const trigger = await screen.findByRole("button", { name: "Choose plan handover" });
+      fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    };
+    await openMenu();
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Coral" }));
+    await waitFor(() => expect(api.featureRequest).toHaveBeenCalledWith("/agents/coral/messages", expect.objectContaining({ method: "POST" })));
+    const agentRequest = api.featureRequest.mock.calls.find(([path]) => path === "/agents/coral/messages")?.[1];
+    expect(JSON.parse(agentRequest.body).content).toContain("## Approved plan");
+
+    await openMenu();
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Builders" }));
+    await waitFor(() => expect(api.featureRequest).toHaveBeenCalledWith("/groups/builders/messages", expect.objectContaining({ method: "POST" })));
+    const groupRequest = api.featureRequest.mock.calls.find(([path]) => path === "/groups/builders/messages")?.[1];
+    expect(JSON.parse(groupRequest.body)).toMatchObject({ recipientIds: [], content: expect.stringContaining("## Approved plan") });
   });
 
   it("starts planning from a queued task and shows approval status during execution", async () => {

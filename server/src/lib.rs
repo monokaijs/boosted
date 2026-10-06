@@ -544,6 +544,7 @@ fn router(
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/{id}", get(get_task))
         .route("/tasks/{id}/events", get(task_events))
+        .route("/tasks/{id}/source/activity", get(task_source_activity))
         .route(
             "/tasks/{id}/checkboxes",
             patch(markdown_checkboxes::task_checkbox),
@@ -2779,6 +2780,37 @@ async fn task_events(
     Ok(Json(state.db.events(&id, query.after).await?))
 }
 
+async fn task_source_activity(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> AppResult<Json<integrations::GitlabIssueActivity>> {
+    let source = sqlx::query(
+        "SELECT provider,integration_id,external_url FROM task_sources WHERE task_id=?",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db.pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("task has no external source".into()))?;
+    let provider: String = source.get("provider");
+    if provider != "gitlab" {
+        return Err(AppError::BadRequest(
+            "source activity is currently available for GitLab tasks".into(),
+        ));
+    }
+    let external_url: Option<String> = source.get("external_url");
+    let external_url = external_url
+        .filter(|url| !url.trim().is_empty())
+        .ok_or_else(|| AppError::BadRequest("GitLab task has no issue URL".into()))?;
+    let integration = state
+        .db
+        .integration(&source.get::<String, _>("integration_id"))
+        .await?;
+    let config = gitlab_connections::resolve(&state.db, &provider, &integration.config).await?;
+    Ok(Json(
+        integrations::fetch_gitlab_issue_activity(&config, &external_url).await?,
+    ))
+}
+
 async fn send_task_message(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
@@ -3678,6 +3710,7 @@ async fn consume_turn(
                         }
                         Some("plan") => {
                             if let Some(text) = item.get("text").and_then(Value::as_str) {
+                                last_agent = text.to_string();
                                 let _ = sqlx::query(
                                     "UPDATE plans SET markdown=? WHERE task_id=? AND revision=?",
                                 )
@@ -3740,7 +3773,7 @@ async fn consume_turn(
                     if mode == "plan" {
                         let has_steps: i64=sqlx::query_scalar("SELECT json_array_length(steps_json) FROM plans WHERE task_id=? AND revision=?").bind(task_id).bind(revision).fetch_one(&state.db.pool).await.unwrap_or(0);
                         if has_steps == 0 {
-                            let fallback_step = state
+                            let task_description = state
                                 .db
                                 .task(task_id)
                                 .await
@@ -3748,11 +3781,17 @@ async fn consume_turn(
                                 .unwrap_or_else(|_| {
                                     "Execute the requested task and verify the result".into()
                                 });
-                            let fallback = vec![PlanStep {
-                                step: fallback_step,
-                                status: "pending".into(),
-                            }];
-                            let _=sqlx::query("UPDATE plans SET markdown=?,steps_json=? WHERE task_id=? AND revision=?").bind(&last_agent).bind(serde_json::to_string(&fallback).unwrap_or_else(|_|"[]".into())).bind(task_id).bind(revision).execute(&state.db.pool).await;
+                            let stored_markdown = sqlx::query_scalar::<_, Option<String>>(
+                                "SELECT markdown FROM plans WHERE task_id=? AND revision=?",
+                            )
+                            .bind(task_id)
+                            .bind(revision)
+                            .fetch_one(&state.db.pool)
+                            .await
+                            .unwrap_or(None);
+                            let (markdown, fallback) =
+                                fallback_plan(stored_markdown, &last_agent, &task_description);
+                            let _=sqlx::query("UPDATE plans SET markdown=?,steps_json=? WHERE task_id=? AND revision=?").bind(markdown).bind(serde_json::to_string(&fallback).unwrap_or_else(|_|"[]".into())).bind(task_id).bind(revision).execute(&state.db.pool).await;
                         }
                         let _ = state.set_task_state(task_id, "ready", None).await;
                     } else {
@@ -3789,6 +3828,28 @@ async fn consume_turn(
 
 fn normalize_steps(value: &Value) -> Value {
     Value::Array(value.as_array().into_iter().flatten().map(|step|json!({"step":step.get("step").and_then(Value::as_str).unwrap_or(""),"status":match step.get("status").and_then(Value::as_str).unwrap_or("pending"){"inProgress"=>"in_progress",other=>other}})).collect())
+}
+
+fn fallback_plan(
+    stored_markdown: Option<String>,
+    last_agent: &str,
+    task_description: &str,
+) -> (String, Vec<PlanStep>) {
+    let markdown = stored_markdown
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| last_agent.trim().to_string());
+    let step = if markdown.is_empty() {
+        task_description.to_string()
+    } else {
+        markdown.clone()
+    };
+    (
+        markdown,
+        vec![PlanStep {
+            step,
+            status: "pending".into(),
+        }],
+    )
 }
 
 async fn set_first_plan_step_in_progress(
@@ -3928,6 +3989,20 @@ mod tests {
             normalize_steps(&json!([{"step":"Build","status":"inProgress"}]))[0]["status"],
             "in_progress"
         );
+    }
+    #[test]
+    fn plan_fallback_preserves_the_plan_markdown() {
+        let (markdown, steps) = fallback_plan(
+            Some("## Plan\n\n- Implement the change".into()),
+            "A later agent message",
+            "Original task description",
+        );
+        assert_eq!(markdown, "## Plan\n\n- Implement the change");
+        assert_eq!(steps[0].step, markdown);
+
+        let (markdown, steps) = fallback_plan(None, "Verify the implementation", "Task");
+        assert_eq!(markdown, "Verify the implementation");
+        assert_eq!(steps[0].step, markdown);
     }
     #[test]
     fn task_question_answers_keep_each_choice_scoped_to_its_question() {
