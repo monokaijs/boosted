@@ -7,6 +7,7 @@ import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
+import { describeJob } from "./wait-for-macos-binaries.mjs";
 
 export const expectedArtifacts = [
   "release-Linux",
@@ -50,6 +51,7 @@ export async function publishRelease({
   gh = runGh,
   wait = sleep,
   log = console.log,
+  now = Date.now,
   pollInterval = 10_000,
   timeout = 80 * 60_000,
 }) {
@@ -62,7 +64,8 @@ export async function publishRelease({
   await mkdir(downloads, { recursive: true });
   const uploaded = new Set();
   const assets = new Map();
-  const deadline = Date.now() + timeout;
+  const deadline = now() + timeout;
+  let nextLog = 0;
   let published = !JSON.parse(gh(["release", "view", tag, "--repo", repository, "--json", "isDraft"])).isDraft;
 
   function apiPages(endpoint, property) {
@@ -70,7 +73,7 @@ export async function publishRelease({
       .flatMap((page) => page[property]);
   }
 
-  while (Date.now() < deadline) {
+  while (now() < deadline) {
     const available = new Set(apiPages(`repos/${repository}/actions/runs/${runId}/artifacts`, "artifacts")
       .filter((artifact) => !artifact.expired)
       .map((artifact) => artifact.name));
@@ -136,9 +139,15 @@ export async function publishRelease({
       const missing = expectedArtifacts.filter((name) => !uploaded.has(name));
       throw new Error(`Builds finished without these artifacts: ${missing.join(", ")}. Available platforms remain published.`);
     }
-    await wait(pollInterval);
+    if (now() >= nextLog) {
+      const missing = expectedArtifacts.filter((name) => !uploaded.has(name));
+      const active = jobs.filter((job) => job.status !== "completed");
+      log(`Waiting for: ${missing.join(", ")} (${uploaded.size}/${expectedArtifacts.length} published). ${active.map((job) => `${job.name} [${describeJob(job)}]`).join("; ")}`);
+      nextLog = now() + 60_000;
+    }
+    await wait(Math.max(0, Math.min(pollInterval, deadline - now())));
   }
-  throw new Error("Timed out waiting for release artifacts. Available platforms remain published.");
+  throw new Error(`Timed out waiting for release artifacts: ${expectedArtifacts.filter((name) => !uploaded.has(name)).join(", ")}. Available platforms remain published.`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

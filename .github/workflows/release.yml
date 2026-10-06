@@ -102,7 +102,7 @@ jobs:
           cargo metadata --locked --format-version 1 --no-deps > /dev/null
 
       - name: Validate release publisher
-        run: node --test test/release-publish.test.mjs
+        run: node --test test/release-publish.test.mjs test/macos-artifacts.test.mjs
 
       - name: Ensure the tag is unused
         env:
@@ -245,6 +245,7 @@ jobs:
     name: Compile macOS ${{ matrix.target }}
     needs: prepare
     runs-on: macos-26
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -315,10 +316,13 @@ jobs:
 
   bundle-macos:
     name: Sign and package macOS universal
-    needs:
-      - prepare
-      - build-macos
+    # Uploaded binaries are ready even if a compiler runner hangs in finalization.
+    needs: prepare
     runs-on: macos-26
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
     steps:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -344,6 +348,14 @@ jobs:
 
       - name: Install packaging dependencies
         run: pnpm --filter @boosted/desktop install --frozen-lockfile
+
+      - name: Wait for uploaded macOS binaries
+        timeout-minutes: 31
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: node .github/scripts/wait-for-macos-binaries.mjs
 
       - name: Download architecture binaries
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0

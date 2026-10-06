@@ -174,3 +174,24 @@ test("rerunning the publisher reconstructs a complete release from existing arti
   assert.equal(Object.keys(JSON.parse(state.assets.get("latest.json")).platforms).length, 11);
   assertChecksums(state);
 });
+
+test("publisher reports runner finalization and missing artifacts every minute", async (context) => {
+  const { state, options } = await harness(context, expectedArtifacts.filter((name) => name !== "release-macOS"));
+  const logs = [];
+  let time = 0;
+  const gh = (args) => {
+    if (args[0] === "api" && args[1].endsWith("/jobs?filter=all")) {
+      return JSON.stringify([{ jobs: [{ name: "Compile macOS x86_64-apple-darwin", status: "in_progress", steps: [{ name: "Complete job", status: "in_progress" }] }] }]);
+    }
+    return options.gh(args);
+  };
+  await assert.rejects(publishRelease({
+    ...options, gh, now: () => time, log: (message) => logs.push(message), timeout: 65_000,
+    wait: async (duration) => { time += duration; },
+  }), /Timed out.*release-macOS.*Available platforms remain published/);
+  const heartbeats = logs.filter((message) => message.startsWith("Waiting for:"));
+  assert.equal(heartbeats.length, 2);
+  assert.match(heartbeats[0], /release-macOS \(6\/7 published\).*Complete job/);
+  assert.equal(state.published, true);
+  assertChecksums(state);
+});
