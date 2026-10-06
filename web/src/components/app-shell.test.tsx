@@ -375,15 +375,30 @@ describe("page navigation and conversations", () => {
   it("keeps the desktop task list visible beside the selected task", async () => {
     renderShell();
     goTo("Tasks");
+    expect(screen.queryByRole("complementary", { name: "Navigation and chats" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Content" })).toHaveAttribute("data-chat-sidebar", "false");
     act(() => {
       useAppStore.setState({ selectedTaskId: "task-a" });
       window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: "task" }));
     });
     expect(screen.getByText("Task board content")).toBeInTheDocument();
     expect(screen.getByRole("complementary", { name: "Task details" })).toHaveTextContent("Task detail content");
+    const resizer = screen.getByRole("separator", { name: "Resize task list" });
+    expect(resizer).toHaveAttribute("aria-valuenow", "38");
+    fireEvent.keyDown(resizer, { key: "ArrowRight" });
+    expect(resizer).toHaveAttribute("aria-valuenow", "40");
+    expect(document.querySelector<HTMLElement>(".task-work-items-layout")?.style.getPropertyValue("--task-list-width")).toBe("40%");
     fireEvent.click(screen.getByRole("button", { name: "Close task details" }));
     expect(screen.getByText("Task board content")).toBeInTheDocument();
     expect(screen.queryByText("Task detail content")).not.toBeInTheDocument();
+  });
+
+  it("restores the chat sidebar for tasks when the desktop is wide enough", async () => {
+    vi.stubGlobal("innerWidth", 1440);
+    renderShell();
+    goTo("Tasks");
+    expect(screen.getByRole("complementary", { name: "Navigation and chats" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Content" })).toHaveAttribute("data-chat-sidebar", "true");
   });
 
   it("opens tools on the left while keeping the conversation and file preview in the main pane", async () => {

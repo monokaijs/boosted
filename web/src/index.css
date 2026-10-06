@@ -238,10 +238,13 @@ select {
   background: var(--surface);
 }
 
-.task-work-items-layout { display: grid; grid-template-columns: minmax(0, 100%) minmax(0, 0%); height: 100%; min-width: 0; min-height: 0; overflow: hidden; transition: grid-template-columns 220ms cubic-bezier(.2, .8, .2, 1); }
-.task-work-items-layout[data-detail="true"] { grid-template-columns: minmax(0, 38%) minmax(0, 62%); }
+.task-work-items-layout { display: grid; grid-template-columns: minmax(0, 100%) 0 minmax(0, 0%); height: 100%; min-width: 0; min-height: 0; overflow: hidden; transition: grid-template-columns 220ms cubic-bezier(.2, .8, .2, 1); }
+.task-work-items-layout[data-detail="true"] { grid-template-columns: clamp(260px, var(--task-list-width, 38%), calc(100% - 432px)) 12px minmax(0, 1fr); }
 .task-work-items-list { min-width: 0; min-height: 0; overflow: hidden; }
-.task-work-item-detail { min-width: 0; min-height: 0; margin: 8px 8px 8px 4px; overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); box-shadow: 0 12px 32px rgb(0 0 0 / 12%); animation: task-work-item-enter 220ms cubic-bezier(.2, .8, .2, 1); }
+.task-work-item-resizer { position: relative; z-index: 2; min-width: 0; cursor: col-resize; touch-action: none; outline: none; }
+.task-work-item-resizer > span { position: absolute; top: 50%; left: 3px; width: 6px; height: 40px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-raised); opacity: .45; transform: translateY(-50%); transition: opacity 120ms ease, border-color 120ms ease; }
+.task-work-item-resizer:is(:hover, :focus-visible) > span { border-color: var(--border-strong); opacity: 1; }
+.task-work-item-detail { min-width: 0; min-height: 0; margin: 8px 8px 8px 0; overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); box-shadow: 0 12px 32px rgb(0 0 0 / 12%); animation: task-work-item-enter 220ms cubic-bezier(.2, .8, .2, 1); }
 .task-work-item-detail > .panel-root, .task-work-item-detail > [data-slot] { height: 100%; }
 @keyframes task-work-item-enter { from { opacity: 0; transform: translateX(12px) scale(.99); } to { opacity: 1; transform: translateX(0) scale(1); } }
 

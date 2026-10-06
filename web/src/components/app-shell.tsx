@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Bot, ChevronDown, LogOut, MessagesSquare, Ellipsis, Files, GitBranch, Plus, Settings2, X } from "lucide-react";
 import { openProvidersEvent } from "@/features/agents/events";
@@ -25,8 +25,8 @@ import { useBoostedApiClient } from "@/lib/api-context";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import { useNotificationNavigation } from "@/hooks/use-notification-navigation";
 import { useConversationReadState } from "@/hooks/use-conversation-read-state";
-import { useMobileLayout } from "@/hooks/use-mobile-layout";
-import { useAppStore } from "@/lib/store";
+import { useCompactLayout, useMobileLayout } from "@/hooks/use-mobile-layout";
+import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import { chatProject } from "@/lib/chat-project";
 import { conversationQueryOptions } from "@/lib/query-client";
 import { destinations, navigate, navigateSettings, backToSettings, settingsSectionFromHash, pageFromHash, type AppPage } from "@/lib/navigation";
@@ -44,6 +44,76 @@ const tools = [
 type ContentView = "chat" | "task" | "editor" | "agents" | "group";
 type ToolView = typeof tools[number]["id"];
 
+const taskListWidthKey = "boosted.tasks.listWidth";
+function savedTaskListWidth() {
+  const width = Number(localStorage.getItem(machinePreferenceKey(taskListWidthKey)));
+  return Number.isFinite(width) && width >= 24 && width <= 60 ? width : 38;
+}
+
+function TaskWorkspace({ taskId, detailOpen, onClose }: { taskId?: string; detailOpen: boolean; onClose(): void }) {
+  const [listWidth, setListWidth] = useState(savedTaskListWidth);
+  const listWidthRef = useRef(listWidth);
+  const layout = useRef<HTMLDivElement>(null);
+  const stopResizeRef = useRef<() => void>(() => undefined);
+  useEffect(() => () => stopResizeRef.current(), []);
+
+  function saveWidth(width: number) {
+    try { localStorage.setItem(machinePreferenceKey(taskListWidthKey), String(width)); } catch { /* Resizing still works without browser storage. */ }
+  }
+  function updateWidth(width: number) {
+    const next = Math.max(24, Math.min(60, Math.round(width * 10) / 10));
+    listWidthRef.current = next;
+    setListWidth(next);
+  }
+  function setWidthFromPointer(clientX: number) {
+    const bounds = layout.current?.getBoundingClientRect();
+    if (!bounds?.width) return;
+    const minimumList = Math.min(280, bounds.width * .4);
+    const minimumDetail = Math.min(440, bounds.width * .5);
+    const pixels = Math.max(minimumList, Math.min(bounds.width - minimumDetail, clientX - bounds.left));
+    updateWidth(pixels / bounds.width * 100);
+  }
+  function startResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    stopResizeRef.current();
+    const cursor = document.body.style.cursor;
+    const selection = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const move = (next: PointerEvent) => setWidthFromPointer(next.clientX);
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      document.body.style.cursor = cursor;
+      document.body.style.userSelect = selection;
+      saveWidth(listWidthRef.current);
+      stopResizeRef.current = () => undefined;
+    };
+    stopResizeRef.current = stop;
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop, { once: true });
+    window.addEventListener("pointercancel", stop, { once: true });
+  }
+  function resizeWithKeyboard(width: number) {
+    updateWidth(width);
+    saveWidth(Math.max(24, Math.min(60, Math.round(width * 10) / 10)));
+  }
+
+  const style = { "--task-list-width": `${listWidth}%` } as CSSProperties;
+  return <div ref={layout} className="task-work-items-layout" data-detail={detailOpen} style={style}>
+    <section className="task-work-items-list" aria-label="Task list"><TaskboardPanel detailOpen={detailOpen} /></section>
+    {detailOpen && <div className="task-work-item-resizer" role="separator" aria-label="Resize task list" aria-orientation="vertical" aria-valuemin={24} aria-valuemax={60} aria-valuenow={Math.round(listWidth)} tabIndex={0} onPointerDown={startResize} onKeyDown={(event) => {
+      if (event.key === "ArrowLeft") { event.preventDefault(); resizeWithKeyboard(listWidthRef.current - 2); }
+      if (event.key === "ArrowRight") { event.preventDefault(); resizeWithKeyboard(listWidthRef.current + 2); }
+      if (event.key === "Home") { event.preventDefault(); resizeWithKeyboard(24); }
+      if (event.key === "End") { event.preventDefault(); resizeWithKeyboard(60); }
+    }}><span /></div>}
+    {detailOpen && taskId && <aside className="task-work-item-detail" aria-label="Task details"><TaskPanel key={taskId} onClose={onClose} /></aside>}
+  </div>;
+}
+
 export function AppShell() {
   const queryClient = useQueryClient();
   const { profileId } = useBoostedApiClient();
@@ -53,6 +123,7 @@ export function AppShell() {
   const hasNativeBranding = isTauriRuntime() && /Windows/i.test(navigator.userAgent);
   const [page, setPage] = useState(pageFromHash);
   const isMobile = useMobileLayout();
+  const isCompact = useCompactLayout();
   const [mobileChatOpen, setMobileChatOpen] = useState(() => window.location.hash === "#home");
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | undefined>(settingsSectionFromHash);
   const previousPage = useRef<AppPage>("home");
@@ -83,6 +154,7 @@ export function AppShell() {
   const toolsOpen = page === "home" && Boolean(toolView);
   const mobileChatsPage = isMobile && page === "home" && !mobileChatOpen;
   const mobileChatDetail = isMobile && page === "home" && mobileChatOpen;
+  const chatSidebarVisible = page !== "settings" && !(page === "tasks" && isCompact);
   const contentLayoutKey = page === "tasks" && !isMobile
     ? `${profileId}:tasks:${projectId ?? "empty"}`
     : `${profileId}:${page}:${view}:${chatId}:${taskId}:${groupId}:${selectedAgentId}`;
@@ -239,7 +311,7 @@ export function AppShell() {
       {appUpdate.phase === "downloading" && <span className="shell-update">Updating{formatUpdateProgress(appUpdate) !== undefined ? ` ${formatUpdateProgress(appUpdate)}%` : "…"}</span>}
       <div className="shell-machine"><MachineSwitcher onManage={() => goTo("settings")} /></div>
     </header>
-    <section className="content-surface" aria-label="Content">
+    <section className="content-surface" data-chat-sidebar={chatSidebarVisible} aria-label="Content">
     <section className="main-surface" hidden={mobileChatsPage} aria-label={`${page === "home" && view === "agents" ? "Agents" : mobileChatDetail ? "Chat" : current.label} page`}>
       <header className="main-surface-header" hidden={page === "settings"}>
         {mobileChatDetail && <Button variant="ghost" size="icon-sm" aria-label="Back to chats" onClick={openChats}><ArrowLeft /></Button>}
@@ -276,15 +348,12 @@ export function AppShell() {
         {page === "projects" && <ProjectsPage onOpenProject={() => setProjectDialogOpen(true)} onSelect={newChat} />}
         {page === "tasks" && (isMobile && view === "task" && taskId
           ? <div className="page-detail"><div className="page-detail-back"><Button variant="ghost" size="sm" onClick={() => setView("chat")}><ArrowLeft />All tasks</Button></div><TaskPanel key={taskId} /></div>
-          : <div className="task-work-items-layout" data-detail={view === "task" && Boolean(taskId)}>
-              <section className="task-work-items-list" aria-label="Task list"><TaskboardPanel detailOpen={view === "task" && Boolean(taskId)} /></section>
-              {view === "task" && taskId && <aside className="task-work-item-detail" aria-label="Task details"><TaskPanel key={taskId} onClose={() => setView("chat")} /></aside>}
-            </div>)}
+          : <TaskWorkspace taskId={taskId} detailOpen={view === "task" && Boolean(taskId)} onClose={() => setView("chat")} />)}
         {page === "settings" && <SettingsPage section={settingsSection} onSectionChange={(section) => { setSettingsSection(section); navigateSettings(section); }} onBack={() => { setSettingsSection(undefined); backToSettings(); }} onClose={() => { if (isMobile && previousPage.current === "home" && !previousMobileChatOpen.current) openChats(); else goTo(previousPage.current); }} />}
       </Suspense></AttachmentPreviewLayout></div>
       </div>
     </section>
-    {page !== "settings" && <aside className="right-navigation" hidden={isMobile && !mobileChatsPage} aria-label="Navigation and chats">
+    {page !== "settings" && <aside className="right-navigation" hidden={!chatSidebarVisible || (isMobile && !mobileChatsPage)} aria-label="Navigation and chats">
       <h1 className="mobile-chats-heading">Chats</h1>
       <ChatList agents={agents.data ?? []} activeAgentId={page === "home" && view === "agents" ? selectedAgent?.id : undefined} activeGroupId={page === "home" && view === "group" ? groupId : undefined} activeChatId={page === "home" && view === "chat" ? chatId : undefined} onSelectAgent={openAgent} onCreateAgent={createAgent} onNewChat={newChat} onOpenProject={() => setProjectDialogOpen(true)} onClose={() => setMobileChatsOpen(false)} />
 
