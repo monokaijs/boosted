@@ -33,3 +33,14 @@ it("preserves link elements while content streams and uses the current file hand
   expect(openFileLink).not.toHaveBeenCalled()
   expect(nextHandler).toHaveBeenCalledWith("/src/app.ts")
 })
+
+it("does not reparse unchanged task Markdown when only its persistence callback changes", () => {
+  const { rerender } = render(<MarkdownContent content="- [ ] Task" saveCheckbox={async () => {}} />)
+  const checkbox = screen.getByRole("checkbox", { name: "Task" })
+  const save = vi.fn(async () => {})
+  rerender(<MarkdownContent content="- [ ] Task" saveCheckbox={save} />)
+  expect(parse).toHaveBeenCalledTimes(1)
+  expect(screen.getByRole("checkbox")).toBe(checkbox)
+  fireEvent.click(checkbox)
+  expect(save).toHaveBeenCalledTimes(1)
+})

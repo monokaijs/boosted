@@ -8,7 +8,7 @@ import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import { applyCodexEvent } from "@/lib/codex-chat-state";
 import type { Task, TaskEvent } from "@/lib/types";
 
-const api = vi.hoisted(() => ({ projects: vi.fn(), projectBranches: vi.fn(), projectBranch: vi.fn(), switchProjectBranch: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexApprovals: vi.fn(), codexAttachment: vi.fn(), uploadCodexAttachment: vi.fn(), workspaceFile: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn() }));
+const api = vi.hoisted(() => ({ toggleMarkdownCheckbox: vi.fn(), projects: vi.fn(), projectBranches: vi.fn(), projectBranch: vi.fn(), switchProjectBranch: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexApprovals: vi.fn(), codexAttachment: vi.fn(), uploadCodexAttachment: vi.fn(), workspaceFile: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn() }));
 vi.mock("@/lib/api", () => ({ api }));
 vi.mock("@/lib/api-context", () => ({ useBoostedApiClient: () => api }));
 import { NewChatPanel, TaskPanel } from "./chat-panel";
@@ -404,4 +404,34 @@ describe("Codex attachments", () => {
     await act(async () => finish({ threadId: "chat-a", turnId: "turn" }));
     await waitFor(() => expect(screen.getAllByRole("img", { name: "photo.png" })).toHaveLength(1));
   });
+});
+
+it("persists task descriptions, plans and existing messages without sending or navigating", async () => {
+  let persisted = { ...task, description: "- [ ] Description", plan: { ...task.plan!, markdown: "- [ ] Plan" } };
+  let messages = [{ id: 101, taskId: task.id, kind: "user_message", payload: { text: "- [ ] Message" }, createdAt: "now" }];
+  api.task.mockImplementation(async () => persisted);
+  api.taskEvents.mockImplementation(async () => messages);
+  api.toggleMarkdownCheckbox.mockImplementation(async (_path, target, _recordId, edit) => {
+    const next = edit.expected.slice(0, edit.offset) + "x" + edit.expected.slice(edit.offset + 1);
+    if (target === "description") persisted = { ...persisted, description: next };
+    if (target === "plan") persisted = { ...persisted, plan: { ...persisted.plan, markdown: next } };
+    if (target === "event") messages = [{ ...messages[0], payload: { text: next } }];
+    return persisted;
+  });
+  const href = window.location.href;
+  const view = renderPanel(<TaskPanel />);
+  for (const name of ["Description", "Plan", "Message"]) {
+    fireEvent.click(await screen.findByRole("checkbox", { name }));
+    await waitFor(() => expect(screen.getByRole("checkbox", { name })).toBeChecked());
+  }
+  expect(api.toggleMarkdownCheckbox.mock.calls.map((args) => args.slice(0, 3))).toEqual([
+    ["/tasks/task-a", "description", undefined], ["/tasks/task-a", "plan", "3"], ["/tasks/task-a", "event", "101"],
+  ]);
+  expect(api.sendMessage).not.toHaveBeenCalled();
+  expect(api.sendCodexMessage).not.toHaveBeenCalled();
+  expect(api.startTaskPlan).not.toHaveBeenCalled();
+  expect(window.location.href).toBe(href);
+  view.unmount();
+  renderPanel(<TaskPanel />);
+  for (const name of ["Description", "Plan", "Message"]) expect(await screen.findByRole("checkbox", { name })).toBeChecked();
 });

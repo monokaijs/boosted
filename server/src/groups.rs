@@ -2914,3 +2914,28 @@ async fn validate_task_input(state: &AppState, group: &str, input: &Value) -> Ap
     }
     Ok(())
 }
+
+pub(crate) async fn checkbox(State(state): State<AppState>, AxumPath(group): AxumPath<String>, Json(input): Json<markdown_checkboxes::CheckboxEdit>) -> AppResult<Json<Value>> {
+    let _gate = state.groups.gate.lock().await;
+    let meta = get(&state.db, "groups", &group).await?;
+    if state.groups.active.lock().await.values().any(|(c, _)| c.group_id == group) {
+        return Err(AppError::Conflict("Wait for group turns to finish before editing Markdown".into()));
+    }
+    let record_id = input.record_id.as_deref().ok_or_else(|| AppError::BadRequest("Record ID required".into()))?;
+    let (table, field) = match input.target.as_str() {
+        "message" => ("group_messages", "content"),
+        "instructions" => ("group_tasks", "instructions"),
+        "result" => ("group_tasks", "result"),
+        _ => return Err(AppError::BadRequest("Invalid Markdown target".into())),
+    };
+    let mut record = get(&state.db, table, record_id).await?;
+    if record["groupId"] != group { return Err(AppError::NotFound("Record not found in group".into())); }
+    if field == "instructions" && (meta["stopped"] != true || terminal(&record) || matches!(record["status"].as_str(), Some("running" | "awaiting_review"))) {
+        return Err(AppError::Conflict("This assignment is read-only. Stop execution before editing.".into()));
+    }
+    record[field] = json!(input.apply(record[field].as_str().unwrap_or_default())?);
+    if table == "group_tasks" { record["updatedAt"] = json!(now()); }
+    put(&state.db, table, &group, &record).await?;
+    touch(&state, &group, "group.updated").await?;
+    Ok(Json(record))
+}

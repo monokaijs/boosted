@@ -14,6 +14,7 @@ mod group_models;
 mod groups;
 mod integrations;
 mod models;
+mod markdown_checkboxes;
 mod process;
 mod providers;
 pub mod updater;
@@ -372,6 +373,7 @@ fn router(
         .route("/groups", get(groups::list).post(groups::create))
         .route("/groups/{id}", get(groups::read).patch(groups::update).delete(groups::delete))
         .route("/groups/{id}/usage", get(agent_usage::read_group_usage))
+        .route("/groups/{id}/checkboxes", patch(groups::checkbox))
         .route(
             "/groups/{id}/messages",
             get(groups::messages)
@@ -392,6 +394,7 @@ fn router(
         .route("/groups/{id}/stop", post(groups::stop))
         .route("/groups/{id}/resume", post(groups::resume))
         .route("/agents/{id}", get(agents::read_agent))
+        .route("/agents/{id}/checkboxes", patch(agents::checkbox))
         .route("/agents/usage", get(agent_usage::read_usage))
         .route(
             "/agents/{id}/messages",
@@ -488,6 +491,7 @@ fn router(
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/{id}", get(get_task))
         .route("/tasks/{id}/events", get(task_events))
+        .route("/tasks/{id}/checkboxes", patch(markdown_checkboxes::task_checkbox))
         .route(
             "/tasks/{task_id}/attachments/{id}",
             get(download_task_attachment),

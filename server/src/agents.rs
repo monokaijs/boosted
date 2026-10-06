@@ -4572,3 +4572,16 @@ pub(crate) async fn set_group_account(state: &AppState, id: &str, account: &str)
     .await?;
     Ok(())
 }
+
+// Update the existing durable message under the same state lock as deliveries.
+pub(crate) async fn checkbox(State(state): State<AppState>, AxumPath(id): AxumPath<String>, Json(input): Json<markdown_checkboxes::CheckboxEdit>) -> AppResult<Json<Value>> {
+    if input.target != "message" { return Err(AppError::BadRequest("Invalid Markdown target".into())); }
+    let next = change(&state, &id, |agent| {
+        if agent["status"] == "running" { return Err(AppError::Conflict("Wait for the agent to finish before editing Markdown".into())); }
+        let message = agent["messages"].as_array_mut().and_then(|messages| messages.iter_mut().find(|m| m["id"].as_str() == input.record_id.as_deref())).ok_or_else(|| AppError::NotFound("Message not found".into()))?;
+        let content = message["content"].as_str().ok_or_else(|| AppError::BadRequest("Message has no Markdown".into()))?;
+        message["content"] = json!(input.apply(content)?);
+        Ok(())
+    }).await?;
+    Ok(Json(next))
+}

@@ -1,3 +1,4 @@
+import { TaskMarkdown, toggleMarkdown, type SaveCheckbox } from "@/components/assistant-ui/task-markdown";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Download, FileText, LoaderCircle, Maximize, ZoomIn, ZoomOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -6,6 +7,7 @@ import { cn } from "@/lib/utils";
 
 export type AttachmentFile = { blob: Blob; name?: string };
 type AttachmentPreviewProps = {
+  saveCheckbox?: SaveCheckbox;
   name: string;
   mimeType?: string | null;
   src?: string;
@@ -24,7 +26,7 @@ function safeSource(src?: string) {
   return src && /^(?:https?:\/\/|blob:|data:)/i.test(src) ? src : undefined;
 }
 
-export function AttachmentPreview({ name, mimeType, src, sourceKey, load, compact, label, className }: AttachmentPreviewProps) {
+export function AttachmentPreview({ name, mimeType, src, sourceKey, load, compact, label, className, saveCheckbox }: AttachmentPreviewProps) {
   const [open, setOpen] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [file, setFile] = useState<AttachmentFile>();
@@ -64,8 +66,11 @@ export function AttachmentPreview({ name, mimeType, src, sourceKey, load, compac
       setFile(result);
       setUrl(objectUrl);
       const contentType = result.blob.type || mimeType || "";
-      if (/^(?:text\/|application\/(?:json|xml|javascript))/.test(contentType) && result.blob.size <= 1024 * 1024) {
-        const value = await result.blob.text();
+      if ((/^(?:text\/|application\/(?:json|xml|javascript))/.test(contentType) || /\.(?:md|markdown)$/i.test(name)) && result.blob.size <= 1024 * 1024) {
+        // Preserve a UTF-8 BOM as part of the backing source, including offsets.
+        const value = /\.(?:md|markdown)$/i.test(name)
+          ? new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(await result.blob.arrayBuffer())
+          : await result.blob.text();
         if (active) setText(value);
       }
     }).catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : "Unable to load attachment."); })
@@ -130,6 +135,12 @@ export function AttachmentPreview({ name, mimeType, src, sourceKey, load, compac
             : url && type.startsWith("audio/") ? <div className="grid h-full place-items-center p-4"><audio controls src={url} aria-label={name} className="max-w-full" /></div>
             : url && type.startsWith("video/") ? <video controls src={url} aria-label={name} className="h-full w-full" />
             : url && type === "application/pdf" ? <iframe title={`Preview ${name}`} src={url} className="h-full w-full border-0" />
+            : text !== undefined && /\.(?:md|markdown)$/i.test(name) ? <TaskMarkdown key={sourceKey ?? name} className="aui-markdown p-4 text-sm" content={text} saveCheckbox={saveCheckbox ? async (edit) => {
+              await saveCheckbox(edit);
+              const next = toggleMarkdown(edit);
+              setText(next);
+              setFile({ blob: new Blob([next], { type: type || "text/markdown" }), name });
+            } : undefined} />
             : text !== undefined ? <pre className="whitespace-pre-wrap break-words p-4 font-mono text-xs">{text}</pre>
             : url ? <div className="grid h-full content-center justify-items-center gap-3 p-6 text-center text-sm text-muted-foreground"><FileText className="size-10" /><p>Preview is unavailable for this file type.</p><p>Download the file to open it.</p></div> : <p className="p-6 text-center text-sm text-muted-foreground">Preview is unavailable. Try downloading the file.</p>}
         </div>

@@ -1,17 +1,17 @@
 import { createElement, memo, useMemo, type ComponentPropsWithoutRef } from "react"
-import ReactMarkdown, { type Components, defaultUrlTransform } from "react-markdown"
-import remarkGfm from "remark-gfm"
+import { type Components, defaultUrlTransform } from "react-markdown"
+import { TaskMarkdown, type SaveCheckbox } from "@/components/assistant-ui/task-markdown"
 import { cn } from "@/lib/utils"
 
 type MarkdownContentProps = {
   animateChanges?: boolean
   compact?: boolean
+  saveCheckbox?: SaveCheckbox
   content: string
   openFileLink?: (href: string) => boolean
   scopeKey?: string | null
 }
 
-const remarkPlugins = [remarkGfm]
 const urlTransform = (url: string) => localFileLike(url) ? url : defaultUrlTransform(url)
 
 export const MarkdownContent = memo(function MarkdownContent({
@@ -19,17 +19,12 @@ export const MarkdownContent = memo(function MarkdownContent({
   compact,
   content,
   openFileLink,
+  saveCheckbox,
 }: MarkdownContentProps) {
   const components = useMemo(() => markdownComponents(openFileLink), [openFileLink])
   return (
     <div className={cn("chat-markdown min-w-0 max-w-full text-[13px]", compact && "leading-5", animateChanges && "chat-markdown-streaming")}>
-      <ReactMarkdown
-        components={components}
-        remarkPlugins={remarkPlugins}
-        urlTransform={urlTransform}
-      >
-        {content}
-      </ReactMarkdown>
+      <TaskMarkdown content={content} saveCheckbox={animateChanges ? undefined : saveCheckbox} components={components} urlTransform={urlTransform} />
     </div>
   )
 })

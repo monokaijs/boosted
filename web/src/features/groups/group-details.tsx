@@ -1,3 +1,6 @@
+import { useQueryClient } from '@tanstack/react-query';
+import { useBoostedApiClient } from '@/lib/api-context';
+import type { CheckboxEdit } from '@/components/assistant-ui/task-markdown';
 import { lazy, Suspense, useRef, useSyncExternalStore } from 'react';
 import { Tabs } from '@base-ui/react/tabs';
 import { CheckCheck, Folder, ListTodo, LoaderCircle, Pencil, Play, Plus, Square, Trash2 } from 'lucide-react';
@@ -28,6 +31,12 @@ export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy
   opener: React.RefObject<HTMLElement | null>; onControl(): void; onEdit(): void; onDelete(): void; onCreateTask(): void;
   onEditTask(task: GroupTask): void; onTaskAction(task: GroupTask, action: 'cancel' | 'retry'): void;
 }) {
+  const client = useBoostedApiClient();
+  const queryClient = useQueryClient();
+  const saveCheckbox = async (target: string, taskId: string, edit: CheckboxEdit) => {
+    try { await client.toggleMarkdownCheckbox(`/groups/${encodeURIComponent(group.id)}`, target, taskId, edit); }
+    finally { void queryClient.invalidateQueries({ queryKey: ['groups', group.id] }); }
+  };
   const compact = useSyncExternalStore(subscribeCompact, () => window.matchMedia(compactQuery).matches, () => false);
   const afterClose = useRef<(() => void) | null>(null);
   const closeWith = (action: () => void) => { afterClose.current = action; onOpenChange(false); };
@@ -82,12 +91,12 @@ export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy
               <header><strong>{task.title}</strong><span data-status={task.status}>{taskLabels[task.status]}</span></header>
               <p>{name(task.ownerId)}{task.reviewerId && ' · Review: ' + name(task.reviewerId)}</p>
               <details><summary>Assignment and results</summary><div className="group-task-detail">
-                <MarkdownContent content={task.instructions} /><p><strong>Expected:</strong> {task.expectedResult}</p>
+                <MarkdownContent content={task.instructions} saveCheckbox={group.stopped && !running.length && !['completed', 'cancelled', 'running', 'awaiting_review'].includes(task.status) ? (edit) => saveCheckbox('instructions', task.id, edit) : undefined} /><p><strong>Expected:</strong> {task.expectedResult}</p>
                 {task.workingDirectory && <p className="group-path">{task.workingDirectory}</p>}
                 {task.dependencyIds.length > 0 && <p>Depends on: {task.dependencyIds.map((id) => group.tasks.find((t) => t.id === id)?.title ?? id).join(', ')}</p>}
                 {task.fileResponsibilities.length > 0 && <p>Files: {task.fileResponsibilities.join(', ')}</p>}
                 {taskOverlaps(task.id, group.tasks).length > 0 && <p className="text-warning">Shared files with {taskOverlaps(task.id, group.tasks).map((t) => t.title).join(', ')}</p>}
-                {task.result && <MarkdownContent content={task.result} />}
+                {task.result && <MarkdownContent content={task.result} saveCheckbox={!running.length ? (edit) => saveCheckbox('result', task.id, edit) : undefined} />}
                 {task.verification && <p><strong>Verification:</strong> {task.verification}</p>}
                 {group.reviews.filter((r) => r.taskId === task.id).map((review) => <p key={review.id}><strong>{name(review.reviewerId)} · {review.decision === 'approve' ? 'Approved' : 'Changes requested'}:</strong> {review.evidence}</p>)}
                 {group.receipts.some((r) => r.taskId === task.id) && <ActionGroup showAll actions={group.receipts.filter((r) => r.taskId === task.id)} />}

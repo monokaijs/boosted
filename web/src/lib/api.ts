@@ -213,6 +213,7 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   workspaceCodexSettings: (projectId: string) => request<WorkspaceCodexSettings>(`/projects/${projectId}/codex-settings`),
   updateWorkspaceCodexSettings: (projectId: string, instructions: string) => request<{ instructions: string }>(`/projects/${projectId}/codex-settings`, json("PUT", { instructions })),
   upsertWorkspaceMcp: (projectId: string, name: string, config: Record<string, unknown>) => request<Record<string, unknown>>(`/projects/${projectId}/codex-settings/mcps`, json("POST", { name, config })),
+  toggleMarkdownCheckbox: <T = unknown>(path: string, target: string, recordId: string | undefined, edit: { expected: string; offset: number; checked: boolean }) => request<T>(`${path}/checkboxes`, json("PATCH", { ...edit, target, recordId })),
   taskEvents: (id: string, after = 0) => request<TaskEvent[]>(`/tasks/${id}/events?after=${after}`),
   startTaskPlan: (id: string) => request<Task>(`/tasks/${id}/plan`, json("POST")),
   sendMessage: (id: string, message: string) => request<Task>(`/tasks/${id}/messages`, json("POST", { message })),
