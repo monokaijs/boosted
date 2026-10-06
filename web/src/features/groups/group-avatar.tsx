@@ -11,6 +11,6 @@ export function GroupAvatar({ group, className }: {
   const client = useBoostedApiClient();
   const projects = useQuery({ queryKey: ['projects'], queryFn: client.projects, enabled: Boolean(group.projectId) });
   const project = projects.data?.find((entry) => entry.id === group.projectId);
-  if (project) return <ProjectAvatar project={project} className={className} />;
+  if (project) return <ProjectAvatar project={project} className={className} slot="group-avatar" />;
   return <GradientAvatar seed={group.id || group.name} className={className} slot="group-avatar" />;
 }

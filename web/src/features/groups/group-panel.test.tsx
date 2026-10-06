@@ -47,8 +47,8 @@ describe('group conversations', () => {
     mocks.featureRequest.mockResolvedValue({ ...base, projectId: 'project' });
     const { container } = renderWithQuery(<GroupPanel groupId="g" />);
     await screen.findByRole('heading', { name: 'Team' });
-    await waitFor(() => expect(container.querySelector('[data-slot="project-avatar"] img')).toHaveAttribute('src', icon));
-    expect(container.querySelector('[data-slot="group-avatar"]')).toBeNull();
+    await waitFor(() => expect(container.querySelector('[data-slot="group-avatar"] img')).toHaveAttribute('src', icon));
+    expect(container.querySelector('[data-slot="project-avatar"]')).toBeNull();
   });
   it('opens and switches coding chats beside the group without losing its draft or navigation', async () => {
     useAppStore.setState({ selectedGroupId: 'g', selectedCodexChatId: 'previous-chat' });
