@@ -67,6 +67,40 @@ describe('group conversations', () => {
     expect(container.querySelector('.group-chat-layout')).toHaveAttribute('data-split', 'false');
     expect(composer).toHaveValue('Keep this draft');
   });
+  it('lets the desktop coding-chat panel be resized with an accessible separator', async () => {
+    mocks.featureRequest.mockResolvedValue({ ...base, executions: [
+      { id: 'run-a', agentId: 'a', rootId: 'root', taskId: null, purpose: 'message', status: 'waiting', activity: null, chatId: 'chat-a' },
+    ] });
+    const { container } = renderWithQuery(<GroupPanel groupId="g" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Nova’s chat' }));
+    const separator = await screen.findByRole('separator', { name: 'Resize agent coding chat' });
+    expect(separator).toHaveAttribute('aria-valuenow', '50');
+    fireEvent.keyDown(separator, { key: 'ArrowLeft' });
+    expect(separator).toHaveAttribute('aria-valuenow', '52');
+    expect(container.querySelector<HTMLElement>('.group-chat-layout')?.style.getPropertyValue('--group-coding-chat-width')).toBe('52%');
+    const layout = container.querySelector<HTMLElement>('.group-chat-layout')!;
+    vi.spyOn(layout, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 700, width: 1000, height: 700, toJSON: () => ({}) });
+    fireEvent.pointerDown(separator, { button: 0, clientX: 500 });
+    fireEvent.pointerMove(window, { clientX: 600 });
+    fireEvent.pointerUp(window);
+    expect(separator).toHaveAttribute('aria-valuenow', '40');
+    expect(layout.style.getPropertyValue('--group-coding-chat-width')).toBe('40%');
+  });
+  it('opens coding chats as the full chat route on mobile without mounting a split panel', async () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    mocks.featureRequest.mockResolvedValue({ ...base, executions: [
+      { id: 'run-a', agentId: 'a', rootId: 'root', taskId: null, purpose: 'message', status: 'waiting', activity: null, chatId: 'chat-a' },
+    ] });
+    const opened = vi.fn();
+    window.addEventListener('boosted:open-codex-chat', opened);
+    const { container } = renderWithQuery(<GroupPanel groupId="g" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Nova’s chat' }));
+    expect(opened).toHaveBeenCalledOnce();
+    expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({ threadId: 'chat-a' });
+    expect(screen.queryByRole('complementary', { name: 'Agent coding chat' })).not.toBeInTheDocument();
+    expect(container.querySelector('.group-chat-layout')).toHaveAttribute('data-split', 'false');
+    window.removeEventListener('boosted:open-codex-chat', opened);
+  });
   it.each(['tasks', 'activity'] as const)('opens an execution chat from %s and closes the details drawer', async (tab) => {
     mocks.featureRequest.mockResolvedValue({ ...base,
       tasks: [{ id: 'task', rootId: 'root', title: 'Implement endpoint', instructions: 'Implement', expectedResult: 'Works', ownerId: 'a', reviewerId: null, status: 'running', dependencyIds: [], fileResponsibilities: [], revision: 1 }],

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, Check, ChevronDown, ListTodo, LoaderCircle, MessageSquare, Play, Plus, Square, TriangleAlert, X } from 'lucide-react';
@@ -14,6 +14,7 @@ import { useBoostedApiClient } from '@/lib/api-context';
 import { ApiError } from '@/lib/api';
 import { conversationQueryOptions } from '@/lib/query-client';
 import { machinePreferenceKey, useAppStore } from '@/lib/store';
+import { useMobileLayout } from '@/hooks/use-mobile-layout';
 import { AttachmentPreviewSplitGuard } from '@/components/attachment-preview-layout';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -38,12 +39,85 @@ function persisted<T>(key: string, fallback: T): T {
 function persistValue(key: string, value: unknown) { try { sessionStorage.setItem(key, JSON.stringify(value)); } catch { /* Keep unsent content in memory when browser storage is full. */ } }
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : 'Unable to complete this action.';
 const CodexChatPanel = lazy(() => import('@/components/panels/codex-chat-panel').then((module) => ({ default: module.CodexChatPanel })));
+const codingPanelWidthKey = 'boosted.group-coding-panel-width';
+
+function savedCodingPanelWidth() {
+  try {
+    const width = Number(localStorage.getItem(machinePreferenceKey(codingPanelWidthKey)));
+    return Number.isFinite(width) && width >= 30 && width <= 70 ? width : 50;
+  } catch { return 50; }
+}
+
+function saveCodingPanelWidth(width: number) {
+  try { localStorage.setItem(machinePreferenceKey(codingPanelWidthKey), String(width)); } catch { /* Resizing still works when browser storage is unavailable. */ }
+}
 
 export function GroupPanel({ groupId, headerTarget }: { groupId: string; headerTarget?: HTMLElement | null }) {
   const [chatId, setChatId] = useState<string>();
-  return <AttachmentPreviewSplitGuard blocked={Boolean(chatId)}><div className="group-chat-layout" data-split={Boolean(chatId)}>
-    <GroupConversation key={groupId} groupId={groupId} headerTarget={headerTarget} onOpenChat={setChatId} />
-    {chatId && <aside className="group-coding-chat" aria-label="Agent coding chat">
+  const [codingPanelWidth, setCodingPanelWidth] = useState(savedCodingPanelWidth);
+  const codingPanelWidthRef = useRef(codingPanelWidth);
+  const stopResizeRef = useRef<() => void>(() => undefined);
+  const layout = useRef<HTMLDivElement>(null);
+  const mobile = useMobileLayout();
+  const openChat = (nextChatId: string) => {
+    if (mobile) window.dispatchEvent(new CustomEvent('boosted:open-codex-chat', { detail: { threadId: nextChatId } }));
+    else setChatId(nextChatId);
+  };
+  useEffect(() => {
+    if (!mobile || !chatId) return;
+    setChatId(undefined);
+    window.dispatchEvent(new CustomEvent('boosted:open-codex-chat', { detail: { threadId: chatId } }));
+  }, [mobile, chatId]);
+  useEffect(() => () => stopResizeRef.current(), []);
+  const setWidthFromPointer = (clientX: number) => {
+    const bounds = layout.current?.getBoundingClientRect();
+    if (!bounds?.width) return;
+    const minimumPanel = Math.min(360, bounds.width * .4);
+    const minimumConversation = Math.min(400, bounds.width * .45);
+    const pixels = Math.max(minimumPanel, Math.min(bounds.width - minimumConversation, bounds.right - clientX));
+    const width = Math.round(pixels / bounds.width * 1000) / 10;
+    codingPanelWidthRef.current = width;
+    setCodingPanelWidth(width);
+  };
+  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    stopResizeRef.current();
+    const cursor = document.body.style.cursor;
+    const selection = document.body.style.userSelect;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    const move = (next: PointerEvent) => setWidthFromPointer(next.clientX);
+    const stop = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+      document.body.style.cursor = cursor;
+      document.body.style.userSelect = selection;
+      saveCodingPanelWidth(codingPanelWidthRef.current);
+      stopResizeRef.current = () => undefined;
+    };
+    stopResizeRef.current = stop;
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop, { once: true });
+    window.addEventListener('pointercancel', stop, { once: true });
+  };
+  const resizeWithKeyboard = (direction: number) => {
+    const width = Math.max(30, Math.min(70, Math.round((codingPanelWidthRef.current + direction * 2) * 10) / 10));
+    codingPanelWidthRef.current = width;
+    setCodingPanelWidth(width);
+    saveCodingPanelWidth(width);
+  };
+  const style = { '--group-coding-chat-width': `${codingPanelWidth}%` } as CSSProperties;
+  return <AttachmentPreviewSplitGuard blocked={Boolean(chatId)}><div ref={layout} className="group-chat-layout" data-split={Boolean(chatId)} style={style}>
+    <GroupConversation key={groupId} groupId={groupId} headerTarget={headerTarget} onOpenChat={openChat} />
+    {chatId && !mobile && <aside className="group-coding-chat" aria-label="Agent coding chat">
+      <div className="group-coding-chat-resizer" role="separator" aria-label="Resize agent coding chat" aria-orientation="vertical" aria-valuemin={30} aria-valuemax={70} aria-valuenow={Math.round(codingPanelWidth)} tabIndex={0} onPointerDown={startResize} onKeyDown={(event) => {
+        if (event.key === 'ArrowLeft') { event.preventDefault(); resizeWithKeyboard(1); }
+        if (event.key === 'ArrowRight') { event.preventDefault(); resizeWithKeyboard(-1); }
+        if (event.key === 'Home') { event.preventDefault(); resizeWithKeyboard(-100); }
+        if (event.key === 'End') { event.preventDefault(); resizeWithKeyboard(100); }
+      }}><span /></div>
       <header className="group-coding-chat-header"><MessageSquare className="size-4 text-muted-foreground" /><h2>Agent coding chat</h2><Button variant="ghost" size="icon-sm" aria-label="Close coding chat" onClick={() => setChatId(undefined)}><X /></Button></header>
       <Suspense fallback={<div className="empty-state">Loading chat…</div>}><CodexChatPanel key={chatId} threadId={chatId} onThreadChange={setChatId} /></Suspense>
     </aside>}
