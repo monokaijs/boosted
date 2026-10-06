@@ -1,9 +1,10 @@
 import { lazy, Suspense, useRef, useSyncExternalStore } from 'react';
 import { Tabs } from '@base-ui/react/tabs';
-import { CheckCheck, Folder, ListTodo, LoaderCircle, Pencil, Play, Plus, Square, Trash2, Users } from 'lucide-react';
+import { CheckCheck, Folder, ListTodo, LoaderCircle, Pencil, Play, Plus, Square, Trash2 } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { AgentAvatar } from '@/features/agents/components/session/agent-avatar';
+import { GroupAvatar } from './group-avatar';
 import { MarkdownContent } from '@/features/agents/components/session/chat-markdown';
 import { ActionGroup } from '@/features/agents/components/session/conversation-tools';
 import { taskOverlaps } from './state';
@@ -41,7 +42,7 @@ export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy
       if (action) action(); else opener.current?.focus({ preventScroll: true });
     }}>
       <div className="flex shrink-0 items-center gap-3 px-5 pb-4 pt-5 pr-12">
-        <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-secondary"><Users className="size-5 text-muted-foreground" /></span>
+        <GroupAvatar group={group} className="size-10 rounded-xl" />
         <div className="min-w-0"><DialogTitle className="truncate text-base font-medium">{group.name}</DialogTitle>
           <DialogDescription className="mt-1 text-xs">{group.memberIds.length} participants · {group.stopped ? 'Stopped' : running.length ? 'Working now' : 'Ready to chat'}</DialogDescription>
         </div>

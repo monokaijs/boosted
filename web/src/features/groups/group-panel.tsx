@@ -25,6 +25,7 @@ import { createGroupsApi } from './api';
 import { DeleteGroupDialog } from './delete-group-dialog';
 import { forgetGroup, groupLifetime } from './lifecycle';
 import { GroupDialog } from './group-dialog';
+import { GroupAvatar } from './group-avatar';
 import { memberRoleNames } from './roles';
 import { acceptGroupSnapshot, mergeGroupMessages, remainingGroupOutbox } from './state';
 import type { GroupMessage, GroupPendingMessage, GroupState, GroupTask } from './types';
@@ -192,7 +193,7 @@ export function GroupPanel({ groupId, headerTarget }: { groupId: string; headerT
   const pendingDeliveries = group.deliveries.filter((delivery) => ['queued', 'processing'].includes(delivery.status));
   const header = <header className="group-chat-header">
     <button type="button" className="group-chat-identity" aria-label="Participants and tasks" onClick={(event) => openDetails('participants', event.currentTarget)}>
-      <h1>{group.name}</h1><ChevronDown className="size-3 shrink-0 text-muted-foreground" />
+      <GroupAvatar group={group} className="size-6 rounded-md" /><h1>{group.name}</h1><ChevronDown className="size-3 shrink-0 text-muted-foreground" />
     </button>
     <button type="button" className="session-icon-button group-tasks-trigger" aria-label="Group tasks" title="Group tasks" onClick={(event) => openDetails('tasks', event.currentTarget)}><ListTodo className="size-4" />{group.tasks.some((task) => !['completed', 'cancelled'].includes(task.status)) && <span className="group-task-dot" />}</button>
   </header>;

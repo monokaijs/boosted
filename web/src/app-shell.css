@@ -64,6 +64,7 @@
 .chat-list-row { display: flex; position: relative; width: 100%; min-height: 30px; margin-block: 1px; align-items: center; gap: 8px; border-radius: 6px; padding: 5px 9px; color: var(--secondary-foreground); text-align: left; font-size: 13px; line-height: 20px; }
 .chat-list-row > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-agent-row > .agent-avatar { flex: none; }
+.chat-list-row > [data-slot="group-avatar"] { flex: none; }
 .chat-agents-heading { display: flex; align-items: center; justify-content: space-between; }
 .chat-agents-heading > button { color: var(--muted-foreground); }
 .chat-agents-divider { margin: 12px 0; }
@@ -124,8 +125,7 @@
 .project-page-list { display: grid; }
 .project-page-row { display: flex; align-items: center; gap: 16px; width: 100%; padding: 20px 8px; border-bottom: 1px solid var(--border); text-align: left; border-radius: 8px 8px 0 0; }
 .project-page-row:hover { background: var(--surface-sunken); }
-.project-page-icon { display: grid; width: 40px; height: 40px; flex: none; place-items: center; border-radius: 10px; background: var(--secondary); }
-.project-page-icon svg { width: 20px; height: 20px; stroke-width: 1.5; }
+.project-page-icon { width: 40px; height: 40px; flex: none; border-radius: 10px; }
 .project-page-copy { min-width: 0; flex: 1; }
 .project-page-copy strong { display: block; font-size: 14px; font-weight: 500; }
 .project-page-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 4px; font-size: 12px; color: var(--muted-foreground); }
@@ -220,7 +220,6 @@
   .project-page-row { min-width: 0; gap: 12px; padding: 14px 12px; border: 1px solid var(--border); border-radius: 12px; }
   .project-page-row.is-current { border-color: var(--border-strong); background: var(--surface-raised); }
   .project-page-icon { width: 32px; height: 32px; border-radius: 8px; }
-  .project-page-icon svg { width: 18px; height: 18px; }
   .project-page-copy strong { overflow-wrap: anywhere; }
   .project-page-copy small { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; overflow-wrap: anywhere; line-height: 18px; }
   .project-page-copy > span { flex-wrap: wrap; column-gap: 10px; row-gap: 6px; }

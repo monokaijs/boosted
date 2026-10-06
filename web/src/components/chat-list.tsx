@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, CircleAlert, Folder, FolderOpen, FolderPlus, LoaderCircle, MessageSquarePlus, Pin, Plus, Search, Trash2, Ellipsis, X } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert, FolderPlus, LoaderCircle, MessageSquarePlus, Pin, Plus, Search, Trash2, Ellipsis, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ProjectAvatar } from "@/components/project-avatar";
 import { api } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 import { useWorkspaceState } from "@/lib/workspace-state";
@@ -11,6 +12,7 @@ import { createGroupsApi } from "@/features/groups/api";
 import { DeleteGroupDialog } from "@/features/groups/delete-group-dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { GroupDialog } from "@/features/groups/group-dialog";
+import { GroupAvatar } from "@/features/groups/group-avatar";
 import { AgentAvatar } from "@/features/agents/components/session/agent-avatar";
 import type { AssistantSummary } from "@/features/agents/types/assistant";
 import { Separator } from "@/components/ui/separator";
@@ -111,7 +113,7 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
           const members = room.memberIds.map((id) => agentsById.get(id) ?? { id, profile: { name: id, avatar: undefined } });
           const memberNames = members.map((member) => member.profile.name).join(", ");
           return <div key={room.id} className="chat-group-row"><button aria-label={room.name} className={cn("chat-list-row", activeGroupId === room.id && "is-selected")} aria-current={activeGroupId === room.id ? "true" : undefined} onClick={() => { useAppStore.getState().selectGroup(room.id); window.dispatchEvent(new CustomEvent("boosted:open-group", { detail: room.id })); onClose(); }}>
-            <span>{room.name}</span>
+            <GroupAvatar group={room} className="size-6 rounded-md" /><span>{room.name}</span>
             {unreadMarker("group", room.id)}
             {room.stopped && <CircleAlert aria-label="Stopped" className="chat-status" />}
             {!!members.length && <span className="chat-group-avatars" role="img" aria-label={`Participants: ${memberNames}`} title={memberNames}>
@@ -128,7 +130,7 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
         {groups.filter(({ project, entries }) => !needle || entries.length || project.name.toLowerCase().includes(needle)).map(({ project, entries }) => <div key={project.id}>
           <div className="chat-project-heading">
             <button className={cn("chat-project-row", projectId === project.id && "is-current-project")} aria-label={`${expanded.has(project.id) ? "Collapse" : "Expand"} ${project.name}`} aria-expanded={expanded.has(project.id)} onClick={() => toggleProject(project.id)} title={project.repoPath}>
-              {expanded.has(project.id) ? <ChevronDown className="project-chevron" /> : <ChevronRight className="project-chevron" />}{expanded.has(project.id) ? <FolderOpen /> : <Folder />}<span>{project.name}</span>
+              {expanded.has(project.id) ? <ChevronDown className="project-chevron" /> : <ChevronRight className="project-chevron" />}<ProjectAvatar project={project} /><span>{project.name}</span>
             </button>
             <Button variant="ghost" size="icon-sm" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} onClick={() => { useAppStore.getState().selectProject(project); onNewChat(); onClose(); }}><Plus /></Button>
           </div>
