@@ -374,8 +374,11 @@ describe("planning in chats", () => {
   });
 
   it("shows full plan details and progress, approves the current revision, and accepts revisions in task chat", async () => {
+    api.taskEvents.mockResolvedValue([{ id: 9, taskId: "task-a", kind: "status_changed", createdAt: "now", payload: { message: "Plan is ready for approval" } }]);
     renderPanel(<TaskPanel />);
     const plan = await screen.findByRole("region", { name: "Task plan" });
+    const ready = screen.getByText("Plan is ready for approval");
+    expect(ready.compareDocumentPosition(plan) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(plan).getByRole("heading", { name: "Design details" })).toBeInTheDocument();
     expect(within(plan).getByText("all planning context").tagName).toBe("STRONG");
     expect(within(plan).getByText("Inspect the chat")).toHaveClass("line-through");
