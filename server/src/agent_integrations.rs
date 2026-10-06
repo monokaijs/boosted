@@ -1918,6 +1918,12 @@ async fn start_session(state: &AppState, session: Value) -> AppResult<()> {
         state.agent_integrations.sessions.lock().await.remove(&id);
         state.agents.release_group(&agent).await;
         let _ = agents::external_finished(&state, &agent, &context).await;
+        let context_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = agents::prepare_external_context(&context_state, &context).await {
+                tracing::warn!(%error, session_id=%context.session_id, "Unable to prepare external agent context");
+            }
+        });
     });
     Ok(())
 }

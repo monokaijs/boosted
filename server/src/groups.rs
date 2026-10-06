@@ -2008,6 +2008,23 @@ async fn finish(
         }
     }
     touch(state, &c.group_id, "group.activity").await?;
+    let context_state = state.clone();
+    let context_group = c.group_id.clone();
+    tokio::spawn(async move {
+        let result = async {
+            let view = snapshot(&context_state, &context_group).await?;
+            agents::prepare_group_context(
+                &context_state,
+                &context_group,
+                view["messages"].as_array().unwrap(),
+            )
+            .await
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(%error, group_id=%context_group, "Unable to prepare group agent context");
+        }
+    });
     Ok(())
 }
 async fn check_completion(state: &AppState) -> AppResult<()> {

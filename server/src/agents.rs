@@ -9,6 +9,344 @@ const CODING_REVIEW_INSTRUCTIONS: &str = "Review this coding run against the ori
 
 const DEFAULT_PERSONALITY: &str =
     "Friendly, clear, and concise. Be practical about coding work and explain blockers directly.";
+// Codex rejects an input item above 1,048,576 characters. Keep enough headroom for
+// the turn envelope, UTF-16 counting differences, and future protocol fields.
+const AGENT_PROMPT_CHAR_BUDGET: usize = 800_000;
+const BACKGROUND_COMPACTION_TRIGGER_CHARS: usize = 520_000;
+const BACKGROUND_COMPACTION_TARGET_CHARS: usize = 360_000;
+const PREPARED_CONTEXTS: &str = "agent-prepared-contexts";
+
+fn compact_text_middle(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_owned();
+    }
+    let marker = "\n… older detail compacted …\n";
+    let available = limit.saturating_sub(marker.chars().count());
+    let head = available / 2;
+    let tail = available - head;
+    let start: String = value.chars().take(head).collect();
+    let end: String = value
+        .chars()
+        .rev()
+        .take(tail)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{start}{marker}{end}")
+}
+
+fn model_history_message(mut message: Value) -> Value {
+    if let Some(content) = message["content"].as_str() {
+        message["content"] = json!(compact_text_middle(content, 8_000));
+    }
+    if let Some(attachments) = message["attachments"].as_array_mut() {
+        for attachment in attachments {
+            if let Some(fields) = attachment.as_object_mut() {
+                fields.remove("dataUrl");
+            }
+        }
+    }
+    if let Some(actions) = message["actions"].as_array_mut() {
+        for action in actions {
+            if let Some(result) = action["result"].as_str() {
+                action["result"] = json!(compact_text_middle(result, 2_000));
+            }
+        }
+    }
+    message
+}
+
+fn recent_model_history(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .rev()
+        .take(120)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(model_history_message)
+        .collect()
+}
+
+fn json_character_count(value: &Value) -> usize {
+    value.to_string().chars().count()
+}
+
+fn prepare_history(messages: &[Value]) -> Option<(Vec<Value>, usize, usize)> {
+    let mut history = recent_model_history(messages);
+    if json_character_count(&Value::Array(history.clone())) <= BACKGROUND_COMPACTION_TRIGGER_CHARS {
+        return None;
+    }
+
+    let recent_start = history.len().saturating_sub(24);
+    for message in history.iter_mut().take(recent_start) {
+        if let Some(content) = message["content"].as_str() {
+            message["content"] = json!(compact_text_middle(content, 1_200));
+        }
+        if let Some(actions) = message["actions"].as_array_mut() {
+            for action in actions {
+                if let Some(result) = action["result"].as_str() {
+                    action["result"] = json!(compact_text_middle(result, 600));
+                }
+            }
+        }
+    }
+    let compacted = recent_start;
+    let mut omitted = 0;
+    while history.len() > 24
+        && json_character_count(&Value::Array(history.clone())) > BACKGROUND_COMPACTION_TARGET_CHARS
+    {
+        history.remove(0);
+        omitted += 1;
+    }
+    Some((history, compacted.saturating_sub(omitted), omitted))
+}
+
+async fn save_prepared_context(
+    state: &AppState,
+    context_id: String,
+    messages: &[Value],
+) -> AppResult<()> {
+    let source_count = messages.len();
+    let through = messages
+        .last()
+        .and_then(|message| message["id"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let source = messages.to_vec();
+    let prepared = tokio::task::spawn_blocking(move || prepare_history(&source))
+        .await
+        .map_err(|error| AppError::Internal(format!("Context preparation failed: {error}")))?;
+    let Some((history, compacted, omitted)) = prepared else {
+        return Ok(());
+    };
+    if through.is_empty() {
+        return Ok(());
+    }
+    if document(&state.db, PREPARED_CONTEXTS, &context_id)
+        .await
+        .ok()
+        .and_then(|existing| existing["sourceMessageCount"].as_u64())
+        .is_some_and(|count| count > source_count as u64)
+    {
+        return Ok(());
+    }
+    save_document(
+        &state.db,
+        PREPARED_CONTEXTS,
+        &json!({
+            "id": context_id,
+            "sourceMessageCount": source_count,
+            "throughMessageId": through,
+            "history": history,
+            "compactedMessages": compacted,
+            "omittedMessages": omitted,
+            "preparedAt": Utc::now().to_rfc3339()
+        }),
+    )
+    .await
+}
+
+async fn history_for_turn(
+    state: &AppState,
+    agent_id: &str,
+    snapshot: &Value,
+    current: &[Value],
+) -> AppResult<(Vec<Value>, Value)> {
+    let messages = snapshot["messages"].as_array().unwrap();
+    let context_id = groups::context()
+        .map(|context| format!("group:{}", context.group_id))
+        .or_else(|| {
+            agent_integrations::context().map(|context| format!("external:{}", context.session_id))
+        })
+        .unwrap_or_else(|| format!("agent:{agent_id}"));
+    let current_ids: HashSet<_> = current
+        .iter()
+        .filter_map(|message| message["id"].as_str())
+        .collect();
+
+    if let Ok(prepared) = document(&state.db, PREPARED_CONTEXTS, &context_id).await {
+        let count = prepared["sourceMessageCount"].as_u64().unwrap_or(0) as usize;
+        let prefix_matches = count > 0
+            && count <= messages.len()
+            && messages[count - 1]["id"] == prepared["throughMessageId"];
+        if prefix_matches {
+            let mut history = prepared["history"].as_array().cloned().unwrap_or_default();
+            history.extend(messages[count..].iter().cloned().map(model_history_message));
+            history.retain(|message| {
+                message["id"]
+                    .as_str()
+                    .is_none_or(|id| !current_ids.contains(id))
+            });
+            return Ok((
+                history,
+                json!({
+                    "applied": true,
+                    "mode": "background",
+                    "compactedConversationMessages": prepared["compactedMessages"],
+                    "omittedConversationMessages": prepared["omittedMessages"],
+                    "preparedAt": prepared["preparedAt"]
+                }),
+            ));
+        }
+    }
+
+    let mut history = recent_model_history(messages);
+    history.retain(|message| {
+        message["id"]
+            .as_str()
+            .is_none_or(|id| !current_ids.contains(id))
+    });
+    Ok((history, Value::Null))
+}
+
+async fn prepare_direct_context(state: &AppState, agent_id: &str) -> AppResult<()> {
+    let snapshot = state.agents.get(agent_id).await?;
+    save_prepared_context(
+        state,
+        format!("agent:{agent_id}"),
+        snapshot["messages"].as_array().unwrap(),
+    )
+    .await
+}
+
+pub(crate) async fn prepare_external_context(
+    state: &AppState,
+    context: &agent_integrations::ExternalContext,
+) -> AppResult<()> {
+    let snapshot = agent_integrations::conversation(state, context).await?;
+    save_prepared_context(
+        state,
+        format!("external:{}", context.session_id),
+        snapshot["messages"].as_array().unwrap(),
+    )
+    .await
+}
+
+pub(crate) async fn prepare_group_context(
+    state: &AppState,
+    group_id: &str,
+    messages: &[Value],
+) -> AppResult<()> {
+    save_prepared_context(state, format!("group:{group_id}"), messages).await
+}
+
+fn truncate_context_strings(value: &mut Value, limit: usize) {
+    match value {
+        Value::String(text) if text.chars().count() > limit => {
+            *text = text.chars().take(limit).collect();
+        }
+        Value::Array(values) => {
+            for value in values {
+                truncate_context_strings(value, limit);
+            }
+        }
+        Value::Object(fields) => {
+            for value in fields.values_mut() {
+                truncate_context_strings(value, limit);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn serialize_agent_prompt(mut prompt: Value) -> AppResult<String> {
+    let mut serialized = prompt.to_string();
+    if serialized.chars().count() <= AGENT_PROMPT_CHAR_BUDGET {
+        return Ok(serialized);
+    }
+
+    let prepared_compaction = prompt["contextCompaction"].clone();
+    let mut omitted_group_duplicates = 0usize;
+    let mut pruned_followups = 0usize;
+
+    // Group messages are already represented by conversationHistory. The nested
+    // copy is useful to clients, but redundant in the model prompt.
+    if let Some(messages) = prompt
+        .pointer_mut("/groupContext/group/messages")
+        .and_then(Value::as_array_mut)
+    {
+        omitted_group_duplicates = messages.len();
+        messages.clear();
+    }
+
+    // Completed follow-ups remain durable in storage and available through tools;
+    // only active follow-ups need to occupy every new model turn.
+    if let Some(followups) = prompt
+        .get_mut("savedFollowUps")
+        .and_then(Value::as_array_mut)
+    {
+        let before = followups.len();
+        followups.retain(|followup| {
+            matches!(
+                followup["status"].as_str(),
+                Some("waiting" | "ready" | "processing")
+            )
+        });
+        pruned_followups = before - followups.len();
+    }
+
+    // These sections can contain copies of old requests and tool results. Preserve
+    // their structure and identifiers while bounding verbose text before removing
+    // whole conversation messages.
+    for field in [
+        "managedChats",
+        "savedFollowUps",
+        "originalUserMessages",
+        "backgroundEvents",
+        "groupContext",
+    ] {
+        if let Some(value) = prompt.get_mut(field) {
+            truncate_context_strings(value, 4_000);
+        }
+    }
+
+    let history = prompt["conversationHistory"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut lower = 0usize;
+    let mut upper = history.len();
+    while lower < upper {
+        let omitted_history = lower + (upper - lower) / 2;
+        prompt["conversationHistory"] = Value::Array(history[omitted_history..].to_vec());
+        prompt["contextCompaction"] = json!({
+            "applied": true,
+            "omittedConversationMessages": omitted_history,
+            "omittedDuplicateGroupMessages": omitted_group_duplicates,
+            "omittedInactiveFollowUps": pruned_followups,
+            "prepared": prepared_compaction,
+            "notice": "Older conversation detail was compacted to fit the provider input limit. Use saved tools and records when exact earlier details are needed."
+        });
+        serialized = prompt.to_string();
+        if serialized.chars().count() <= AGENT_PROMPT_CHAR_BUDGET {
+            upper = omitted_history;
+        } else {
+            lower = omitted_history + 1;
+        }
+    }
+
+    prompt["conversationHistory"] = Value::Array(history[lower..].to_vec());
+    prompt["contextCompaction"] = json!({
+        "applied": true,
+        "omittedConversationMessages": lower,
+        "omittedDuplicateGroupMessages": omitted_group_duplicates,
+        "omittedInactiveFollowUps": pruned_followups,
+        "prepared": prepared_compaction,
+        "notice": "Older conversation detail was compacted to fit the provider input limit. Use saved tools and records when exact earlier details are needed."
+    });
+    serialized = prompt.to_string();
+    if serialized.chars().count() <= AGENT_PROMPT_CHAR_BUDGET {
+        return Ok(serialized);
+    }
+
+    Err(AppError::BadRequest(
+        "The new agent input is too large even after compacting conversation history".into(),
+    ))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 enum AgentModel {
     #[default]
@@ -547,6 +885,13 @@ async fn start_worker(state: AppState, id: String) -> AppResult<()> {
         })
         .await;
         state.agents.workers.lock().await.remove(&id);
+        let context_state = state.clone();
+        let context_agent = id.clone();
+        tokio::spawn(async move {
+            if let Err(error) = prepare_direct_context(&context_state, &context_agent).await {
+                tracing::warn!(%error, agent_id=%context_agent, "Unable to prepare agent context");
+            }
+        });
     });
     Ok(())
 }
@@ -798,44 +1143,7 @@ async fn run_turn_with_client(
         model_profile.as_object_mut().unwrap().remove("avatar");
         model_profile["hasAvatar"] = json!(true);
     }
-    let history: Vec<_> = snapshot["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .rev()
-        .take(120)
-        .cloned()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|mut message| {
-            if let Some(content) = message["content"].as_str() {
-                message["content"] = json!(
-                    content
-                        .chars()
-                        .rev()
-                        .take(8000)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect::<String>()
-                );
-            }
-            if let Some(attachments) = message["attachments"].as_array_mut() {
-                for attachment in attachments {
-                    attachment.as_object_mut().unwrap().remove("dataUrl");
-                }
-            }
-            if let Some(actions) = message["actions"].as_array_mut() {
-                for action in actions {
-                    if let Some(result) = action["result"].as_str() {
-                        action["result"] = json!(result.chars().take(2000).collect::<String>());
-                    }
-                }
-            }
-            message
-        })
-        .collect();
+    let (history, background_compaction) = history_for_turn(state, id, snapshot, current).await?;
     let mut visual = Vec::new();
     let mut available_images = Vec::new();
     let mut attachment_context = Vec::new();
@@ -881,7 +1189,8 @@ async fn run_turn_with_client(
         "agentIdentity":agent_identity,
         "savedProfile":model_profile,"currentTime":Utc::now().to_rfc3339(),
         "userTimeZone":snapshot["timeZone"].as_str().unwrap_or("UTC"),
-        "conversationHistory":history,"currentUserMessages":current.iter()
+        "conversationHistory":history,"contextCompaction":background_compaction,
+        "currentUserMessages":current.iter()
             .filter(|message| group_context.is_none() || message["senderType"] == "user")
             .map(|message|json!({"id":message["id"],"content":message["content"],"senderId":message["senderId"],"senderName":message["senderName"]})).collect::<Vec<_>>(),
         "currentGroupMessages":current.iter()
@@ -897,7 +1206,7 @@ async fn run_turn_with_client(
         "managedChats":managed_chats(state, id).await?,"savedFollowUps":snapshot["followUps"],
         "recoveryInstructions":"Inspect saved successful actions and already sent replies. Never repeat them after a retry or server restart."
     });
-    let mut input = vec![json!({"type":"text","text":prompt.to_string()})];
+    let mut input = vec![json!({"type":"text","text":serialize_agent_prompt(prompt)?})];
     input.extend(visual);
     let turn = client
         .request(
@@ -2899,6 +3208,106 @@ async fn recover_coding_runs(state: &AppState) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_history_compacts_before_the_transport_limit() {
+        let messages: Vec<_> = (0..100)
+            .map(|index| {
+                json!({
+                    "id": format!("message-{index}"),
+                    "role": if index % 2 == 0 { "user" } else { "assistant" },
+                    "content": "abcdefgh".repeat(1_000)
+                })
+            })
+            .collect();
+        let (history, compacted, omitted) = prepare_history(&messages).unwrap();
+
+        assert!(compacted > 0 || omitted > 0);
+        assert!(
+            json_character_count(&Value::Array(history.clone()))
+                <= BACKGROUND_COMPACTION_TARGET_CHARS
+        );
+        assert_eq!(history.last().unwrap()["id"], "message-99");
+        assert_eq!(
+            history.last().unwrap()["content"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            8_000
+        );
+    }
+
+    #[test]
+    fn final_prompt_guard_accounts_for_json_escaping() {
+        let history: Vec<_> = (0..120)
+            .map(|index| {
+                json!({
+                    "id": format!("message-{index}"),
+                    "role": "user",
+                    "content": "\\\"".repeat(4_000)
+                })
+            })
+            .collect();
+        let serialized = serialize_agent_prompt(json!({
+            "conversationHistory": history,
+            "contextCompaction": null,
+            "managedChats": [],
+            "savedFollowUps": [],
+            "originalUserMessages": [],
+            "backgroundEvents": [],
+            "groupContext": null
+        }))
+        .unwrap();
+        let prompt: Value = serde_json::from_str(&serialized).unwrap();
+
+        assert!(serialized.chars().count() <= AGENT_PROMPT_CHAR_BUDGET);
+        assert_eq!(
+            prompt["conversationHistory"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["id"],
+            "message-119"
+        );
+        assert!(prompt["contextCompaction"]["applied"] == true);
+        assert!(
+            prompt["contextCompaction"]["omittedConversationMessages"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_history_is_reused_before_the_next_turn() {
+        let (_root, state) = fixture().await;
+        let mut messages: Vec<_> = (0..100)
+            .map(|index| {
+                json!({
+                    "id": format!("message-{index}"),
+                    "role": if index % 2 == 0 { "user" } else { "assistant" },
+                    "content": "abcdefgh".repeat(1_000)
+                })
+            })
+            .collect();
+        save_prepared_context(&state, "agent:pock".into(), &messages)
+            .await
+            .unwrap();
+        let current = json!({"id":"message-100","role":"user","content":"Continue"});
+        messages.push(current.clone());
+        let mut snapshot = state.agents.get("pock").await.unwrap();
+        snapshot["messages"] = json!(messages);
+
+        let (history, metadata) = history_for_turn(&state, "pock", &snapshot, &[current])
+            .await
+            .unwrap();
+
+        assert_eq!(metadata["mode"], "background");
+        assert!(history.iter().all(|message| message["id"] != "message-100"));
+        assert!(json_character_count(&Value::Array(history)) <= BACKGROUND_COMPACTION_TARGET_CHARS);
+    }
+
     #[cfg(unix)]
     async fn coding_fixture() -> (tempfile::TempDir, AppState, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
