@@ -22,7 +22,7 @@ vi.mock("@/hooks/use-notification-navigation", () => ({ useNotificationNavigatio
 vi.mock("@/lib/updater", () => ({ useAppUpdateState: () => ({ phase: "idle" }), formatUpdateProgress: () => undefined }));
 vi.mock("@/features/agents/agents-panel", () => ({ openProvidersEvent: "boosted:open-providers", AgentsPanel: ({ selectedId, selectAgent, createAgentOpen, onCreateAgentOpenChange }: { selectedId: string; selectAgent(id: string): void; createAgentOpen: boolean; onCreateAgentOpenChange(open: boolean): void }) => <><p>Agent conversation {selectedId}</p><button onClick={() => selectAgent("pock")}>Switch to Pock</button><CreateAgentDialog shell={{ createAgent: apiMock.createAgent } as unknown as SessionShellState} open={createAgentOpen} onOpenChange={onCreateAgentOpenChange} /></> }));
 vi.mock("@/features/groups/group-panel", () => ({ GroupPanel: ({ groupId, headerTarget }: { groupId: string; headerTarget?: HTMLElement | null }) => <>{headerTarget && createPortal(<h1>Build team</h1>, headerTarget)}<p>Group conversation {groupId}</p></> }));
-vi.mock("@/components/settings-page", () => ({ SettingsPage: ({ onClose }: { onClose(): void }) => <><h1>Settings page content</h1><button onClick={onClose}>Close settings</button></> }));
+vi.mock("@/components/settings-page", () => ({ SettingsPage: ({ section, onClose, onSectionChange, onBack }: { section?: string; onClose(): void; onSectionChange(section: string): void; onBack(): void }) => <><h1>Settings page content</h1><p>Settings section {section ?? "categories"}</p><button onClick={() => onSectionChange("notifications")}>Open notification settings</button><button onClick={onBack}>Settings index</button><button onClick={onClose}>Close settings</button></> }));
 vi.mock("@/components/create-dialogs", () => ({ ForcePasswordDialog: () => null, NewTaskDialog: () => null, OpenProjectDialog: () => null }));
 vi.mock("@/components/machine-manager", () => ({ MachineSwitcher: () => <span>Test machine</span> }));
 vi.mock("@/components/panels/chat-panel", () => ({ NewChatPanel: () => <h1>Start a conversation</h1>, TaskPanel: () => <p>Task detail content</p> }));
@@ -70,6 +70,23 @@ beforeEach(() => {
 });
 
 describe("page navigation and conversations", () => {
+  it("opens mobile Settings at categories, routes subpages, and resets on repeated entry", async () => {
+    vi.stubGlobal("innerWidth", 393);
+    renderShell();
+    const settings = within(screen.getByRole("navigation", { name: "Mobile navigation" })).getByRole("button", { name: "Settings" });
+    fireEvent.click(settings);
+    expect(await screen.findByText("Settings section categories")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open notification settings" }));
+    expect(window.location.hash).toBe("#settings/notifications");
+    expect(screen.getByText("Settings section notifications")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    fireEvent.click(within(screen.getByRole("navigation", { name: "Mobile navigation" })).getByRole("button", { name: "Settings" }));
+    expect(await screen.findByText("Settings section categories")).toBeInTheDocument();
+    act(() => window.dispatchEvent(new CustomEvent("boosted:open-settings", { detail: "codex" })));
+    expect(window.location.hash).toBe("#settings/codex");
+    expect(screen.getByText("Settings section codex")).toBeInTheDocument();
+  });
+
   it("starts a new chat in the project using its plus button without expanding the accordion", async () => {
     useAppStore.setState({ selectedCodexChatId: "old" });
     renderShell();

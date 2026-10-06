@@ -53,6 +53,16 @@ beforeEach(() => {
   });
 });
 
+it("keeps the Codex composer outside transcript scroll ownership", async () => {
+  const { container } = renderPanel(<CodexChatPanel threadId="chat-a" />);
+  const input = await screen.findByPlaceholderText("Message Codex...");
+  const transcript = container.querySelector(".codex-thread-viewport")!;
+  expect(transcript).not.toContainElement(input);
+  expect(container.querySelector(".codex-composer-footer")?.parentElement).toBe(transcript.parentElement);
+  fireEvent.change(input, { target: { value: "Multiple\nlines\nremain editable" } });
+  expect(input).toHaveValue("Multiple\nlines\nremain editable");
+});
+
 describe("sending in place", () => {
   for (const newChat of [true, false]) {
     describe(newChat ? "new chat" : "task chat", () => {

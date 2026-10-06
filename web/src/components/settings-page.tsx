@@ -1,9 +1,8 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ChartNoAxesCombined, Bell, Bot, Code2, ExternalLink, GitBranch, Globe2, LoaderCircle, Menu, Pencil, Plug, Plus, RefreshCw, Search, Server, Settings2, Shield, Trash2, UserPlus, Users, X } from "lucide-react";
+import { ArrowLeft, ChartNoAxesCombined, Bell, Bot, Code2, ExternalLink, GitBranch, Globe2, LoaderCircle, ChevronRight, Pencil, Plug, Plus, RefreshCw, Search, Server, Settings2, Shield, Trash2, UserPlus, Users, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
@@ -25,7 +24,9 @@ const UsageSettings = lazy(() => import("./settings-usage").then((m) => ({ defau
 const CodexSettings = lazy(() => import("./settings-codex").then((m) => ({ default: m.CodexSettings })));
 const ProvidersSettings = lazy(() => import("@/features/agents/providers-settings").then((m) => ({ default: m.ProvidersSettings })));
 
-export type SettingsSectionId = "providers" | "connections" | "notifications" | "web" | "application" | "team" | "usage" | "workspace" | "integrations" | "codex";
+import { useMobileLayout } from "@/hooks/use-mobile-layout";
+import type { SettingsSectionId } from "@/lib/navigation";
+export type { SettingsSectionId } from "@/lib/navigation";
 type Section = SettingsSectionId;
 
 const sectionGroups: { label: string; sections: { id: Section; label: string; icon: typeof Settings2 }[] }[] = [
@@ -696,19 +697,37 @@ const sectionDescriptions: Record<Section, string> = {
   usage: "Token activity across agents, groups, and the shared Codex account.",
 };
 
-export function SettingsPage({ section, onSectionChange, onClose }: { section: Section; onSectionChange: (section: Section) => void; onClose: () => void }) {
+export function SettingsPage({ section: requestedSection, onSectionChange, onBack, onClose }: { section?: Section; onSectionChange: (section: Section) => void; onBack: () => void; onClose: () => void }) {
+  const isMobile = useMobileLayout();
+  const section = requestedSection ?? "connections";
+  const showCategories = isMobile && !requestedSection;
+  const lastSection = useRef<Section | undefined>(requestedSection);
+  const categoryScrollTop = useRef(0);
   const [search, setSearch] = useState("");
-  const [navigationOpen, setNavigationOpen] = useState(false);
   const projectId = useAppStore((state) => state.selectedProjectId);
   const scrollRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
-  const navigationRef = useRef<HTMLDivElement>(null);
+  const navigationRef = useRef<HTMLElement>(null);
   const selected = sectionGroups.flatMap((group) => group.sections).find((item) => item.id === section)!;
   const scope = sectionGroups.find((group) => group.sections.some((item) => item.id === section))!.label;
   const query = search.trim().toLocaleLowerCase();
   const visibleGroups = sectionGroups.map((group) => ({ ...group, sections: group.sections.filter((item) => `${group.label} ${item.label} ${sectionDescriptions[item.id]}`.toLocaleLowerCase().includes(query)) }));
-  useEffect(() => { scrollRef.current?.scrollTo?.(0, 0); headingRef.current?.focus({ preventScroll: true }); }, [section]);
-  function select(id: Section) { onSectionChange(id); setNavigationOpen(false); }
+  useEffect(() => {
+    scrollRef.current?.scrollTo?.(0, showCategories ? categoryScrollTop.current : 0);
+    const previous = lastSection.current;
+    lastSection.current = requestedSection ?? previous;
+    const target = showCategories && previous ? navigationRef.current?.querySelector<HTMLButtonElement>(`[data-section="${previous}"]`) : undefined;
+    (target ?? headingRef.current)?.focus({ preventScroll: true });
+    if (target && scrollRef.current) {
+      // Reveal the returned category only within Settings; never pan the document.
+      const bounds = scrollRef.current.getBoundingClientRect();
+      const row = target.getBoundingClientRect();
+      const top = bounds.top + (scrollRef.current.querySelector(".settings-mobile-controls")?.getBoundingClientRect().height ?? 0);
+      if (row.top < top) scrollRef.current.scrollTop += row.top - top;
+      else if (row.bottom > bounds.bottom) scrollRef.current.scrollTop += row.bottom - bounds.bottom;
+    }
+  }, [requestedSection, showCategories]);
+  function select(id: Section) { categoryScrollTop.current = scrollRef.current?.scrollTop ?? 0; onSectionChange(id); }
   const navigation = <>
     <div className="settings-sidebar-heading"><h2>Settings</h2><Button variant="ghost" size="icon-sm" type="button" aria-label="Back to workspace" title="Back to workspace" onClick={onClose}><ArrowLeft /></Button></div>
     <div className="settings-search"><Search /><Input aria-label="Search settings" placeholder="Search settings" value={search} onChange={(event) => setSearch(event.target.value)} />{search && <Button variant="ghost" size="icon-sm" type="button" aria-label="Clear settings search" onClick={() => setSearch("")}><X /></Button>}</div>
@@ -719,9 +738,16 @@ export function SettingsPage({ section, onSectionChange, onClose }: { section: S
     <p className="settings-sidebar-scope">{projectId ? "Workspace settings apply to the open repository." : "Open a workspace to configure repository settings."}</p>
   </>;
   return <section className="settings-page" aria-label="Settings">
-    <aside className="settings-sidebar immersive-panel">{navigation}</aside>
+    {!isMobile && <aside className="settings-sidebar immersive-panel">{navigation}</aside>}
     <div className="settings-main" ref={scrollRef}>
-      <div className="settings-mobile-controls"><Button variant="ghost" size="sm" onClick={onClose}><ArrowLeft />Workspace</Button><Button variant="ghost" size="sm" aria-label="Browse settings sections" onClick={() => setNavigationOpen(true)}><Menu />Sections</Button></div>
+      {isMobile && <div className="settings-mobile-controls"><Button variant="ghost" size="sm" onClick={showCategories ? onClose : onBack}><ArrowLeft />{showCategories ? "Workspace" : "Settings"}</Button></div>}
+      {showCategories ? <>
+        <div className="settings-page-heading"><h1 ref={headingRef} tabIndex={-1}>Settings</h1><p>Choose a category to manage your device, machine, or workspace.</p></div>
+        <div className="settings-content settings-categories">
+          <div className="settings-search"><Search /><Input aria-label="Search settings" placeholder="Search settings" value={search} onChange={(event) => setSearch(event.target.value)} />{search && <Button variant="ghost" size="icon-sm" aria-label="Clear settings search" onClick={() => setSearch("")}><X /></Button>}</div>
+          <nav ref={navigationRef} aria-label="Settings sections">{visibleGroups.map((group) => group.sections.length > 0 && <div key={group.label} className="settings-category-group"><h2>{group.label}</h2><div className="settings-group">{group.sections.map(({ id, label, icon: Icon }) => <button type="button" key={id} data-section={id} aria-label={label} aria-describedby={`settings-category-${id}-description`} className="settings-category" onClick={() => select(id)}><Icon /><span><span>{label}</span><small id={`settings-category-${id}-description`}>{sectionDescriptions[id]}</small></span><ChevronRight /></button>)}</div></div>)}{!visibleGroups.some((group) => group.sections.length) && <p className="settings-search-empty">No settings match your search.</p>}</nav>
+        </div>
+      </> : <>
       <div className="settings-page-heading"><span className="settings-scope-label">{scope} settings</span><h1 ref={headingRef} tabIndex={-1}>{selected.label === "General" ? "Workspace" : selected.label}</h1><p>{sectionDescriptions[section]}</p></div>
       <Suspense fallback={<div className="settings-content"><p role="status" className="settings-note">Loading settings…</p></div>}><div key={section}>
         {section === "providers" && <ProvidersSettings />}
@@ -735,7 +761,7 @@ export function SettingsPage({ section, onSectionChange, onClose }: { section: S
         {section === "integrations" && <IntegrationsSettings />}
         {section === "codex" && (projectId ? <CodexSettings key={projectId} /> : <div className="settings-content"><p className="settings-empty">Open a workspace to configure Codex instructions and MCP servers.</p></div>)}
       </div></Suspense>
+      </>}
     </div>
-    <Dialog open={navigationOpen} onOpenChange={setNavigationOpen}><DialogContent ref={navigationRef} className="settings-navigation-drawer immersive-panel" onOpenAutoFocus={(event) => { event.preventDefault(); navigationRef.current?.focus(); }}><DialogHeader className="sr-only"><DialogTitle>Settings sections</DialogTitle><DialogDescription>Choose a settings section.</DialogDescription></DialogHeader>{navigation}</DialogContent></Dialog>
   </section>;
 }

@@ -13,6 +13,7 @@ import {
   useExternalStoreRuntime,
 } from "@assistant-ui/react";
 import { ArrowDown, Bot, ChevronDown, ChevronRight, LoaderCircle, MessageSquareText, Plus, Send, Square, UserRound, Wrench, X } from "lucide-react";
+import { CodexThreadLayout } from "./codex-thread-layout";
 import { CodexMessageText } from "@/components/assistant-ui/codex-message-content";
 import { CodexQuestionForm } from "@/components/assistant-ui/codex-question-form";
 import { CodexModeSelect } from "@/components/assistant-ui/codex-mode-select";
@@ -338,14 +339,10 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
       <AssistantRuntimeProvider runtime={runtime}>
         <CodexDraftSync runtime={runtime} sessionKey={sessionKey} />
         <CodexAsyncQuestionProvider value={{ requestScope: `${api.profileId}:${thread.chat.id}`, answered: answeredQuestions, reply: replyToQuestions }}>
-        <ThreadPrimitive.Root className="min-h-0 flex-1">
-          <ThreadPrimitive.Viewport className="codex-thread-viewport relative flex h-full flex-col overflow-y-auto px-4">
-          <ThreadPrimitive.Empty><div className="empty-state min-h-48 flex-1"><MessageSquareText className="size-8" /><p>Send a message to continue this Codex chat.</p></div></ThreadPrimitive.Empty>
-          <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
-          <ThreadPrimitive.ViewportFooter className="codex-composer-footer sticky bottom-0 z-10 mt-auto bg-[var(--surface)] pb-3 pt-2">
+        <CodexThreadLayout footer={<>
             <ThreadPrimitive.ScrollToBottom asChild behavior="smooth"><Button className="absolute -top-9 right-0 z-20 shrink-0 rounded-full shadow-lg" variant="secondary" size="icon-sm" title="Scroll to bottom"><ArrowDown /></Button></ThreadPrimitive.ScrollToBottom>
             <div className="mx-auto w-full max-w-3xl">
-              {approvals.data?.map((approval) => approval.method === "item/tool/requestUserInput"
+              <div className="codex-composer-requests">{approvals.data?.map((approval) => approval.method === "item/tool/requestUserInput"
                 ? <div key={approval.id} className="mb-2"><CodexQuestionForm requestId={`${api.profileId}:${thread.chat.id}:approval:${approval.id}`} questions={approval.params.questions ?? []} onSubmit={async (answers) => { await api.answerCodexQuestions(thread.chat.id, approval.id, answers); void approvals.refetch(); }} /></div>
                 : <div className="mb-2 rounded-md border border-border bg-secondary px-3 py-2 text-xs" key={approval.id}>
                 <p className="font-medium">{approval.method.includes("commandExecution") ? "Command approval requested" : "File change approval requested"}</p>
@@ -353,6 +350,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
                 <div className="flex justify-end gap-2">{(["decline", "accept"] as const).map((decision) => <Button key={decision} size="sm" variant={decision === "accept" ? "default" : "outline"} onClick={async () => { try { await api.answerCodexApproval(thread.chat.id, approval.id, decision); await approvals.refetch(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not answer approval."); } }}>{decision === "accept" ? "Approve" : "Decline"}</Button>)}</div>
               </div>)}
               {error && <div className="mb-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-[11px] text-destructive">{error}</div>}
+              </div>
               <ComposerPrimitive.Root className="rounded-lg border border-border p-2 focus-within:border-ring/60" onSubmit={(event) => {
                 if (attachments.length > 0 && runtime.thread.composer.getState().isEmpty) { event.preventDefault(); sendAttachmentMessage(); }
               }}>
@@ -382,9 +380,10 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
                 </div>
               </ComposerPrimitive.Root>
             </div>
-          </ThreadPrimitive.ViewportFooter>
-          </ThreadPrimitive.Viewport>
-        </ThreadPrimitive.Root>
+          </>}>
+          <ThreadPrimitive.Empty><div className="empty-state min-h-48 flex-1"><MessageSquareText className="size-8" /><p>Send a message to continue this Codex chat.</p></div></ThreadPrimitive.Empty>
+          <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
+        </CodexThreadLayout>
         </CodexAsyncQuestionProvider>
       </AssistantRuntimeProvider>
     </WorkspaceFileProvider>

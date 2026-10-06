@@ -165,7 +165,7 @@
 .new-task-send-button:disabled { background: #999; opacity: 0.6; }
 .new-task-send-label { display: none; }
 .new-chat-hint { font-size: 10px; color: var(--muted-foreground); text-align: center; margin-top: 8px; }
-.main-surface .chat-scroll, .main-surface .codex-thread-viewport { padding-inline: max(24px, calc((100% - 736px) / 2)); }
+.main-surface .chat-scroll, .main-surface .codex-thread-viewport, .main-surface .codex-composer-footer { padding-inline: max(24px, calc((100% - 736px) / 2)); }
 .main-surface .chat-composer-shell { width: min(100%, 768px); margin-inline: auto; }
 .mobile-page-navigation, .mobile-chats-heading { display: none; }
 .shell-titlebar[hidden], .main-surface[hidden], .right-navigation[hidden], .navigation-rail[hidden], .mobile-page-navigation[hidden] { display: none; }
@@ -230,7 +230,7 @@
   .projects-page .page-empty > button { min-height: 44px; }
   .workspace-tools { position: absolute; inset: 0 auto var(--panel-gutter) var(--panel-gutter); width: min(380px, calc(100% - 24px)); margin: 0; z-index: 21; box-shadow: 12px 0 32px #0005; }
   .mobile-tools-scrim { display: block; position: absolute; inset: 0; z-index: 20; background: #0006; }
-  .main-surface .chat-scroll, .main-surface .codex-thread-viewport { padding-inline: 16px; }
+  .main-surface .chat-scroll, .main-surface .codex-thread-viewport, .main-surface .codex-composer-footer { padding-inline: 16px; }
 }
 @media (max-width: 640px) {
   .new-task-title { font-size: 22px; }
@@ -252,3 +252,10 @@
   .project-context > span { max-width: 120px; }
 }
 .chat-show-all { color: var(--muted-foreground); font-size: 12px; }
+
+/* Keep a multiline composer usable when a landscape keyboard leaves little room. */
+.codex-thread-root { container: codex-thread / size; }
+.codex-composer-requests { max-height: min(240px, 30cqh); overflow-y: auto; overscroll-behavior: contain; }
+@container codex-thread (max-height: 280px) {
+  .codex-composer-footer textarea { min-height: 28px; max-height: 64px; }
+}

@@ -25,11 +25,11 @@ import { SettingsPage, type SettingsSectionId } from "./settings-page";
 import { readNotificationSettings } from "@/lib/notifications";
 
 const account = { id: "account-a", providerId: "codex", displayName: "Work account", status: "CONNECTED", settings: { codexHome: "/isolated/codex" }, runtimeDefaults: { permissionMode: "default", reasoningEffort: "medium" }, createdAt: "2026-10-01", updatedAt: "2026-10-01" };
-function renderPage(initial: SettingsSectionId = "connections") {
+function renderPage(initial: SettingsSectionId | undefined = "connections") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   function Harness() {
-    const [section, setSection] = useState(initial);
-    return <SettingsPage section={section} onSectionChange={setSection} onClose={mocks.close} />;
+    const [section, setSection] = useState<SettingsSectionId | undefined>(initial);
+    return <SettingsPage section={section} onSectionChange={setSection} onBack={() => setSection(undefined)} onClose={mocks.close} />;
   }
   return render(<QueryClientProvider client={client}><Harness /></QueryClientProvider>);
 }
@@ -186,16 +186,26 @@ describe("settings page", () => {
     await waitFor(() => expect(mocks.updateGlobalSettings).toHaveBeenCalledWith({ webPort: 9000, webUiEnabled: true, allowedIps: ["192.0.2.10", "2001:db8::10"] }));
   });
 
-  it("provides a dismissible section drawer and handles a missing workspace", async () => {
+  it("opens mobile categories as individual screens and restores focus on back", async () => {
+    vi.stubGlobal("innerWidth", 393);
     mocks.state.selectedProjectId = undefined;
-    renderPage();
-    fireEvent.click(screen.getByRole("button", { name: "Browse settings sections" }));
-    const drawer = screen.getByRole("dialog", { name: "Settings sections" });
-    expect(drawer).toHaveFocus();
-    expect(within(drawer).getByRole("textbox", { name: "Search settings" })).not.toHaveFocus();
-    fireEvent.click(within(drawer).getByRole("button", { name: "Codex" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    expect(screen.getByText("Open a workspace to configure Codex instructions and MCP servers.")).toBeInTheDocument();
+    renderPage("connections");
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();
     expect(mocks.workspaceCodexSettings).not.toHaveBeenCalled();
+    const category = screen.getByRole("button", { name: /^Codex$/ });
+    fireEvent.click(category);
+    expect(screen.queryByRole("navigation", { name: "Settings sections" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Codex" })).toHaveFocus();
+    expect(screen.getByText("Open a workspace to configure Codex instructions and MCP servers.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("button", { name: /^Codex$/ })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: /^Notifications$/ }));
+    expect(screen.getByRole("heading", { level: 1, name: "Notifications" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    expect(mocks.close).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    vi.unstubAllGlobals();
   });
 });

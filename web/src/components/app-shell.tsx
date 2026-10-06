@@ -26,7 +26,7 @@ import { useMobileLayout } from "@/hooks/use-mobile-layout";
 import { useAppStore } from "@/lib/store";
 import { chatProject } from "@/lib/chat-project";
 import { conversationQueryOptions } from "@/lib/query-client";
-import { destinations, navigate, pageFromHash, type AppPage } from "@/lib/navigation";
+import { destinations, navigate, navigateSettings, backToSettings, settingsSectionFromHash, pageFromHash, type AppPage } from "@/lib/navigation";
 import { formatUpdateProgress, useAppUpdateState } from "@/lib/updater";
 
 const SettingsPage = lazy(() => import("@/components/settings-page").then((m) => ({ default: m.SettingsPage })));
@@ -49,7 +49,7 @@ export function AppShell() {
   const [page, setPage] = useState(pageFromHash);
   const isMobile = useMobileLayout();
   const [mobileChatOpen, setMobileChatOpen] = useState(() => window.location.hash === "#home");
-  const [settingsSection, setSettingsSection] = useState<SettingsSectionId>(() => window.location.hash === "#usage" ? "usage" : "connections");
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId | undefined>(settingsSectionFromHash);
   const previousPage = useRef<AppPage>("home");
   const previousMobileChatOpen = useRef(false);
   const [view, setView] = useState<ContentView>(() => useAppStore.getState().selectedGroupId ? "group" : "chat");
@@ -83,11 +83,12 @@ export function AppShell() {
         : view === "chat" && chatId ? { kind: "codex", id: chatId } : undefined
     : undefined);
 
-  const goTo = useCallback((next: AppPage) => {
+  const goTo = useCallback((next: AppPage, section?: SettingsSectionId) => {
     if (page !== "settings") { previousPage.current = page; previousMobileChatOpen.current = mobileChatOpen; }
     setPage(next);
     setMobileChatOpen(next === "home");
-    navigate(next);
+    if (next === "settings") { setSettingsSection(section); navigateSettings(section); }
+    else navigate(next);
     setMobileChatsOpen(false);
   }, [page, mobileChatOpen, setMobileChatsOpen]);
   const openChats = useCallback(() => {
@@ -104,7 +105,7 @@ export function AppShell() {
     setView("chat");
     goTo("home");
   }, [goTo]);
-  const openProviderSettings = useCallback(() => { setSettingsSection("providers"); goTo("settings"); }, [goTo]);
+  const openProviderSettings = useCallback(() => { goTo("settings", "providers"); }, [goTo]);
   const selectAgent = useCallback((id: string) => {
     setSelectedAgentId(id);
     localStorage.setItem(`boosted.selected-agent.${profileId}`, id);
@@ -151,8 +152,7 @@ export function AppShell() {
   useEffect(() => {
     const openSettings = (event: Event) => {
       const section = (event as CustomEvent<SettingsSectionId>).detail;
-      if (section) setSettingsSection(section);
-      goTo("settings");
+      goTo("settings", section);
     };
     window.addEventListener(openProvidersEvent, openProviderSettings);
     window.addEventListener("boosted:open-settings", openSettings);
@@ -173,7 +173,7 @@ export function AppShell() {
   }, [chatId, activeThread.data, projects.data]);
 
   useEffect(() => {
-    const hashChange = () => { if (window.location.hash === "#usage") setSettingsSection("usage"); setPage(pageFromHash()); setMobileChatOpen(window.location.hash === "#home"); setMobileChatsOpen(false); };
+    const hashChange = () => { setSettingsSection(settingsSectionFromHash()); setPage(pageFromHash()); setMobileChatOpen(window.location.hash === "#home"); setMobileChatsOpen(false); };
     window.addEventListener("hashchange", hashChange);
     return () => window.removeEventListener("hashchange", hashChange);
   }, [setMobileChatsOpen]);
@@ -261,7 +261,7 @@ export function AppShell() {
         {page === "scheduled" && <ScheduledPage />}
         {page === "projects" && <ProjectsPage onOpenProject={() => setProjectDialogOpen(true)} onSelect={newChat} />}
         {page === "tasks" && (view === "task" && taskId ? <div className="page-detail"><div className="page-detail-back"><Button variant="ghost" size="sm" onClick={() => setView("chat")}><ArrowLeft />All tasks</Button></div><TaskPanel key={taskId} /></div> : <TaskboardPanel />)}
-        {page === "settings" && <SettingsPage section={settingsSection} onSectionChange={setSettingsSection} onClose={() => { if (isMobile && previousPage.current === "home" && !previousMobileChatOpen.current) openChats(); else goTo(previousPage.current); }} />}
+        {page === "settings" && <SettingsPage section={settingsSection} onSectionChange={(section) => { setSettingsSection(section); navigateSettings(section); }} onBack={() => { setSettingsSection(undefined); backToSettings(); }} onClose={() => { if (isMobile && previousPage.current === "home" && !previousMobileChatOpen.current) openChats(); else goTo(previousPage.current); }} />}
       </Suspense></div>
       </div>
     </section>

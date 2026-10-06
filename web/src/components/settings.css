@@ -21,11 +21,11 @@
 .settings-search > input, .settings-list-search > input { height: 100%; min-width: 0; padding: 0; border: 0; background: transparent; box-shadow: none; }
 .settings-search > input:focus-visible, .settings-list-search > input:focus-visible { outline: none; box-shadow: none; }
 .settings-search > button { flex: none; width: 24px; height: 24px; padding: 0; }
-.settings-page .settings-nav, .settings-navigation-drawer .settings-nav { display: block; min-height: 0; overflow-y: auto; flex: 1; }
+.settings-page .settings-nav { display: block; min-height: 0; overflow-y: auto; flex: 1; }
 .settings-nav-group { display: grid; gap: 2px; }
-.settings-page .settings-nav-group + .settings-nav-group, .settings-navigation-drawer .settings-nav-group + .settings-nav-group { margin-top: 20px; padding-top: 0; border: 0; }
-.settings-page .settings-nav-heading, .settings-navigation-drawer .settings-nav-heading { padding: 0 12px 8px; color: var(--muted-foreground); font-size: 12px; font-weight: 400; letter-spacing: normal; text-transform: none; }
-.settings-page .settings-nav-item, .settings-navigation-drawer .settings-nav-item { width: 100%; height: 34px; justify-content: flex-start; gap: 10px; border-radius: 8px; padding: 0 12px; color: var(--secondary-foreground); font-size: 13px; font-weight: 400; }
+.settings-page .settings-nav-group + .settings-nav-group { margin-top: 20px; padding-top: 0; border: 0; }
+.settings-page .settings-nav-heading { padding: 0 12px 8px; color: var(--muted-foreground); font-size: 12px; font-weight: 400; letter-spacing: normal; text-transform: none; }
+.settings-page .settings-nav-item { width: 100%; height: 34px; justify-content: flex-start; gap: 10px; border-radius: 8px; padding: 0 12px; color: var(--secondary-foreground); font-size: 13px; font-weight: 400; }
 .settings-nav-item[aria-current="page"] { background: var(--accent); color: var(--foreground); }
 .settings-nav-item svg { width: 16px; height: 16px; stroke-width: 1.5; }
 .settings-sidebar-scope, .settings-search-empty { padding: 16px 12px 0; color: var(--muted-foreground); font-size: 12px; line-height: 18px; }
@@ -103,7 +103,6 @@
 .settings-quota-title span { color: var(--muted-foreground); text-transform: capitalize; }
 .settings-quota-window { position: relative; padding: 16px; }
 .settings-mobile-controls { display: none; }
-.settings-navigation-drawer { background: var(--sidebar); }
 @container settings-main (max-width: 600px) {
   .settings-row:has(input:not(.settings-port-input)), .settings-row:has([role="combobox"]), .settings-row:has(.settings-path) { flex-direction: column; align-items: stretch; gap: 12px; }
   .settings-row:has(input:not(.settings-port-input)) .settings-row-control, .settings-row:has([role="combobox"]) .settings-row-control, .settings-row:has(.settings-path) .settings-row-control { max-width: 100%; }
@@ -115,30 +114,9 @@
 @media (max-width: 900px) {
   .settings-page { grid-template-columns: minmax(0, 1fr); }
   .settings-page > .settings-sidebar { display: none; }
-  .settings-mobile-controls { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; }
+  .settings-mobile-controls { position: sticky; top: 0; z-index: 2; background: var(--surface); display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; }
   .settings-page-heading { padding-top: 16px; padding-bottom: 24px; }
-  .settings-navigation-drawer.dialog-content {
-    --drawer-top-gap: max(var(--panel-gutter), env(safe-area-inset-top));
-    --drawer-bottom-gap: max(var(--panel-gutter), var(--safe-area-bottom));
-    position: fixed;
-    inset: calc(var(--app-viewport-top, 0px) + var(--drawer-top-gap)) auto auto max(var(--panel-gutter), env(safe-area-inset-left));
-    transform: none;
-    translate: none;
-    width: min(320px, calc(100vw - max(var(--panel-gutter), env(safe-area-inset-left)) - max(var(--panel-gutter), env(safe-area-inset-right))));
-    max-width: 320px;
-    height: calc(var(--app-viewport-height, 100dvh) - var(--drawer-top-gap) - var(--drawer-bottom-gap));
-    max-height: none;
-    display: flex;
-    flex-direction: column;
-    gap: 0;
-    overflow: hidden;
-    padding: 24px 8px 16px;
-    border: 0;
-    border-radius: var(--panel-radius);
-  }
-  .settings-navigation-drawer .settings-sidebar-heading { padding-right: 40px; }
-  .settings-navigation-drawer .settings-sidebar-heading > button { display: none; }
-  .settings-navigation-drawer .settings-nav-item { height: 40px; }
+
 }
 @media (max-width: 599px) {
   .settings-page .settings-content, .settings-page-heading { width: calc(100% - 32px); }
@@ -161,3 +139,16 @@
 .settings-page .settings-nav-heading { font-size: 10px; font-weight: 500; letter-spacing: .09em; text-transform: uppercase; }
 .settings-page .settings-nav-item-active { font-weight: 500; }
 @media (max-width: 599px) { .settings-row { padding: 16px; } .settings-tabs > button { padding: 7px 10px; } }
+
+.settings-categories .settings-search { height: 44px; margin: 0 0 24px; }
+.settings-category-group + .settings-category-group { margin-top: 24px; }
+.settings-category-group h2 { margin: 0 4px 10px; color: var(--muted-foreground); font-size: 12px; }
+.settings-category { position: relative; display: flex; width: 100%; min-height: 72px; align-items: center; gap: 14px; padding: 16px; text-align: left; }
+.settings-category:hover { background: var(--accent); }
+.settings-category:focus-visible { outline: 2px solid var(--ring); outline-offset: -3px; border-radius: 10px; }
+.settings-category > svg { width: 20px; height: 20px; flex: none; color: var(--muted-foreground); }
+.settings-category > svg:last-child { width: 16px; height: 16px; }
+.settings-category > span { flex: 1; min-width: 0; }
+.settings-category > span > span { display: block; font-size: 14px; }
+.settings-category small { display: block; margin-top: 4px; color: var(--muted-foreground); font-size: 12px; line-height: 18px; }
+.settings-mobile-controls > button { min-height: 44px; }
