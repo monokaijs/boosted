@@ -24,6 +24,10 @@ def emit(message):
 
 
 def response(thread):
+    path = home / "sessions" / (thread["id"] + ".json")
+    path.parent.mkdir(exist_ok=True)
+    thread["path"] = str(path)
+    path.write_text(json.dumps(thread))
     return {"thread": copy.deepcopy(thread), "model": thread["model"], "reasoningEffort": "medium"}
 
 
@@ -40,6 +44,11 @@ for line in sys.stdin:
     try:
         if method == "initialize":
             pass
+        elif method == "account/rateLimits/read":
+            limits = home / "test-limits.json"
+            result = json.loads(limits.read_text()) if limits.exists() else {"rateLimits": {"primary": {"usedPercent": 10}}}
+            if result.get("error"):
+                raise ValueError(result["error"])
         elif method == "model/list":
             result = {"data": models}
         elif method == "thread/start":
@@ -50,6 +59,9 @@ for line in sys.stdin:
         elif method == "thread/name/set":
             threads[params["threadId"]]["name"] = params["name"]
         elif method in ("thread/read", "thread/resume"):
+            if params["threadId"] not in threads:
+                path = Path(params.get("path") or home / "sessions" / (params["threadId"] + ".json"))
+                threads[params["threadId"]] = json.loads(path.read_text())
             result = response(threads[params["threadId"]])
         elif method == "thread/list":
             result = {"data": [thread for thread in threads.values() if not thread.get("archived")]}
@@ -58,16 +70,23 @@ for line in sys.stdin:
         elif method == "turn/start":
             thread = threads[params["threadId"]]
             text = params["input"][0]["text"]
+            if text == "REJECT_QUOTA":
+                raise ValueError("usage_limit_reached")
             if text == "REJECT_RUN":
                 raise ValueError("Synthetic dispatch rejected")
             run_counter += 1
-            run_id = "run-" + str(run_counter)
+            run_id = home.name + "-run-" + str(run_counter)
             thread["model"] = params["model"]
             turn = {"id": run_id, "status": "inProgress", "items": [{"id": "user-" + run_id, "type": "userMessage", "content": params["input"]}, {"id": "reply-" + run_id, "type": "agentMessage", "text": "Synthetic coding result"}]}
             thread["turns"].append(turn)
             if text == "WITH_GOAL":
                 thread["goal"] = {"status": "active", "objective": "Synthetic objective"}
             result = {"turn": turn}
+            if text == "QUOTA":
+                turn["status"] = "failed"
+                turn["error"] = {"message": "usage_limit_reached"}
+                event = {"method": "turn/completed", "params": {"threadId": thread["id"], "turn": turn}}
+            response(thread)
             if text == "COMPLETE":
                 turn["status"] = "completed"
                 event = {"method": "turn/completed", "params": {"threadId": thread["id"], "turn": turn}}
@@ -113,5 +132,5 @@ for line in sys.stdin:
         if event:
             emit(event)
         emit({"id": message["id"], "result": result})
-    except (KeyError, ValueError, StopIteration) as error:
+    except (KeyError, ValueError, StopIteration, OSError) as error:
         emit({"id": message["id"], "error": {"code": -32602, "message": str(error)}})

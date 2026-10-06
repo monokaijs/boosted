@@ -148,6 +148,7 @@ export interface CodexLiveEvent {
 export interface Project {
   id: string;
   name: string;
+  icon?: string | null;
   repoPath: string;
   defaultBranch: string;
   createdAt: string;
@@ -229,6 +230,13 @@ export interface TaskSource {
   externalUrl?: string;
 }
 
+export interface GitlabConnection {
+  id: string;
+  name: string;
+  baseUrl: string;
+  token: string;
+}
+
 export interface Integration {
   id: string;
   projectId: string;
@@ -263,6 +271,7 @@ export interface IntegrationDiscoveryTarget {
 
 export interface IntegrationDiscoveryResult {
   targets: IntegrationDiscoveryTarget[];
+  hasMore?: boolean;
 }
 
 export interface CodexUsageSummary {

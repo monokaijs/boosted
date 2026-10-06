@@ -6,15 +6,38 @@ async fn group_list_tracks_incoming_messages_without_counting_user_or_role_updat
     let (_root, state, peer) = fixture().await;
     let g = group(&state, &peer, false).await;
     let Json(initial) = list(State(state.clone())).await.unwrap();
-    assert!(initial.iter().find(|summary| summary.id == id(&g)).unwrap().last_message_at.is_none());
-    for (index, sender_type, content) in [(1, "agent", "Reply"), (2, "user", "Next task"), (3, "agent", " ")] {
+    assert!(
+        initial
+            .iter()
+            .find(|summary| summary.id == id(&g))
+            .unwrap()
+            .last_message_at
+            .is_none()
+    );
+    for (index, sender_type, content) in [
+        (1, "agent", "Reply"),
+        (2, "user", "Next task"),
+        (3, "agent", " "),
+    ] {
         let message = json!({"id":format!("message-{index}"),"groupId":id(&g),"sequence":index,"senderType":sender_type,"content":content,"createdAt":format!("2026-10-05T09:0{index}:00Z")});
         sqlx::query("INSERT INTO group_messages VALUES(?,?,?)")
-            .bind(id(&message)).bind(id(&g)).bind(message.to_string())
-            .execute(&state.db.pool).await.unwrap();
+            .bind(id(&message))
+            .bind(id(&g))
+            .bind(message.to_string())
+            .execute(&state.db.pool)
+            .await
+            .unwrap();
     }
     let Json(summaries) = list(State(state.clone())).await.unwrap();
-    assert_eq!(summaries.iter().find(|summary| summary.id == id(&g)).unwrap().last_message_at.as_deref(), Some("2026-10-05T09:01:00Z"));
+    assert_eq!(
+        summaries
+            .iter()
+            .find(|summary| summary.id == id(&g))
+            .unwrap()
+            .last_message_at
+            .as_deref(),
+        Some("2026-10-05T09:01:00Z")
+    );
 }
 
 fn user() -> AuthUser {
@@ -34,6 +57,11 @@ async fn fixture() -> (tempfile::TempDir, AppState, String) {
     let mut state = AppState {
         db,
         agents,
+        agent_integrations: crate::agent_integrations::AgentIntegrationManager::new(
+            root.path().join("integration-secrets"),
+        )
+        .await
+        .unwrap(),
         groups: GroupManager::default(),
         providers: providers::ProviderManager::new(root.path().join("accounts")),
         codex: CodexManager::test_unavailable(),
@@ -60,29 +88,35 @@ async fn fixture() -> (tempfile::TempDir, AppState, String) {
         vec!["config", "user.name", "Test"],
         vec!["config", "user.email", "test@example.com"],
     ] {
-        assert!(std::process::Command::new("git")
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    std::fs::write(repo.join("baseline.txt"), "original").unwrap();
+    assert!(
+        std::process::Command::new("git")
             .current_dir(&repo)
-            .args(args)
+            .args(["add", "."])
             .output()
             .unwrap()
             .status
-            .success());
-    }
-    std::fs::write(repo.join("baseline.txt"), "original").unwrap();
-    assert!(std::process::Command::new("git")
-        .current_dir(&repo)
-        .args(["add", "."])
-        .output()
-        .unwrap()
-        .status
-        .success());
-    assert!(std::process::Command::new("git")
-        .current_dir(&repo)
-        .args(["commit", "-m", "test: initialize temporary fixture"])
-        .output()
-        .unwrap()
-        .status
-        .success());
+            .success()
+    );
+    assert!(
+        std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["commit", "-m", "test: initialize temporary fixture"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
     std::fs::write(
         repo.join("baseline.txt"),
         "private-only existing user changes",
@@ -242,10 +276,12 @@ async fn leader_message_queues_assignment_without_execution_tools_or_human_inter
             .unwrap_err();
         assert_eq!(error.to_string(), "Tool unavailable in this group turn");
     }
-    assert!(all(&state.db, "group_receipts", id(&g))
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        all(&state.db, "group_receipts", id(&g))
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let task = execute_tool(
         &state,
         &leader,
@@ -273,6 +309,102 @@ async fn leader_message_queues_assignment_without_execution_tools_or_human_inter
 }
 
 #[tokio::test]
+async fn unavailable_coding_tools_explain_the_current_assignment_workflow() {
+    let (_root, state, peer) = fixture().await;
+    let g = group(&state, &peer, true).await;
+    let source = human(&state, id(&g), "Redesign the app", vec![], "redesign").await;
+    for (agent, purpose, next_tool) in [
+        ("pock", "message", "create_group_task"),
+        (peer.as_str(), "message", "request_group_peers"),
+        (peer.as_str(), "review", "review_group_task"),
+    ] {
+        let c = context_for(&state, id(&g), agent, id(&source), None, purpose).await;
+        for tool in ["create_chat", "send_message", "watch_chat"] {
+            let error = execute_tool(&state, &c, tool, &json!({}), tool, &[])
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("not a permission or setup error"), "{error}");
+            assert!(error.contains(next_tool), "{error}");
+        }
+    }
+    assert!(
+        all(&state.db, "group_tasks", id(&g))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        all(&state.db, "group_receipts", id(&g))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn redesign_dispatches_a_watched_assignment_despite_old_missing_tool_messages() {
+    let (root, state, peer) = fixture().await;
+    let g = group(&state, &peer, true).await;
+    append_message(
+        &state,
+        json!({"id":"old-reply","groupId":id(&g),"rootId":"old-request",
+            "senderType":"agent","senderId":"pock","senderName":"Pock",
+            "content":"Please restore coding-chat tools before I can redesign the app.",
+            "recipientIds":[],"kind":"message","createdAt":now()}),
+        &[],
+        "message",
+        None,
+    )
+    .await
+    .unwrap();
+    let source = send(
+        State(state.clone()), AxumPath(id(&g).into()), Extension(user()),
+        Json(json!({"content":"REDESIGN","clientMessageId":"redesign","recipientIds":["pock"],
+            "attachments":[{"id":"reference","name":"reference.png","kind":"image",
+                "dataUrl":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jfusAAAAASUVORK5CYII="}]})),
+    ).await.unwrap().0;
+    let view = settle(&state, id(&g)).await;
+    let tasks = view["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["rootId"], source["id"]);
+    assert_eq!(tasks[0]["ownerId"], peer);
+    assert_eq!(tasks[0]["status"], "completed");
+    assert_eq!(tasks[0]["reviewerId"], "pock");
+    assert!(
+        view["receipts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|receipt| receipt["tool"] == "create_chat" && receipt["status"] == "completed")
+    );
+    assert!(
+        view["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|execution| execution["purpose"] == "execute"
+                && execution["outcome"]["messages"][0] == "Child verification passed")
+    );
+    assert_eq!(
+        view["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["rootId"] == source["id"]
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("restore coding")))
+            .count(),
+        0
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("repo/baseline.txt")).unwrap(),
+        "private-only existing user changes"
+    );
+}
+
+#[tokio::test]
 async fn natural_language_management_is_delivered_to_the_leader_and_applied_through_agent_tools() {
     let (_root, state, peer) = fixture().await;
     let g = group(&state, &peer, false).await;
@@ -289,19 +421,23 @@ async fn natural_language_management_is_delivered_to_the_leader_and_applied_thro
     )
     .await;
     let added = settle(&state, id(&g)).await;
-    assert!(added["memberIds"]
-        .as_array()
-        .unwrap()
-        .contains(&extra["id"]));
+    assert!(
+        added["memberIds"]
+            .as_array()
+            .unwrap()
+            .contains(&extra["id"])
+    );
     assert_eq!(
         added["memberRoles"][id(&extra)]["roles"],
         json!(["developer", "reviewer"])
     );
-    assert!(added["receipts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|r| r["tool"] == "manage_group" && r["status"] == "completed"));
+    assert!(
+        added["receipts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["tool"] == "manage_group" && r["status"] == "completed")
+    );
     human(
         &state,
         id(&g),
@@ -311,10 +447,12 @@ async fn natural_language_management_is_delivered_to_the_leader_and_applied_thro
     )
     .await;
     let removed = settle(&state, id(&g)).await;
-    assert!(!removed["memberIds"]
-        .as_array()
-        .unwrap()
-        .contains(&json!(peer)));
+    assert!(
+        !removed["memberIds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(peer))
+    );
     human(
         &state,
         id(&g),
@@ -337,11 +475,13 @@ async fn natural_language_management_is_delivered_to_the_leader_and_applied_thro
             .count(),
         3
     );
-    assert!(declared["executions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|execution| execution["agentId"] == "pock"));
+    assert!(
+        declared["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|execution| execution["agentId"] == "pock")
+    );
 }
 
 #[tokio::test]
@@ -363,11 +503,13 @@ async fn natural_language_project_assignment_and_unassignment_use_leader_tools()
         state.db.project("project").await.unwrap().repo_path
     );
     assert!(!assigned["initialGitState"].is_null());
-    assert!(assigned["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|message| message["content"] == "Group project: Project."));
+    assert!(
+        assigned["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["content"] == "Group project: Project.")
+    );
     human(
         &state,
         id(&g),
@@ -381,16 +523,20 @@ async fn natural_language_project_assignment_and_unassignment_use_leader_tools()
         assert!(unassigned[field].is_null());
     }
     assert_eq!(unassigned["memberRoles"], g["memberRoles"]);
-    assert!(unassigned["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|message| message["content"] == "Group project unassigned."));
-    assert!(unassigned["executions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|execution| execution["agentId"] == "pock"));
+    assert!(
+        unassigned["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["content"] == "Group project unassigned.")
+    );
+    assert!(
+        unassigned["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|execution| execution["agentId"] == "pock")
+    );
 }
 
 #[tokio::test]
@@ -408,26 +554,30 @@ async fn project_management_is_atomic_authorized_and_preserves_existing_task_dir
     let leader = context_for(&state, id(&g), "pock", id(&source), None, "message").await;
     let specialist = context_for(&state, id(&g), &peer, id(&source), None, "message").await;
     let args = json!({"sourceMessageId":source["id"],"projectId":"project","name":"Project team"});
-    assert!(execute_tool(
-        &state,
-        &specialist,
-        "manage_group",
-        &args,
-        "not-leader",
-        &[source.clone()]
-    )
-    .await
-    .is_err());
-    assert!(execute_tool(
-        &state,
-        &leader,
-        "manage_group",
-        &args,
-        "no-human-source",
-        &[]
-    )
-    .await
-    .is_err());
+    assert!(
+        execute_tool(
+            &state,
+            &specialist,
+            "manage_group",
+            &args,
+            "not-leader",
+            &[source.clone()]
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        execute_tool(
+            &state,
+            &leader,
+            "manage_group",
+            &args,
+            "no-human-source",
+            &[]
+        )
+        .await
+        .is_err()
+    );
     for (index, invalid) in [json!("missing"), json!(42), json!("")].iter().enumerate() {
         assert!(execute_tool(&state, &leader, "manage_group", &json!({"sourceMessageId":source["id"],"projectId":invalid,"name":"Wrong","memberRoles":{&peer:{"roles":["reviewer"]}}}), &format!("invalid-project-{index}"), &[source.clone()]).await.is_err());
         let view = snapshot(&state, id(&g)).await.unwrap();
@@ -499,16 +649,20 @@ async fn human_chat_management_adds_removes_and_declares_multiple_roles_durably(
     let catalog = execute_tool(&state, &c, "list_group_agents", &json!({}), "catalog", &[])
         .await
         .unwrap();
-    assert!(catalog
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|agent| agent["id"] == extra["id"] && agent["name"] == "Extra"));
-    assert!(catalog
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|agent| agent.as_object().unwrap().len() == 2));
+    assert!(
+        catalog
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|agent| agent["id"] == extra["id"] && agent["name"] == "Extra")
+    );
+    assert!(
+        catalog
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|agent| agent.as_object().unwrap().len() == 2)
+    );
     let args = json!({"sourceMessageId":source["id"],"memberIds":["pock",peer,extra["id"]],"memberRoles":{"pock":{"roles":["coordinator","designer"]},id(&extra):{"roles":["developer","reviewer"],"responsibilities":"API work and independent review"}}});
     let result = execute_tool(
         &state,
@@ -544,14 +698,18 @@ async fn human_chat_management_adds_removes_and_declares_multiple_roles_durably(
         .filter(|message| message["kind"] == "roles")
         .collect();
     assert_eq!(declarations.len(), 1);
-    assert!(declarations[0]["content"]
-        .as_str()
-        .unwrap()
-        .contains("Extra — developer, reviewer"));
-    assert!(declarations[0]["content"]
-        .as_str()
-        .unwrap()
-        .contains("Pock — leader, designer"));
+    assert!(
+        declarations[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Extra — developer, reviewer")
+    );
+    assert!(
+        declarations[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Pock — leader, designer")
+    );
     migrate(&state.db).await.unwrap();
     assert_eq!(
         snapshot(&state, id(&g)).await.unwrap()["memberRoles"],
@@ -583,12 +741,14 @@ async fn human_chat_management_adds_removes_and_declares_multiple_roles_durably(
     assert_eq!(view["memberIds"], json!(["pock", extra["id"]]));
     assert!(view["memberRoles"].get(&peer).is_none());
     assert!(state.agents.get(&peer).await.is_ok());
-    assert!(all(&state.db, "group_deliveries", id(&g))
-        .await
-        .unwrap()
-        .iter()
-        .filter(|delivery| delivery["agentId"] == peer)
-        .all(|delivery| delivery["status"] == "cancelled"));
+    assert!(
+        all(&state.db, "group_deliveries", id(&g))
+            .await
+            .unwrap()
+            .iter()
+            .filter(|delivery| delivery["agentId"] == peer)
+            .all(|delivery| delivery["status"] == "cancelled")
+    );
 }
 
 #[tokio::test]
@@ -599,32 +759,36 @@ async fn management_rejects_peer_authority_duplicate_leaders_and_unsafe_removal_
     let leader = context_for(&state, id(&g), "pock", id(&source), None, "message").await;
     let specialist = context_for(&state, id(&g), &peer, id(&source), None, "message").await;
     let valid = json!({"sourceMessageId":source["id"],"memberRoles":{&peer:{"roles":["developer","reviewer"]}}});
-    assert!(execute_tool(
-        &state,
-        &specialist,
-        "manage_group",
-        &valid,
-        "specialist",
-        &[source.clone()]
-    )
-    .await
-    .is_err());
+    assert!(
+        execute_tool(
+            &state,
+            &specialist,
+            "manage_group",
+            &valid,
+            "specialist",
+            &[source.clone()]
+        )
+        .await
+        .is_err()
+    );
     assert!(
         execute_tool(&state, &leader, "manage_group", &valid, "no-source", &[])
             .await
             .is_err()
     );
     let fake = json!({"id":source["id"],"senderType":"agent"});
-    assert!(execute_tool(
-        &state,
-        &leader,
-        "manage_group",
-        &valid,
-        "peer-source",
-        &[fake]
-    )
-    .await
-    .is_err());
+    assert!(
+        execute_tool(
+            &state,
+            &leader,
+            "manage_group",
+            &valid,
+            "peer-source",
+            &[fake]
+        )
+        .await
+        .is_err()
+    );
     let before = snapshot(&state, id(&g)).await.unwrap();
     for (index, patch) in [
         json!({&peer:{"roles":["coordinator","developer"]}}),
@@ -636,16 +800,18 @@ async fn management_rejects_peer_authority_duplicate_leaders_and_unsafe_removal_
     .iter()
     .enumerate()
     {
-        assert!(execute_tool(
-            &state,
-            &leader,
-            "manage_group",
-            &json!({"sourceMessageId":source["id"],"memberRoles":patch}),
-            &format!("invalid-{index}"),
-            &[source.clone()]
-        )
-        .await
-        .is_err());
+        assert!(
+            execute_tool(
+                &state,
+                &leader,
+                "manage_group",
+                &json!({"sourceMessageId":source["id"],"memberRoles":patch}),
+                &format!("invalid-{index}"),
+                &[source.clone()]
+            )
+            .await
+            .is_err()
+        );
         let view = snapshot(&state, id(&g)).await.unwrap();
         assert_eq!(view["memberRoles"], before["memberRoles"]);
         assert_eq!(view["messages"], before["messages"]);
@@ -662,30 +828,34 @@ async fn management_rejects_peer_authority_duplicate_leaders_and_unsafe_removal_
     )
     .await
     .unwrap();
-    assert!(execute_tool(
-        &state,
-        &leader,
-        "manage_group",
-        &json!({"sourceMessageId":source["id"],"memberIds":["pock",extra["id"]]}),
-        "remove-owner",
-        &[source.clone()]
-    )
-    .await
-    .is_err());
+    assert!(
+        execute_tool(
+            &state,
+            &leader,
+            "manage_group",
+            &json!({"sourceMessageId":source["id"],"memberIds":["pock",extra["id"]]}),
+            "remove-owner",
+            &[source.clone()]
+        )
+        .await
+        .is_err()
+    );
     assert_eq!(
         snapshot(&state, id(&g)).await.unwrap()["memberIds"],
         before["memberIds"]
     );
-    assert!(execute_tool(
-        &state,
-        &leader,
-        "manage_group",
-        &json!({"sourceMessageId":source["id"],"memberIds":["pock"]}),
-        "one-member",
-        &[source]
-    )
-    .await
-    .is_err());
+    assert!(
+        execute_tool(
+            &state,
+            &leader,
+            "manage_group",
+            &json!({"sourceMessageId":source["id"],"memberIds":["pock"]}),
+            "one-member",
+            &[source]
+        )
+        .await
+        .is_err()
+    );
 }
 
 #[tokio::test]
@@ -713,12 +883,14 @@ async fn leader_handoff_preserves_other_roles_and_redirects_queued_default_messa
         get(&state.db, "group_messages", id(&queued)).await.unwrap()["recipientIds"],
         json!([peer])
     );
-    assert!(view["deliveries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|d| d["messageId"] == queued["id"])
-        .all(|d| d["agentId"] == peer));
+    assert!(
+        view["deliveries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["messageId"] == queued["id"])
+            .all(|d| d["agentId"] == peer)
+    );
     let next = human(&state, id(&g), "Next task", vec![], "next").await;
     assert_eq!(next["recipientIds"], json!([peer]));
     let args = json!({"title":"Implement","instructions":"Build","expectedResult":"Verified","ownerId":"pock"});
@@ -831,11 +1003,13 @@ async fn specialist_answers_and_review_outcomes_wake_only_the_leader() {
     assert_eq!(events[0]["agentId"], "pock");
     assert!(events[0]["taskId"].is_null());
     migrate(&state.db).await.unwrap();
-    assert!(snapshot(&state, id(&g)).await.unwrap()["deliveries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|d| d["event"]["taskId"] == task["id"]));
+    assert!(
+        snapshot(&state, id(&g)).await.unwrap()["deliveries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["event"]["taskId"] == task["id"])
+    );
 }
 
 #[tokio::test]
@@ -846,19 +1020,20 @@ async fn roles_persist_validate_and_upgrade_existing_groups() {
     assert_eq!(g["memberRoles"][&peer]["role"], "developer");
     let (_, Json(minimal)) = create(State(state.clone()), Extension(user()), Json(json!({"name":"Minimal roles","memberIds":["pock",peer],"memberRoles":{"pock":{"role":"coordinator"},&peer:{"role":"reviewer"}}}))).await.unwrap();
     assert_eq!(
-        get(&state.db, "groups", &minimal.summary.id).await.unwrap()["memberRoles"][&peer]
-            ["responsibilities"],
+        get(&state.db, "groups", &minimal.summary.id).await.unwrap()["memberRoles"][&peer]["responsibilities"],
         ""
     );
     let roles = json!({"pock":{"role":"developer","roles":["developer"],"responsibilities":"Backend APIs"},&peer:{"role":"coordinator","roles":["coordinator"],"responsibilities":"Plan and delegate"}});
     // Editing roles obeys the same stop requirement as roster changes.
-    assert!(update(
-        State(state.clone()),
-        AxumPath(id(&g).into()),
-        Json(json!({"memberRoles":roles}))
-    )
-    .await
-    .is_err());
+    assert!(
+        update(
+            State(state.clone()),
+            AxumPath(id(&g).into()),
+            Json(json!({"memberRoles":roles}))
+        )
+        .await
+        .is_err()
+    );
     let _ = stop(State(state.clone()), AxumPath(id(&g).into()))
         .await
         .unwrap();
@@ -886,24 +1061,28 @@ async fn roles_persist_validate_and_upgrade_existing_groups() {
         json!({"pock":{"role":"coordinator"},&peer:{"role":"invalid"}}),
         json!({"pock":{"role":"coordinator"},&peer:{"role":"developer","responsibilities":"a".repeat(4001)}}),
     ] {
-        assert!(update(
-            State(state.clone()),
-            AxumPath(id(&g).into()),
-            Json(json!({"memberIds":["pock",peer],"memberRoles":invalid}))
-        )
-        .await
-        .is_err());
+        assert!(
+            update(
+                State(state.clone()),
+                AxumPath(id(&g).into()),
+                Json(json!({"memberIds":["pock",peer],"memberRoles":invalid}))
+            )
+            .await
+            .is_err()
+        );
         assert_eq!(
             snapshot(&state, id(&g)).await.unwrap()["memberRoles"],
             roles
         );
-        assert!(create(
-            State(state.clone()),
-            Extension(user()),
-            Json(json!({"name":"Invalid","memberIds":["pock",peer],"memberRoles":invalid}))
-        )
-        .await
-        .is_err());
+        assert!(
+            create(
+                State(state.clone()),
+                Extension(user()),
+                Json(json!({"name":"Invalid","memberIds":["pock",peer],"memberRoles":invalid}))
+            )
+            .await
+            .is_err()
+        );
     }
     // Old records receive stable defaults without requiring a manual role migration.
     let mut old = get(&state.db, "groups", id(&g)).await.unwrap();
@@ -954,16 +1133,18 @@ async fn only_the_leader_can_create_assignments_even_when_specialists_are_mentio
         1
     );
     let missing_owner = json!({"title":"UI","instructions":"Build UI","expectedResult":"Verified"});
-    assert!(execute_tool(
-        &state,
-        &a,
-        "create_group_task",
-        &missing_owner,
-        "no-owner",
-        &[]
-    )
-    .await
-    .is_err());
+    assert!(
+        execute_tool(
+            &state,
+            &a,
+            "create_group_task",
+            &missing_owner,
+            "no-owner",
+            &[]
+        )
+        .await
+        .is_err()
+    );
     let current = execute_tool(&state, &b, "read_group_context", &json!({}), "context", &[])
         .await
         .unwrap();
@@ -1062,14 +1243,16 @@ async fn broadcast_mentions_retry_ids_and_human_authorship() {
             .len(),
         2
     );
-    assert!(send(
-        State(state.clone()),
-        AxumPath(id(&g).into()),
-        Extension(user()),
-        Json(json!({"content":"bad","clientMessageId":"bad","recipientIds":["missing"]}))
-    )
-    .await
-    .is_err());
+    assert!(
+        send(
+            State(state.clone()),
+            AxumPath(id(&g).into()),
+            Extension(user()),
+            Json(json!({"content":"bad","clientMessageId":"bad","recipientIds":["missing"]}))
+        )
+        .await
+        .is_err()
+    );
     let request = get(&state.db, "group_requests", id(&message))
         .await
         .unwrap();
@@ -1548,20 +1731,24 @@ async fn ordinary_replies_are_shared_without_fanout_and_operations_are_durable()
             .len(),
         2
     );
-    assert!(state.agents.get("pock").await.unwrap()["messages"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    assert!(execute_tool(
-        &state,
-        &c,
-        "send_group_message",
-        &json!({"content":"Spoof","senderId":peer}),
-        "spoof",
-        &[]
-    )
-    .await
-    .is_err());
+    assert!(
+        state.agents.get("pock").await.unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        execute_tool(
+            &state,
+            &c,
+            "send_group_message",
+            &json!({"content":"Spoof","senderId":peer}),
+            "spoof",
+            &[]
+        )
+        .await
+        .is_err()
+    );
 }
 #[tokio::test]
 async fn simultaneous_claims_produce_one_owner_and_duplicate_proposals_reuse_task() {
@@ -1610,25 +1797,29 @@ async fn mandatory_review_rejects_self_approval_and_changed_files_then_releases_
     let awaiting = checked_task(&state, id(&g), id(&task)).await.unwrap();
     assert_eq!(awaiting["status"], "awaiting_review");
     assert_eq!(awaiting["reviewerId"], peer);
-    assert!(review_task(
-        &state,
-        id(&g),
-        id(&task),
-        "pock",
-        &json!({"revision":awaiting["revision"],"decision":"approve","evidence":"No"})
-    )
-    .await
-    .is_err());
+    assert!(
+        review_task(
+            &state,
+            id(&g),
+            id(&task),
+            "pock",
+            &json!({"revision":awaiting["revision"],"decision":"approve","evidence":"No"})
+        )
+        .await
+        .is_err()
+    );
     std::fs::write(root.path().join("repo/a.txt"), "changed by another task").unwrap();
-    assert!(review_task(
-        &state,
-        id(&g),
-        id(&task),
-        &peer,
-        &json!({"revision":awaiting["revision"],"decision":"approve","evidence":"Stale"})
-    )
-    .await
-    .is_err());
+    assert!(
+        review_task(
+            &state,
+            id(&g),
+            id(&task),
+            &peer,
+            &json!({"revision":awaiting["revision"],"decision":"approve","evidence":"Stale"})
+        )
+        .await
+        .is_err()
+    );
     let current = checked_task(&state, id(&g), id(&task)).await.unwrap();
     assert!(current["revision"].as_i64().unwrap() > awaiting["revision"].as_i64().unwrap());
     let approved=review_task(&state,id(&g),id(&task),&peer,&json!({"revision":current["revision"],"decision":"approve","evidence":"Verified new contents"})).await.unwrap();
@@ -1670,13 +1861,15 @@ async fn cyclic_dependencies_cross_group_tasks_and_unsafe_paths_are_rejected() {
     let _ = stop(State(state.clone()), AxumPath(id(&g).into()))
         .await
         .unwrap();
-    assert!(patch_task(
-        State(state.clone()),
-        AxumPath((id(&g).into(), id(&a).into())),
-        Json(json!({"dependencyIds":[b["id"]]}))
-    )
-    .await
-    .is_err());
+    assert!(
+        patch_task(
+            State(state.clone()),
+            AxumPath((id(&g).into(), id(&a).into())),
+            Json(json!({"dependencyIds":[b["id"]]}))
+        )
+        .await
+        .is_err()
+    );
     let other = group(&state, &peer, false).await;
     assert!(checked_task(&state, id(&other), id(&a)).await.is_err());
     assert!(create_assignment(&state,id(&g),id(&source),&json!({"title":"Unsafe","instructions":"Do","expectedResult":"Good","fileResponsibilities":["../secret"]})).await.is_err());
@@ -1736,13 +1929,15 @@ async fn restart_preserves_pending_work_but_requires_explicit_resume() {
 async fn editing_roster_requires_stopped_group_and_preserves_unfinished_owners() {
     let (_root, state, peer) = fixture().await;
     let g = group(&state, &peer, false).await;
-    assert!(update(
-        State(state.clone()),
-        AxumPath(id(&g).into()),
-        Json(json!({"name":"Changed"}))
-    )
-    .await
-    .is_err());
+    assert!(
+        update(
+            State(state.clone()),
+            AxumPath(id(&g).into()),
+            Json(json!({"name":"Changed"}))
+        )
+        .await
+        .is_err()
+    );
     let source = human(&state, id(&g), "Work", vec![], "root").await;
     create_assignment(
         &state,
@@ -1759,13 +1954,15 @@ async fn editing_roster_requires_stopped_group_and_preserves_unfinished_owners()
     let _ = stop(State(state.clone()), AxumPath(id(&g).into()))
         .await
         .unwrap();
-    assert!(update(
-        State(state.clone()),
-        AxumPath(id(&g).into()),
-        Json(json!({"memberIds":["pock",extra["id"]]}))
-    )
-    .await
-    .is_err());
+    assert!(
+        update(
+            State(state.clone()),
+            AxumPath(id(&g).into()),
+            Json(json!({"memberIds":["pock",extra["id"]]}))
+        )
+        .await
+        .is_err()
+    );
     let _ = update(
         State(state.clone()),
         AxumPath(id(&g).into()),
@@ -1799,26 +1996,31 @@ async fn two_peers_exchange_requests_execute_in_shared_checkout_and_review_each_
         view["messages"],
         view["receipts"]
     );
-    assert!(view["receipts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|r| r["tool"] == "fileChange" && r["status"] == "completed"));
+    assert!(
+        view["receipts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["tool"] == "fileChange" && r["status"] == "completed")
+    );
     assert!(view["reviews"].as_array().unwrap().len() >= 2);
     assert!(root.path().join("repo/pock.txt").exists());
-    assert!(root
-        .path()
-        .join("repo")
-        .join(format!("{peer}.txt"))
-        .exists());
+    assert!(
+        root.path()
+            .join("repo")
+            .join(format!("{peer}.txt"))
+            .exists()
+    );
     assert_eq!(
         std::fs::read_to_string(root.path().join("repo/baseline.txt")).unwrap(),
         "private-only existing user changes"
     );
-    assert!(state.agents.get("pock").await.unwrap()["messages"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert!(
+        state.agents.get("pock").await.unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(state.agents.get("pock").await.unwrap()["status"], "idle");
 
     let log =
@@ -1872,12 +2074,14 @@ async fn two_peers_exchange_requests_execute_in_shared_checkout_and_review_each_
         saw_peer_delivery,
         "the fixture must exercise a peer request"
     );
-    assert!(view["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|message| message["senderId"] == "pock"
-            && message["content"] == "Team result: verified assignments completed"));
+    assert!(
+        view["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["senderId"] == "pock"
+                && message["content"] == "Team result: verified assignments completed")
+    );
 }
 #[cfg(unix)]
 #[tokio::test]
@@ -1886,20 +2090,26 @@ async fn child_coding_runs_wake_group_owners_without_direct_followups() {
     let g = group(&state, &peer, true).await;
     human(&state, id(&g), "CHILD", vec![], "root").await;
     let view = settle(&state, id(&g)).await;
-    assert!(view["executions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|e| e["outcome"]["messages"][0] == "Child verification passed"));
-    assert!(view["receipts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|r| r["tool"] == "create_chat" && !r["chatId"].is_null()));
-    assert!(state.agents.get("pock").await.unwrap()["followUps"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert!(
+        view["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["outcome"]["messages"][0] == "Child verification passed")
+    );
+    assert!(
+        view["receipts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["tool"] == "create_chat" && !r["chatId"].is_null())
+    );
+    assert!(
+        state.agents.get("pock").await.unwrap()["followUps"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     let chats = providers::documents(&state.db, "provider-chats")
         .await
         .unwrap();
@@ -1956,83 +2166,173 @@ async fn deletion_removes_owned_records_and_usage_but_preserves_other_groups_and
     let (root, state, peer) = fixture().await;
     let a = group(&state, &peer, true).await;
     let b = group(&state, &peer, false).await;
-    human(&state,id(&a),"Saved message",vec![],"a").await;
-    human(&state,id(&b),"Keep this",vec![],"b").await;
-    for table in ["group_tasks","group_reviews","group_executions","group_receipts","group_operations"] {
-        put(&state.db,table,id(&a),&json!({"id":format!("a-{table}"),"groupId":id(&a),"status":"completed"})).await.unwrap();
+    human(&state, id(&a), "Saved message", vec![], "a").await;
+    human(&state, id(&b), "Keep this", vec![], "b").await;
+    for table in [
+        "group_tasks",
+        "group_reviews",
+        "group_executions",
+        "group_receipts",
+        "group_operations",
+    ] {
+        put(
+            &state.db,
+            table,
+            id(&a),
+            &json!({"id":format!("a-{table}"),"groupId":id(&a),"status":"completed"}),
+        )
+        .await
+        .unwrap();
     }
-    agent_usage::record_scoped(&state.db,"pock","usage-a",&json!({"tokenUsage":{"total":{"totalTokens":100}}}),Some(id(&a)),true).await.unwrap();
+    agent_usage::record_scoped(
+        &state.db,
+        "pock",
+        "usage-a",
+        &json!({"tokenUsage":{"total":{"totalTokens":100}}}),
+        Some(id(&a)),
+        true,
+    )
+    .await
+    .unwrap();
     let mut events = state.live.subscribe();
-    let Json(deleted) = delete(State(state.clone()),AxumPath(id(&a).into())).await.unwrap();
-    assert_eq!(deleted["deleted"],true);
-    for table in ["groups","group_messages","group_tasks","group_reviews","group_executions","group_receipts","group_operations","group_requests","group_members","group_deliveries","group_usage_buckets"] {
-        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE group_id=?")).bind(id(&a)).fetch_one(&state.db.pool).await.unwrap();
-        assert_eq!(count,0,"{table} leaked deleted records");
+    let Json(deleted) = delete(State(state.clone()), AxumPath(id(&a).into()))
+        .await
+        .unwrap();
+    assert_eq!(deleted["deleted"], true);
+    for table in [
+        "groups",
+        "group_messages",
+        "group_tasks",
+        "group_reviews",
+        "group_executions",
+        "group_receipts",
+        "group_operations",
+        "group_requests",
+        "group_members",
+        "group_deliveries",
+        "group_usage_buckets",
+    ] {
+        let count: i64 =
+            sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE group_id=?"))
+                .bind(id(&a))
+                .fetch_one(&state.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "{table} leaked deleted records");
     }
-    assert_eq!(snapshot(&state,id(&b)).await.unwrap()["messages"][0]["content"],"Keep this");
+    assert_eq!(
+        snapshot(&state, id(&b)).await.unwrap()["messages"][0]["content"],
+        "Keep this"
+    );
     assert!(state.agents.get("pock").await.is_ok());
     assert!(root.path().join("repo/baseline.txt").exists());
-    assert!(matches!(delete(State(state.clone()),AxumPath(id(&a).into())).await,Err(AppError::NotFound(_))));
+    assert!(matches!(
+        delete(State(state.clone()), AxumPath(id(&a).into())).await,
+        Err(AppError::NotFound(_))
+    ));
     assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|e| e.topic == "group.deleted"));
-    assert!(agent_usage::read_group_usage(State(state.clone()),AxumPath(id(&a).into()),Query(agent_usage::UsageQuery{days:Some(7)})).await.is_err());
+    assert!(
+        agent_usage::read_group_usage(
+            State(state.clone()),
+            AxumPath(id(&a).into()),
+            Query(agent_usage::UsageQuery { days: Some(7) })
+        )
+        .await
+        .is_err()
+    );
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn deletion_interrupts_running_turns_without_stopping_another_group() {
-    let (root,state,peer) = fixture().await;
-    let a = group(&state,&peer,false).await;
-    let b = group(&state,&peer,false).await;
-    human(&state,id(&a),"HOLD",vec!["pock"],"a").await;
-    human(&state,id(&b),"HOLD",vec![&peer],"b").await;
+    let (root, state, peer) = fixture().await;
+    let a = group(&state, &peer, false).await;
+    let b = group(&state, &peer, false).await;
+    human(&state, id(&a), "HOLD", vec!["pock"], "a").await;
+    human(&state, id(&b), "HOLD", vec![&peer], "b").await;
     tick(&state).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(3),async {
-        while !std::fs::read_to_string(root.path().join("accounts/account/group-rpc-log.jsonl")).unwrap_or_default().contains("turn/start") {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !std::fs::read_to_string(root.path().join("accounts/account/group-rpc-log.jsonl"))
+            .unwrap_or_default()
+            .contains("turn/start")
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.unwrap();
-    let _ = delete(State(state.clone()),AxumPath(id(&a).into())).await.unwrap();
-    assert!(!agent_active(&state,"pock").await);
-    assert!(agent_active(&state,&peer).await);
-    assert_eq!(get(&state.db,"groups",id(&b)).await.unwrap()["stopped"],false);
+    })
+    .await
+    .unwrap();
+    let _ = delete(State(state.clone()), AxumPath(id(&a).into()))
+        .await
+        .unwrap();
+    assert!(!agent_active(&state, "pock").await);
+    assert!(agent_active(&state, &peer).await);
+    assert_eq!(
+        get(&state.db, "groups", id(&b)).await.unwrap()["stopped"],
+        false
+    );
     tick(&state).await.unwrap();
-    assert!(get(&state.db,"groups",id(&a)).await.is_err());
-    assert!(all(&state.db,"group_executions",id(&a)).await.unwrap().is_empty());
-    let _ = stop(State(state.clone()),AxumPath(id(&b).into())).await.unwrap();
+    assert!(get(&state.db, "groups", id(&a)).await.is_err());
+    assert!(
+        all(&state.db, "group_executions", id(&a))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let _ = stop(State(state.clone()), AxumPath(id(&b).into()))
+        .await
+        .unwrap();
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn group_usage_tracks_native_agent_and_child_streams_with_cached_tokens() {
-    let (_root,state,peer) = fixture().await;
-    let g = group(&state,&peer,true).await;
-    human(&state,id(&g),"CHILD",vec![],"root").await;
-    settle(&state,id(&g)).await;
-    let Json(usage) = agent_usage::read_group_usage(State(state.clone()),AxumPath(id(&g).into()),Query(agent_usage::UsageQuery{days:Some(7)})).await.unwrap();
+    let (_root, state, peer) = fixture().await;
+    let g = group(&state, &peer, true).await;
+    human(&state, id(&g), "CHILD", vec![], "root").await;
+    settle(&state, id(&g)).await;
+    let Json(usage) = agent_usage::read_group_usage(
+        State(state.clone()),
+        AxumPath(id(&g).into()),
+        Query(agent_usage::UsageQuery { days: Some(7) }),
+    )
+    .await
+    .unwrap();
     assert!(usage["trackedSince"].is_string());
-    assert_eq!(usage["series"].as_array().unwrap().len(),2);
+    assert_eq!(usage["series"].as_array().unwrap().len(), 2);
     let mut total = 0;
     for series in usage["series"].as_array().unwrap() {
         for bucket in series["buckets"].as_array().unwrap() {
             let tokens = bucket["tokens"].as_i64().unwrap();
-            assert_eq!(tokens,bucket["inputTokens"].as_i64().unwrap()+bucket["outputTokens"].as_i64().unwrap());
-            assert!(bucket["cachedTokens"].as_i64().unwrap()>0);
-            assert_eq!(bucket["detailedTokens"],bucket["tokens"]);
+            assert_eq!(
+                tokens,
+                bucket["inputTokens"].as_i64().unwrap() + bucket["outputTokens"].as_i64().unwrap()
+            );
+            assert!(bucket["cachedTokens"].as_i64().unwrap() > 0);
+            assert_eq!(bucket["detailedTokens"], bucket["tokens"]);
             total += tokens;
         }
     }
-    let agent_total: i64 = sqlx::query_scalar("SELECT SUM(tokens) FROM agent_usage_buckets").fetch_one(&state.db.pool).await.unwrap();
+    let agent_total: i64 = sqlx::query_scalar("SELECT SUM(tokens) FROM agent_usage_buckets")
+        .fetch_one(&state.db.pool)
+        .await
+        .unwrap();
     // Two child coding runs of 250 tokens each are included only in group usage.
-    assert_eq!(total,agent_total+500);
-    let chats = providers::documents(&state.db,"provider-chats").await.unwrap();
-    assert_eq!(chats.len(),2);
-    let _ = delete(State(state.clone()),AxumPath(id(&g).into())).await.unwrap();
+    assert_eq!(total, agent_total + 500);
+    let chats = providers::documents(&state.db, "provider-chats")
+        .await
+        .unwrap();
+    assert_eq!(chats.len(), 2);
+    let _ = delete(State(state.clone()), AxumPath(id(&g).into()))
+        .await
+        .unwrap();
     for chat in chats {
-        let kept = document(&state.db,"provider-chats",id(&chat)).await.unwrap();
-        for key in ["groupId","groupTaskId","groupRootId","groupAgentId"] {
-            assert!(kept[key].is_null(),"{key} still refers to a deleted group");
+        let kept = document(&state.db, "provider-chats", id(&chat))
+            .await
+            .unwrap();
+        for key in ["groupId", "groupTaskId", "groupRootId", "groupAgentId"] {
+            assert!(kept[key].is_null(), "{key} still refers to a deleted group");
         }
-        assert_eq!(kept["dispatchPaused"],true);
+        assert_eq!(kept["dispatchPaused"], true);
     }
 }
 #[tokio::test]
@@ -2198,11 +2498,13 @@ async fn http_authentication_two_agent_execution_and_explicit_restart_recovery()
         .json()
         .await
         .unwrap();
-    assert!(response["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|task| task["status"] == "completed"));
+    assert!(
+        response["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|task| task["status"] == "completed")
+    );
     assert_eq!(
         client
             .post(format!("{url}/tasks/{}/reviews", id(&settled["tasks"][0])))
@@ -2281,13 +2583,15 @@ async fn blocked_task_retry_can_complete_without_old_failed_delivery_blocking_ro
     put(&state.db, "group_tasks", id(&g), &task).await.unwrap();
     let owner = context_for(&state, id(&g), "pock", id(&source), Some(&task), "execute").await;
     let other = context_for(&state, id(&g), &peer, id(&source), Some(&task), "execute").await;
-    assert!(block_task(
-        &state,
-        &other,
-        &json!({"reason":"Cannot impersonate owner"})
-    )
-    .await
-    .is_err());
+    assert!(
+        block_task(
+            &state,
+            &other,
+            &json!({"reason":"Cannot impersonate owner"})
+        )
+        .await
+        .is_err()
+    );
     let blocked = execute_tool(
         &state,
         &owner,
@@ -2517,11 +2821,15 @@ async fn requested_changes_return_to_owner_and_task_cancellation_requires_retry(
     assert_eq!(changed["status"], "queued");
     assert_eq!(changed["ownerId"], "pock");
     assert_eq!(changed["error"], "Cover the invalid input case");
-    assert!(snapshot(&state, id(&g)).await.unwrap()["deliveries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|d| d["taskId"] == task["id"] && d["agentId"] == "pock" && d["purpose"] == "execute"));
+    assert!(
+        snapshot(&state, id(&g)).await.unwrap()["deliveries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["taskId"] == task["id"]
+                && d["agentId"] == "pock"
+                && d["purpose"] == "execute")
+    );
     let cancelled = cancel_task(
         State(state.clone()),
         AxumPath((id(&g).into(), id(&task).into())),
@@ -2530,13 +2838,15 @@ async fn requested_changes_return_to_owner_and_task_cancellation_requires_retry(
     .unwrap()
     .0;
     assert_eq!(cancelled["status"], "cancelled");
-    assert!(submit(
-        &state,
-        &owner,
-        &json!({"result":"Late","verification":"Checked"})
-    )
-    .await
-    .is_err());
+    assert!(
+        submit(
+            &state,
+            &owner,
+            &json!({"result":"Late","verification":"Checked"})
+        )
+        .await
+        .is_err()
+    );
     let retried = retry_task(
         State(state.clone()),
         AxumPath((id(&g).into(), id(&task).into())),
@@ -2580,17 +2890,16 @@ async fn exhausted_quota_is_visible_on_the_assignment_without_polluting_direct_c
     .await
     .unwrap();
     let view = snapshot(&state, id(&g)).await.unwrap();
-    assert!(view["tasks"][0]["error"]
-        .as_str()
-        .unwrap()
-        .contains("Rate limit exceeded"));
-    assert!(view["executions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|e| e["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("Rate limit exceeded"))));
+    assert!(agents::quota_error(
+        view["tasks"][0]["error"].as_str().unwrap()
+    ));
+    assert!(
+        view["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["error"].as_str().is_some_and(agents::quota_error))
+    );
     let direct = state.agents.get("pock").await.unwrap();
     assert!(direct["error"].is_null());
     assert!(direct["messages"].as_array().unwrap().is_empty());

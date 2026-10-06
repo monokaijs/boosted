@@ -73,7 +73,7 @@ export function TaskboardPanel() {
   const [view, setView] = useState<"board" | "list">(() => localStorage.getItem("boosted.taskboard.view") === "list" ? "list" : "board");
   const projectId = useAppStore((state) => state.selectedProjectId);
   const queryClient = useQueryClient();
-  const tasks = useQuery({ queryKey: ["tasks", projectId], queryFn: () => api.tasks(projectId), enabled: Boolean(projectId) });
+  const tasks = useQuery({ queryKey: ["tasks", projectId], queryFn: () => api.tasks(projectId!), enabled: Boolean(projectId) });
   const move = useMutation({ mutationFn: ({ id, status }: { id: string; status: TaskStatus }) => api.setTaskStatus(id, status), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["tasks"] }) });
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 7 } }));
   function dragEnd(event: DragEndEvent) {

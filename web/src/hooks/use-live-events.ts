@@ -28,7 +28,7 @@ export function useLiveEvents() {
         connection.send(JSON.stringify({ type: "authenticate", token: getToken() }));
         void queryClient.invalidateQueries({ queryKey: ["groups"] });
         // Recover updates missed during a socket disconnect, including hidden views.
-        for (const kind of ["codex-chat", "codex-chats", "agents", "assistant-state", "task", "events"]) {
+        for (const kind of ["codex-chat", "codex-chats", "agents", "assistant-state", "agent-integrations", "task", "events"]) {
           void queryClient.invalidateQueries({ queryKey: [kind] });
         }
       });
@@ -67,8 +67,14 @@ export function useLiveEvents() {
               void queryClient.invalidateQueries({ queryKey: ["files", taskId] });
             }
           }
+          if (event.topic === "project.git") {
+            const projectId = (event.data as { projectId?: string }).projectId;
+            if (projectId) void queryClient.invalidateQueries({ queryKey: ["project-git", projectId] });
+          }
           if (event.topic.startsWith("project.")) void queryClient.invalidateQueries({ queryKey: ["projects"] });
+          if (event.topic.startsWith("gitlab_connection.")) void queryClient.invalidateQueries({ queryKey: ["gitlab-connections"] });
           if (event.topic.startsWith("integration.")) void queryClient.invalidateQueries({ queryKey: ["integrations"] });
+          if (event.topic.startsWith("agent-integration.")) void queryClient.invalidateQueries({ queryKey: ["agent-integrations"] });
           if (event.topic === "codex.approval") {
             const data = event.data as { threadId?: string; requestId?: unknown };
             if (data.threadId) {

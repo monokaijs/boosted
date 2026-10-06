@@ -8,6 +8,7 @@ import type { GroupState } from './types';
 const mocks = vi.hoisted(() => ({ featureRequest: vi.fn(), projects: vi.fn(), listAgents: vi.fn() }));
 vi.mock('@/lib/api-context', () => ({ useBoostedApiClient: () => ({ profileId: 'machine-a', featureRequest: mocks.featureRequest, projects: mocks.projects }) }));
 vi.mock('@/features/agents/lib/api-client', () => ({ apiClient: { assistant: { list: mocks.listAgents } } }));
+vi.mock('@/components/panels/codex-chat-panel', () => ({ CodexChatPanel: ({ threadId, onThreadChange }: { threadId: string; onThreadChange?: (id: string) => void }) => <><p>Coding conversation {threadId}</p><button onClick={() => onThreadChange?.('replacement-chat')}>Replace coding thread</button></> }));
 import { GroupPanel } from './group-panel';
 import { GroupDialog } from './group-dialog';
 
@@ -40,6 +41,66 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('group conversations', () => {
+  it('opens and switches coding chats beside the group without losing its draft or navigation', async () => {
+    useAppStore.setState({ selectedGroupId: 'g', selectedCodexChatId: 'previous-chat' });
+    mocks.featureRequest.mockResolvedValue({ ...base, executions: [
+      { id: 'run-a', agentId: 'a', rootId: 'root', taskId: null, purpose: 'message', status: 'waiting', activity: null, chatId: 'chat-a' },
+      { id: 'run-b', agentId: 'b', rootId: 'root', taskId: null, purpose: 'message', status: 'completed', activity: null, chatId: 'chat-b' },
+    ] });
+    const { container } = renderWithQuery(<GroupPanel groupId="g" />);
+    const composer = await screen.findByRole('textbox', { name: 'Message group' });
+    fireEvent.change(composer, { target: { value: 'Keep this draft' } });
+    expect(container.querySelector('.group-chat-layout')).toHaveAttribute('data-split', 'false');
+    fireEvent.click(screen.getByRole('button', { name: 'Open Nova’s chat' }));
+    expect(await within(screen.getByRole('complementary', { name: 'Agent coding chat' })).findByText('Coding conversation chat-a')).toBeInTheDocument();
+    expect(container.querySelector('.group-chat-layout')).toHaveAttribute('data-split', 'true');
+    expect(screen.getByRole('textbox', { name: 'Message group' })).toBe(composer);
+    expect(composer).toHaveValue('Keep this draft');
+    fireEvent.click(screen.getByRole('button', { name: 'Open Pock’s chat' }));
+    expect(await screen.findByText('Coding conversation chat-b')).toBeInTheDocument();
+    expect(screen.queryByText('Coding conversation chat-a')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Replace coding thread' }));
+    expect(await screen.findByText('Coding conversation replacement-chat')).toBeInTheDocument();
+    expect(useAppStore.getState()).toMatchObject({ selectedGroupId: 'g', selectedCodexChatId: 'previous-chat' });
+    fireEvent.click(screen.getByRole('button', { name: 'Close coding chat' }));
+    expect(screen.queryByRole('complementary', { name: 'Agent coding chat' })).not.toBeInTheDocument();
+    expect(container.querySelector('.group-chat-layout')).toHaveAttribute('data-split', 'false');
+    expect(composer).toHaveValue('Keep this draft');
+  });
+  it.each(['tasks', 'activity'] as const)('opens an execution chat from %s and closes the details drawer', async (tab) => {
+    mocks.featureRequest.mockResolvedValue({ ...base,
+      tasks: [{ id: 'task', rootId: 'root', title: 'Implement endpoint', instructions: 'Implement', expectedResult: 'Works', ownerId: 'a', reviewerId: null, status: 'running', dependencyIds: [], fileResponsibilities: [], revision: 1 }],
+      executions: [{ id: 'run', agentId: 'a', rootId: 'root', taskId: 'task', purpose: 'execute', status: 'waiting', activity: null, chatId: 'chat-a' }],
+    });
+    renderWithQuery(<GroupPanel groupId="g" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Group tasks' }));
+    const drawer = screen.getByRole('dialog');
+    if (tab === 'activity') fireEvent.click(within(drawer).getByRole('tab', { name: 'Activity' }));
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Open Nova’s chat' }));
+    expect(await screen.findByText('Coding conversation chat-a')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByRole('textbox', { name: 'Message group' })).toBeInTheDocument();
+  });
+  it.each(['transcript', 'activity'] as const)('opens a receipt chat in the split view from %s', async (source) => {
+    mocks.featureRequest.mockResolvedValue({ ...base,
+      executions: [{ id: 'run', agentId: 'a', rootId: 'root', taskId: null, purpose: 'message', status: 'completed', activity: null }],
+      receipts: [{ id: 'receipt', groupId: 'g', agentId: 'a', executionId: 'run', taskId: null, tool: 'create_chat', arguments: {}, status: 'completed', chatId: 'chat-a' }],
+    });
+    const { container } = renderWithQuery(<GroupPanel groupId="g" />);
+    await screen.findByRole('textbox', { name: 'Message group' });
+    if (source === 'activity') {
+      fireEvent.click(screen.getByRole('button', { name: 'Participants and tasks' }));
+      fireEvent.click(screen.getByRole('tab', { name: 'Activity' }));
+    }
+    const scope = source === 'activity' ? screen.getByRole('dialog') : container;
+    fireEvent.click(within(scope).getByRole('button', { name: '1 tool' }));
+    const receipt = scope.querySelector('details')!;
+    receipt.open = true; fireEvent(receipt, new Event('toggle'));
+    fireEvent.click(within(scope).getByRole('button', { name: 'Open chat' }));
+    expect(await screen.findByText('Coding conversation chat-a')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Message group' })).toBeInTheDocument();
+  });
   it('clears a deleted group when reconnecting after missing its live deletion event', async () => {
     useAppStore.getState().selectGroup('g');
     mocks.featureRequest.mockRejectedValue(new ApiError(404, 'Group not found'));

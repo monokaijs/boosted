@@ -16,7 +16,6 @@
 .app-frame[data-page="settings"] .content-surface { grid-template-columns: minmax(0, 1fr); }
 .shell-titlebar { grid-column: 1 / -1; display: flex; min-width: 0; align-items: center; gap: 8px; padding: 0 12px; font-size: 12px; color: var(--secondary-foreground); }
 .shell-titlebar > img { width: 18px; height: 18px; }
-.shell-titlebar-section { color: var(--muted-foreground); border-left: 1px solid var(--border); margin-left: 8px; padding-left: 16px; }
 .shell-update { margin-left: auto; color: var(--muted-foreground); }
 .shell-machine { margin-left: auto; min-width: 0; }
 .main-surface { grid-column: 1; grid-row: 1; display: flex; min-height: 0; min-width: 0; flex-direction: column; overflow: hidden; border: 0; border-radius: 0; background: var(--surface); }
@@ -128,7 +127,7 @@
 .project-page-list { display: grid; }
 .project-page-row { display: flex; align-items: center; gap: 16px; width: 100%; padding: 20px 8px; border-bottom: 1px solid var(--border); text-align: left; border-radius: 8px 8px 0 0; }
 .project-page-row:hover { background: var(--surface-sunken); }
-.project-page-icon { width: 40px; height: 40px; flex: none; border-radius: 10px; }
+.project-page-icon { width: 40px; height: 40px; flex: none; border-radius: 10px; font-size: 20px; }
 .project-page-copy { min-width: 0; flex: 1; }
 .project-page-copy strong { display: block; font-size: 14px; font-weight: 500; }
 .project-page-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 4px; font-size: 12px; color: var(--muted-foreground); }
@@ -187,7 +186,6 @@
   :root[data-keyboard-open] .mobile-page-navigation { display: none; }
   .app-frame { grid-template-columns: minmax(0, 1fr); grid-template-rows: calc(44px + env(safe-area-inset-top)) minmax(0, 1fr) calc(var(--mobile-navigation-height) + var(--safe-area-bottom)); padding: 0; }
   .shell-titlebar { grid-column: 1; grid-row: 1; padding-top: env(safe-area-inset-top); padding-inline: max(12px, env(safe-area-inset-left)); }
-  .shell-titlebar-section { display: none; }
   .content-surface { grid-template-columns: minmax(0, 1fr); margin: 0 6px 6px; border-radius: 16px; position: relative; }
   .main-surface { grid-column: 1; grid-row: 1; }
   .main-surface-header { min-height: 44px; padding-inline: 8px; }
@@ -222,7 +220,7 @@
   .project-page-list { gap: 10px; min-width: 0; }
   .project-page-row { min-width: 0; gap: 12px; padding: 14px 12px; border: 1px solid var(--border); border-radius: 12px; }
   .project-page-row.is-current { border-color: var(--border-strong); background: var(--surface-raised); }
-  .project-page-icon { width: 32px; height: 32px; border-radius: 8px; }
+  .project-page-icon { width: 32px; height: 32px; border-radius: 8px; font-size: 16px; }
   .project-page-copy strong { overflow-wrap: anywhere; }
   .project-page-copy small { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; overflow-wrap: anywhere; line-height: 18px; }
   .project-page-copy > span { flex-wrap: wrap; column-gap: 10px; row-gap: 6px; }

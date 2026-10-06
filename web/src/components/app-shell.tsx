@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Bot, ChevronDown, LogOut, MessagesSquare, Ellipsis, Files, GitBranch, Plus, X } from "lucide-react";
+import { ArrowLeft, Bot, ChevronDown, LogOut, MessagesSquare, Ellipsis, Files, GitBranch, Plus, Settings2, X } from "lucide-react";
 import { openProvidersEvent } from "@/features/agents/events";
 import { AgentAvatar } from "@/features/agents/components/session/agent-avatar";
 import { apiClient } from "@/features/agents/lib/api-client";
@@ -11,6 +11,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { ForcePasswordDialog, NewTaskDialog, OpenProjectDialog } from "@/components/create-dialogs";
 import type { SettingsSectionId } from "@/components/settings-page";
 import { MachineSwitcher } from "@/components/machine-manager";
+import { AttachmentPreviewLayout } from "@/components/attachment-preview-layout";
+import { ProjectSettingsDialog } from "@/components/project-settings-dialog";
 import { ChatList } from "@/components/chat-list";
 import { ProjectsPage, ScheduledPage } from "@/components/app-pages";
 import { FilesPanel } from "@/components/panels/files-panel";
@@ -29,6 +31,7 @@ import { chatProject } from "@/lib/chat-project";
 import { conversationQueryOptions } from "@/lib/query-client";
 import { destinations, navigate, navigateSettings, backToSettings, settingsSectionFromHash, pageFromHash, type AppPage } from "@/lib/navigation";
 import { formatUpdateProgress, useAppUpdateState } from "@/lib/updater";
+import { isTauriRuntime } from "@/lib/runtime";
 
 const SettingsPage = lazy(() => import("@/components/settings-page").then((m) => ({ default: m.SettingsPage })));
 const CodexChatPanel = lazy(() => import("@/components/panels/codex-chat-panel").then((module) => ({ default: module.CodexChatPanel })));
@@ -47,6 +50,7 @@ export function AppShell() {
   useLiveEvents();
   useNotificationNavigation();
   const appUpdate = useAppUpdateState();
+  const hasNativeBranding = isTauriRuntime() && /Windows/i.test(navigator.userAgent);
   const [page, setPage] = useState(pageFromHash);
   const isMobile = useMobileLayout();
   const [mobileChatOpen, setMobileChatOpen] = useState(() => window.location.hash === "#home");
@@ -58,6 +62,7 @@ export function AppShell() {
   const [toolView, setToolView] = useState<ToolView>();
   const [selectedAgentId, setSelectedAgentId] = useState(() => localStorage.getItem(`boosted.selected-agent.${profileId}`) ?? "pock");
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+  const [projectSettingsOpen, setProjectSettingsOpen] = useState(false);
   const [newTaskDialogOpen, setNewTaskDialogOpen] = useState(false);
   const [createAgentOpen, setCreateAgentOpen] = useState(false);
   const projectId = useAppStore((state) => state.selectedProjectId);
@@ -153,6 +158,7 @@ export function AppShell() {
   useEffect(() => {
     const openSettings = (event: Event) => {
       const section = (event as CustomEvent<SettingsSectionId>).detail;
+      if (section === "workspace" || section === "codex") { setProjectSettingsOpen(true); return; }
       goTo("settings", section);
     };
     window.addEventListener(openProvidersEvent, openProviderSettings);
@@ -225,7 +231,11 @@ export function AppShell() {
   const navigation = destinations.map(({ id, label, icon: Icon }) => <Tooltip key={id}><TooltipTrigger asChild><button className="destination" aria-label={label} aria-current={page === id && !(id === "home" && view === "agents") ? "page" : undefined} onClick={() => { if (id === "home") setView(groupId ? "group" : "chat"); if (id === "tasks") setView("chat"); goTo(id); }}><Icon /><span>{label}</span></button></TooltipTrigger><TooltipContent side="left">{label}</TooltipContent></Tooltip>);
 
   return <main className="app-frame" data-page={page} data-mobile-chat-open={mobileChatDetail}>
-    <header className="shell-titlebar" hidden={mobileChatDetail}><img src="/favicon.svg" alt="" /><span>Boosted</span><span className="shell-titlebar-section">{current.label}</span>{appUpdate.phase === "downloading" && <span className="shell-update">Updating{formatUpdateProgress(appUpdate) !== undefined ? ` ${formatUpdateProgress(appUpdate)}%` : "…"}</span>}<div className="shell-machine"><MachineSwitcher onManage={() => goTo("settings")} /></div></header>
+    <header className="shell-titlebar" hidden={mobileChatDetail}>
+      {!hasNativeBranding && <><img src="/favicon.svg" alt="" /><span>Boosted</span></>}
+      {appUpdate.phase === "downloading" && <span className="shell-update">Updating{formatUpdateProgress(appUpdate) !== undefined ? ` ${formatUpdateProgress(appUpdate)}%` : "…"}</span>}
+      <div className="shell-machine"><MachineSwitcher onManage={() => goTo("settings")} /></div>
+    </header>
     <section className="content-surface" aria-label="Content">
     <section className="main-surface" hidden={mobileChatsPage} aria-label={`${page === "home" && view === "agents" ? "Agents" : mobileChatDetail ? "Chat" : current.label} page`}>
       <header className="main-surface-header" hidden={page === "settings"}>
@@ -242,7 +252,7 @@ export function AppShell() {
         </DropdownMenu> : <span className="main-page-label">{mobileChatDetail ? (chats.data?.find((chat) => chat.id === chatId)?.title ?? "New chat") : current.label}</span>}
         {page === "home" && view !== "group" && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Project tools"><Ellipsis /></Button></DropdownMenuTrigger><DropdownMenuContent align="start"><DropdownMenuLabel>Project tools</DropdownMenuLabel>{tools.map(({ id, label, icon: Icon }) => <DropdownMenuItem key={id} onClick={() => { setToolView(id); }}><Icon />{label}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>}
         <div className="main-header-actions">
-          {project && !(page === "home" && (view === "agents" || view === "group")) && <DropdownMenu><DropdownMenuTrigger asChild><button className="project-context"><ProjectAvatar project={project} /><span>{project.name}</span><ChevronDown /></button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Project</DropdownMenuLabel>{projects.data?.map((entry) => <DropdownMenuItem key={entry.id} onClick={() => { useAppStore.getState().selectProject(entry); setView("chat"); }}><ProjectAvatar project={entry} />{entry.name}</DropdownMenuItem>)}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => setProjectDialogOpen(true)}><Plus />Open project</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
+          {project && !(page === "home" && (view === "agents" || view === "group")) && <><DropdownMenu><DropdownMenuTrigger asChild><button className="project-context"><ProjectAvatar project={project} /><span>{project.name}</span><ChevronDown /></button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Project</DropdownMenuLabel>{projects.data?.map((entry) => <DropdownMenuItem key={entry.id} onClick={() => { useAppStore.getState().selectProject(entry); setView("chat"); }}><ProjectAvatar project={entry} />{entry.name}</DropdownMenuItem>)}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => setProjectDialogOpen(true)}><Plus />Open project</DropdownMenuItem></DropdownMenuContent></DropdownMenu><Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Project settings" onClick={() => setProjectSettingsOpen(true)}><Settings2 /></Button></TooltipTrigger><TooltipContent>Project settings</TooltipContent></Tooltip></>}
         </div>
       </header>
       <div className="workspace-body" data-tools-open={toolsOpen}>
@@ -250,11 +260,11 @@ export function AppShell() {
         <header className="workspace-tools-header"><nav aria-label="Project tool panels">{tools.map(({ id, label, icon: Icon }) => <Tooltip key={id}><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" aria-label={label} aria-pressed={toolView === id} onClick={() => { setToolView(id); }}><Icon /></Button></TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>)}</nav><Button variant="ghost" size="icon-sm" aria-label="Close project tools" onClick={() => setToolView(undefined)}><X /></Button></header>
         <div className="workspace-tools-content"><Suspense fallback={<div className="empty-state">Loading…</div>}>
           {toolView === "files" && <FilesPanel key={projectId ?? "empty"} />}
-          {toolView === "git" && <GitPanel key={taskId ?? "empty"} />}
+          {toolView === "git" && <GitPanel key={projectId ?? "empty"} />}
         </Suspense></div>
       </aside>}
       {toolsOpen && <button className="mobile-tools-scrim" aria-label="Dismiss project tools" onClick={() => setToolView(undefined)} />}
-      <div className="main-surface-content"><Suspense fallback={<div className="empty-state">Loading…</div>}>
+      <div className="main-surface-content"><AttachmentPreviewLayout key={`${profileId}:${page}:${view}:${chatId}:${taskId}:${groupId}:${selectedAgentId}`} alreadySplit={toolsOpen}><Suspense fallback={<div className="empty-state">Loading…</div>}>
         {page === "home" && !mobileChatsPage && (view === "editor" ? <div className="page-detail">
           <div className="page-detail-back"><Button variant="ghost" size="sm" onClick={() => setView("chat")}><ArrowLeft />Back to chat</Button></div>
           <EditorPanel />
@@ -263,7 +273,7 @@ export function AppShell() {
         {page === "projects" && <ProjectsPage onOpenProject={() => setProjectDialogOpen(true)} onSelect={newChat} />}
         {page === "tasks" && (view === "task" && taskId ? <div className="page-detail"><div className="page-detail-back"><Button variant="ghost" size="sm" onClick={() => setView("chat")}><ArrowLeft />All tasks</Button></div><TaskPanel key={taskId} /></div> : <TaskboardPanel />)}
         {page === "settings" && <SettingsPage section={settingsSection} onSectionChange={(section) => { setSettingsSection(section); navigateSettings(section); }} onBack={() => { setSettingsSection(undefined); backToSettings(); }} onClose={() => { if (isMobile && previousPage.current === "home" && !previousMobileChatOpen.current) openChats(); else goTo(previousPage.current); }} />}
-      </Suspense></div>
+      </Suspense></AttachmentPreviewLayout></div>
       </div>
     </section>
     {page !== "settings" && <aside className="right-navigation" hidden={isMobile && !mobileChatsPage} aria-label="Navigation and chats">
@@ -284,6 +294,7 @@ export function AppShell() {
       })}
     </nav>
     <OpenProjectDialog open={projectDialogOpen} onOpenChange={setProjectDialogOpen} />
+    <ProjectSettingsDialog project={project} open={projectSettingsOpen} onOpenChange={setProjectSettingsOpen} />
     <NewTaskDialog open={newTaskDialogOpen} onOpenChange={setNewTaskDialogOpen} />
     <ForcePasswordDialog />
   </main>;

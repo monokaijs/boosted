@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AttachmentPreview } from "./attachment-preview";
+import { AttachmentPreviewLayout, AttachmentPreviewSplitGuard } from "./attachment-preview-layout";
 
 const createObjectURL = vi.fn(() => "blob:preview");
 const revokeObjectURL = vi.fn();
@@ -72,4 +73,95 @@ describe("attachment previews", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("File not found");
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
+
+  it("retries a failed remote file load", async () => {
+    const load = vi.fn().mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValue({ blob: new Blob(["pdf"], { type: "application/pdf" }) });
+    render(<AttachmentPreview name="report.pdf" load={load} />);
+    fireEvent.click(screen.getByRole("button", { name: "View report.pdf" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Failed to fetch");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.getByTitle("Preview report.pdf")).toHaveAttribute("src", "blob:preview"));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("chat preview layout", () => {
+  function width(value: number) {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ width: value } as DOMRect);
+  }
+
+  it("splits a wide chat, keeps the composer available, and detaches without reloading", async () => {
+    width(1000);
+    const load = vi.fn(async () => ({ blob: new Blob(["image"], { type: "image/png" }) }));
+    render(<AttachmentPreviewLayout><textarea aria-label="Chat composer" /><AttachmentPreview name="photo.png" load={load} /></AttachmentPreviewLayout>);
+    fireEvent.click(screen.getByRole("button", { name: "View photo.png" }));
+    const pane = screen.getByRole("complementary", { name: "File preview" });
+    expect(await within(pane).findByRole("img", { name: "photo.png" })).toHaveAttribute("src", "blob:preview");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "Chat composer" }), { target: { value: "Continue chatting" } });
+    expect(screen.getByRole("textbox")).toHaveValue("Continue chatting");
+    fireEvent.click(within(pane).getByRole("button", { name: "Zoom in" }));
+    fireEvent.click(within(pane).getByRole("button", { name: "Detach" }));
+    expect(screen.getByRole("dialog", { name: "photo.png" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Zoom level")).toHaveTextContent("125%");
+    expect(screen.queryByRole("complementary", { name: "File preview" })).not.toBeInTheDocument();
+    expect(load).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getByRole("button", { name: "View photo.png" }));
+    expect(screen.getByRole("complementary", { name: "File preview" })).toBeInTheDocument();
+  });
+
+  it.each([
+    { width: 700, alreadySplit: false, guarded: false },
+    { width: 1000, alreadySplit: true, guarded: false },
+    { width: 1000, alreadySplit: false, guarded: true },
+  ])("uses a dialog when there is insufficient room or an existing split (%j)", async (options) => {
+    width(options.width);
+    render(<AttachmentPreviewLayout alreadySplit={options.alreadySplit}><AttachmentPreviewSplitGuard blocked={options.guarded}><AttachmentPreview name="report.pdf" load={async () => ({ blob: new Blob(["pdf"], { type: "application/pdf" }) })} /></AttachmentPreviewSplitGuard></AttachmentPreviewLayout>);
+    fireEvent.click(screen.getByRole("button", { name: "View report.pdf" }));
+    expect(screen.getByRole("dialog", { name: "report.pdf" })).toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "File preview" })).not.toBeInTheDocument();
+    await screen.findByTitle("Preview report.pdf");
+  });
+
+  it("moves an open pane into a dialog when the chat becomes narrow", async () => {
+    width(1000);
+    const load = vi.fn(async () => ({ blob: new Blob(["pdf"], { type: "application/pdf" }) }));
+    render(<AttachmentPreviewLayout><AttachmentPreview name="report.pdf" load={load} /></AttachmentPreviewLayout>);
+    fireEvent.click(screen.getByRole("button", { name: "View report.pdf" }));
+    await screen.findByTitle("Preview report.pdf");
+    width(700);
+    act(() => window.dispatchEvent(new Event("resize")));
+    expect(screen.getByRole("dialog", { name: "report.pdf" })).toBeInTheDocument();
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a second preview in a dialog while keeping the existing pane", async () => {
+    width(1000);
+    const load = async () => ({ blob: new Blob(["pdf"], { type: "application/pdf" }) });
+    render(<AttachmentPreviewLayout><AttachmentPreview name="first.pdf" load={load} /><AttachmentPreview name="second.pdf" load={load} /></AttachmentPreviewLayout>);
+    fireEvent.click(screen.getByRole("button", { name: "View first.pdf" }));
+    await screen.findByTitle("Preview first.pdf");
+    fireEvent.click(screen.getByRole("button", { name: "View second.pdf" }));
+    expect(screen.getByRole("dialog", { name: "second.pdf" })).toBeInTheDocument();
+    expect(screen.getByTitle("Preview first.pdf")).toBeInTheDocument();
+    await screen.findByTitle("Preview second.pdf");
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
+    expect(screen.queryByRole("complementary", { name: "File preview" })).not.toBeInTheDocument();
+  });
+});
+
+it("renders Markdown documents and saves through the supplied backing-file writer", async () => {
+  const blob = new Blob([], { type: "application/octet-stream" });
+  blob.arrayBuffer = async () => new TextEncoder().encode("\uFEFF- [ ] File task\r\n").buffer;
+  const save = vi.fn(async () => {});
+  render(<AttachmentPreview name="tasks.md" load={async () => ({ blob })} saveCheckbox={save} />);
+  fireEvent.click(screen.getByRole("button", { name: "View tasks.md" }));
+  const checkbox = await screen.findByRole("checkbox", { name: "File task" });
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(checkbox).toBeChecked());
+  expect(save).toHaveBeenCalledWith({ expected: "\uFEFF- [ ] File task\r\n", offset: 4, checked: true });
 });

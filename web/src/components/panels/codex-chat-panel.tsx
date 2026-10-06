@@ -126,7 +126,7 @@ function CodexDraftSync({ runtime, sessionKey }: { runtime: AssistantRuntime; se
   return null;
 }
 
-function CodexTranscript({ thread }: { thread: CodexChatThread }) {
+function CodexTranscript({ thread, onThreadChange }: { thread: CodexChatThread; onThreadChange?: (threadId: string) => void }) {
   const api = useBoostedApiClient();
   const queryClient = useQueryClient();
   const selectCodexChat = useAppStore((state) => state.selectCodexChat);
@@ -196,7 +196,9 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
       if (started.threadId !== thread.chat.id) {
         setIsRunning(false);
         void queryClient.invalidateQueries({ queryKey: ["codex-chats"] });
-        if (useAppStore.getState().selectedCodexChatId === thread.chat.id) {
+        if (onThreadChange) {
+          onThreadChange(started.threadId);
+        } else if (useAppStore.getState().selectedCodexChatId === thread.chat.id) {
           selectCodexChat(started.threadId);
           window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", {
             detail: {
@@ -214,7 +216,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
       setError(cause instanceof Error ? cause.message : "Unable to send message.");
       throw cause;
     } finally { sendingRef.current = false; }
-  }, [api, accessMode, attachments, collaborationMode, model, queryClient, reasoningEffort, selectCodexChat, setAttachments, setError, setIsRunning, setMessages, thread.chat.id, thread.chat.title, thread.runtimeDefaults?.accessMode, thread.runtimeDefaults?.approvalPolicy]);
+  }, [api, accessMode, attachments, collaborationMode, model, onThreadChange, queryClient, reasoningEffort, selectCodexChat, setAttachments, setError, setIsRunning, setMessages, thread.chat.id, thread.chat.title, thread.runtimeDefaults?.accessMode, thread.runtimeDefaults?.approvalPolicy]);
 
   const uploadFiles = useCallback(async (incoming: File[]) => {
     const availableSlots = Math.max(0, 4 - attachments.length);
@@ -312,14 +314,16 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
     setIsRunning(true);
     if (started.threadId !== thread.chat.id) {
       setIsRunning(false);
-      if (useAppStore.getState().selectedCodexChatId === thread.chat.id) {
+      if (onThreadChange) {
+        onThreadChange(started.threadId);
+      } else if (useAppStore.getState().selectedCodexChatId === thread.chat.id) {
         selectCodexChat(started.threadId);
         window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", { detail: { threadId: started.threadId, title: thread.chat.title, replaceThreadId: thread.chat.id } }));
       }
     }
     void queryClient.invalidateQueries({ queryKey: ["codex-chat", started.threadId] });
     void queryClient.invalidateQueries({ queryKey: ["codex-chats"] });
-  }, [api, accessMode, collaborationMode, model, queryClient, reasoningEffort, selectCodexChat, setIsRunning, thread.chat.id, thread.chat.title, thread.runtimeDefaults?.accessMode, thread.runtimeDefaults?.approvalPolicy]);
+  }, [api, accessMode, collaborationMode, model, onThreadChange, queryClient, reasoningEffort, selectCodexChat, setIsRunning, thread.chat.id, thread.chat.title, thread.runtimeDefaults?.accessMode, thread.runtimeDefaults?.approvalPolicy]);
   const runtime = useExternalStoreRuntime({
     messages: assistantMessages,
     convertMessage: passthroughMessage,
@@ -390,14 +394,14 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
   );
 }
 
-export function CodexChatPanel({ threadId }: { threadId: string }) {
+export function CodexChatPanel({ threadId, onThreadChange }: { threadId: string; onThreadChange?: (threadId: string) => void }) {
   const api = useBoostedApiClient();
   const thread = useQuery({ ...conversationQueryOptions, queryKey: ["codex-chat", threadId], queryFn: ({ signal }) => api.codexChat(threadId, signal) });
   return (
     <div className="panel-root">
       {thread.isLoading && <div className="grid min-h-0 flex-1 place-items-center"><LoaderCircle className="size-5 animate-spin text-muted-foreground" /></div>}
       {thread.error && <div className="grid min-h-0 flex-1 place-items-center p-8 text-center text-xs text-destructive">{thread.error.message}</div>}
-      {thread.data && <CodexTranscript key={threadId} thread={thread.data} />}
+      {thread.data && <CodexTranscript key={threadId} thread={thread.data} onThreadChange={onThreadChange} />}
     </div>
   );
 }

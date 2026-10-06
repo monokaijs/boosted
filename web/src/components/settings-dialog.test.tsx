@@ -9,6 +9,10 @@ const mocks = vi.hoisted(() => ({
   refreshAppUpdateAvailability: vi.fn(),
   refreshWebApp: vi.fn(),
   isTauriRuntime: vi.fn(),
+  gitlabConnections: vi.fn(),
+  createGitlabConnection: vi.fn(),
+  updateGitlabConnection: vi.fn(),
+  deleteGitlabConnection: vi.fn(),
   integrations: vi.fn(),
   discoverIntegrationTargets: vi.fn(),
   createIntegration: vi.fn(),
@@ -33,6 +37,7 @@ vi.mock("@/lib/store", () => ({
   ),
 }));
 
+import { GitlabConnectionsSettings } from "@/components/settings-gitlab";
 import { ApplicationSettings, IntegrationsSettings } from "@/components/settings-page";
 
 function renderSettings() {
@@ -53,6 +58,13 @@ describe("integration target discovery", () => {
     vi.clearAllMocks();
     mocks.appState.selectedProjectId = "workspace-a";
     mocks.integrations.mockResolvedValue([]);
+    mocks.gitlabConnections.mockResolvedValue([
+      { id: "connection-a", name: "Primary GitLab", baseUrl: "https://gitlab.example", token: "first-token" },
+      { id: "connection-b", name: "Second GitLab", baseUrl: "https://other.example", token: "second-token" },
+    ]);
+    mocks.createGitlabConnection.mockResolvedValue({});
+    mocks.updateGitlabConnection.mockResolvedValue({});
+    mocks.deleteGitlabConnection.mockResolvedValue(undefined);
     mocks.discoverIntegrationTargets.mockResolvedValue({
       targets: [
         { kind: "group", identifier: "7", name: "Acme", fullPath: "acme" },
@@ -65,22 +77,22 @@ describe("integration target discovery", () => {
     mocks.syncIntegration.mockResolvedValue({ imported: 0, skipped: 0, failed: 0, message: "Done" });
   });
 
-  it("auto-explores credentials and clears new selections when the connection changes", async () => {
+  it("auto-explores the saved connection and clears new selections when the connection changes", async () => {
     renderSettings();
     await screen.findByText("No integrations installed");
     fireEvent.click(screen.getByRole("button", { name: /^GitLab/ }));
-    fireEvent.change(screen.getByLabelText("Access token"), { target: { value: "first-token" } });
 
     await waitFor(() => expect(mocks.discoverIntegrationTargets).toHaveBeenCalledTimes(1), { timeout: 2_000 });
     const group = await screen.findByRole("checkbox", { name: /Acme/ });
     fireEvent.click(group);
     expect(screen.getByText("1 target selected")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Install plugin" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Connect sources" })).toBeEnabled();
 
-    fireEvent.change(screen.getByLabelText("Access token"), { target: { value: "second-token" } });
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "GitLab connection" }), { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("option", { name: "Second GitLab" }));
 
     await waitFor(() => expect(screen.getByText("0 targets selected")).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "Install plugin" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Connect sources" })).toBeDisabled();
   });
 
   it("aborts stale exploration and ignores its late response", async () => {
@@ -97,11 +109,11 @@ describe("integration target discovery", () => {
     renderSettings();
     await screen.findByText("No integrations installed");
     fireEvent.click(screen.getByRole("button", { name: /^GitLab/ }));
-    fireEvent.change(screen.getByLabelText("Access token"), { target: { value: "first-token" } });
     await waitFor(() => expect(mocks.discoverIntegrationTargets).toHaveBeenCalledTimes(1), { timeout: 2_000 });
     const firstSignal = mocks.discoverIntegrationTargets.mock.calls[0][2] as AbortSignal;
 
-    fireEvent.change(screen.getByLabelText("Access token"), { target: { value: "second-token" } });
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "GitLab connection" }), { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("option", { name: "Second GitLab" }));
     await waitFor(() => expect(firstSignal.aborted).toBe(true));
     await waitFor(() => expect(mocks.discoverIntegrationTargets).toHaveBeenCalledTimes(2), { timeout: 2_000 });
     await screen.findByRole("checkbox", { name: /Current/ });
@@ -119,8 +131,7 @@ describe("integration target discovery", () => {
       provider: "gitlab",
       name: "Existing GitLab",
       config: {
-        baseUrl: "https://gitlab.example",
-        token: "gitlab-token",
+        connectionId: "connection-a",
         project: "acme/boosted",
       },
       enabled: true,
@@ -142,6 +153,52 @@ describe("integration target discovery", () => {
     expect(mocks.updateIntegration.mock.calls[0][2].config.targets).toEqual([
       { kind: "project", identifier: "acme/boosted", legacyExternalIds: true },
     ]);
+  });
+
+  it("searches GitLab remotely while retaining selections from the initial batch", async () => {
+    mocks.discoverIntegrationTargets.mockResolvedValueOnce({
+      targets: [{ kind: "group", identifier: "7", name: "Acme", fullPath: "acme" }],
+      hasMore: true,
+    }).mockResolvedValue({ targets: [{ kind: "project", identifier: "999", name: "Rare", fullPath: "acme/rare" }] });
+    renderSettings();
+    await screen.findByText("No integrations installed");
+    fireEvent.click(screen.getByRole("button", { name: /^GitLab/ }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: /Acme/ }, { timeout: 2_000 }));
+    expect(screen.getByText(/Showing the first 10/)).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "Search integration targets" }), { target: { value: "Rare" } });
+    fireEvent.click(await screen.findByRole("checkbox", { name: /Rare/ }, { timeout: 2_000 }));
+    expect(mocks.discoverIntegrationTargets).toHaveBeenLastCalledWith("workspace-a", {
+      provider: "gitlab", config: { connectionId: "connection-a", search: "Rare" },
+    }, expect.any(AbortSignal));
+    expect(screen.getByText("2 targets selected")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Connect sources" }));
+    await waitFor(() => expect(mocks.createIntegration).toHaveBeenCalledOnce());
+    expect(mocks.createIntegration.mock.calls[0]).toEqual(["workspace-a", expect.objectContaining({
+      config: { connectionId: "connection-a", targets: [
+        { kind: "group", identifier: "7", legacyExternalIds: false },
+        { kind: "project", identifier: "999", legacyExternalIds: false },
+      ] },
+    })]);
+  });
+
+  it("requires a shared GitLab connection before connecting a project", async () => {
+    mocks.gitlabConnections.mockResolvedValue([]);
+    renderSettings();
+    await screen.findByText(/Add a GitLab connection in Settings/);
+    expect(screen.getByRole("button", { name: /^GitLab/ })).toBeDisabled();
+    expect(mocks.discoverIntegrationTargets).not.toHaveBeenCalled();
+  });
+
+  it("configures GitLab globally without an open project or fetching targets", async () => {
+    mocks.appState.selectedProjectId = undefined;
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><GitlabConnectionsSettings /></QueryClientProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Add GitLab connection" }));
+    fireEvent.change(screen.getByLabelText("Access token"), { target: { value: "new-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
+    await waitFor(() => expect(mocks.createGitlabConnection).toHaveBeenCalledWith({ name: "GitLab", baseUrl: "https://gitlab.com", token: "new-token" }));
+    expect(mocks.discoverIntegrationTargets).not.toHaveBeenCalled();
+    expect(mocks.createIntegration).not.toHaveBeenCalled();
   });
 
   it("groups Huly projects, validates manual rows, and saves every selection", async () => {
@@ -177,10 +234,10 @@ describe("integration target discovery", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add Huly project" }));
     fireEvent.change(screen.getAllByPlaceholderText("acme").at(-1)!, { target: { value: "other-workspace" } });
     expect(screen.getByText(/Complete or remove each manual Huly/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Install plugin" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Connect sources" })).toBeDisabled();
 
     fireEvent.change(screen.getAllByPlaceholderText("BOOST").at(-1)!, { target: { value: "OTHER" } });
-    const install = screen.getByRole("button", { name: "Install plugin" });
+    const install = screen.getByRole("button", { name: "Connect sources" });
     await waitFor(() => expect(install).toBeEnabled());
     fireEvent.click(install);
 
@@ -198,7 +255,7 @@ describe("integration target discovery", () => {
     expect(screen.getByRole("button", { name: /^GitLab/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /^Huly/ })).toBeDisabled();
     resolveCreate({});
-    await waitFor(() => expect(screen.queryByText("Install Huly")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText("Connect Huly")).not.toBeInTheDocument());
   });
 });
 

@@ -5,6 +5,26 @@ import { ActionGroup } from "./conversation-tools"
 
 afterEach(cleanup)
 
+it("lets an embedded view handle chat links while retaining normal navigation by default", () => {
+  const onOpenChat = vi.fn()
+  const navigate = vi.fn()
+  window.addEventListener("boosted:open-codex-chat", navigate)
+  try {
+    const action: AssistantAction = { id: "create", tool: "create_chat", arguments: {}, status: "completed", chatId: "spawned-chat" }
+    const { container, rerender } = render(<ActionGroup actions={[action]} onOpenChat={onOpenChat} />)
+    fireEvent.click(screen.getByRole("button", { name: "1 tool" }))
+    const details = container.querySelector("details")!
+    details.open = true; fireEvent(details, new Event("toggle"))
+    fireEvent.click(screen.getByRole("button", { name: "Open chat" }))
+    expect(onOpenChat).toHaveBeenCalledWith("spawned-chat")
+    expect(navigate).not.toHaveBeenCalled()
+    rerender(<ActionGroup actions={[action]} />)
+    fireEvent.click(screen.getByRole("button", { name: "Open chat" }))
+    expect(navigate).toHaveBeenCalledTimes(1)
+    expect((navigate.mock.calls[0][0] as CustomEvent).detail).toEqual({ threadId: "spawned-chat" })
+  } finally { window.removeEventListener("boosted:open-codex-chat", navigate) }
+})
+
 it("omits routine calls and counts only visible actions, while keeping failures inspectable", () => {
   const routine: AssistantAction[] = ["read_group_context", "send_group_message", "request_group_peers", "list_chats", "webSearch", "mcpToolCall", "unknown_tool"].map((tool) => ({ id: tool, tool, arguments: {}, status: "completed" }))
   const { container, rerender } = render(<ActionGroup actions={routine} />)

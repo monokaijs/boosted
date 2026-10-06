@@ -23,6 +23,7 @@ vi.mock("@/lib/updater", () => ({ useAppUpdateState: () => ({ phase: "idle" }), 
 vi.mock("@/features/agents/agents-panel", () => ({ openProvidersEvent: "boosted:open-providers", AgentsPanel: ({ selectedId, selectAgent, createAgentOpen, onCreateAgentOpenChange }: { selectedId: string; selectAgent(id: string): void; createAgentOpen: boolean; onCreateAgentOpenChange(open: boolean): void }) => <><p>Agent conversation {selectedId}</p><button onClick={() => selectAgent("pock")}>Switch to Pock</button><CreateAgentDialog shell={{ createAgent: apiMock.createAgent } as unknown as SessionShellState} open={createAgentOpen} onOpenChange={onCreateAgentOpenChange} /></> }));
 vi.mock("@/features/groups/group-panel", () => ({ GroupPanel: ({ groupId, headerTarget }: { groupId: string; headerTarget?: HTMLElement | null }) => <>{headerTarget && createPortal(<h1>Build team</h1>, headerTarget)}<p>Group conversation {groupId}</p></> }));
 vi.mock("@/components/settings-page", () => ({ SettingsPage: ({ section, onClose, onSectionChange, onBack }: { section?: string; onClose(): void; onSectionChange(section: string): void; onBack(): void }) => <><h1>Settings page content</h1><p>Settings section {section ?? "categories"}</p><button onClick={() => onSectionChange("notifications")}>Open notification settings</button><button onClick={onBack}>Settings index</button><button onClick={onClose}>Close settings</button></> }));
+vi.mock("@/components/project-settings-dialog", () => ({ ProjectSettingsDialog: ({ project, open }: { project?: Project; open: boolean }) => open ? <div role="dialog">Project settings for {project?.name}</div> : null }));
 vi.mock("@/components/create-dialogs", () => ({ ForcePasswordDialog: () => null, NewTaskDialog: () => null, OpenProjectDialog: () => null }));
 vi.mock("@/components/machine-manager", () => ({ MachineSwitcher: () => <span>Test machine</span> }));
 vi.mock("@/components/panels/chat-panel", () => ({ NewChatPanel: () => <h1>Start a conversation</h1>, TaskPanel: () => <p>Task detail content</p> }));
@@ -83,8 +84,7 @@ describe("page navigation and conversations", () => {
     fireEvent.click(within(screen.getByRole("navigation", { name: "Mobile navigation" })).getByRole("button", { name: "Settings" }));
     expect(await screen.findByText("Settings section categories")).toBeInTheDocument();
     act(() => window.dispatchEvent(new CustomEvent("boosted:open-settings", { detail: "codex" })));
-    expect(window.location.hash).toBe("#settings/codex");
-    expect(screen.getByText("Settings section codex")).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toHaveTextContent("Project settings for Alpha");
   });
 
   it("starts a new chat in the project using its plus button without expanding the accordion", async () => {
@@ -132,6 +132,16 @@ describe("page navigation and conversations", () => {
     await waitFor(() => expect(document.querySelector(".project-context")).toHaveTextContent("Alpha"));
     expect(useAppStore.getState().selectedProjectId).toBe("alpha");
     expect(localStorage.getItem("boosted.project")).toBe("alpha");
+  });
+
+  it("places project settings immediately after the in-chat project selector", async () => {
+    renderShell();
+    await waitFor(() => expect(document.querySelector(".project-context")).toBeInTheDocument());
+    const selector = document.querySelector(".project-context");
+    const settings = screen.getByRole("button", { name: "Project settings" });
+    expect(selector?.nextElementSibling).toBe(settings);
+    fireEvent.click(settings);
+    expect(screen.getByRole("dialog")).toHaveTextContent("Project settings for Alpha");
   });
 
   it("clears stale project context for a chat outside the registered projects", async () => {

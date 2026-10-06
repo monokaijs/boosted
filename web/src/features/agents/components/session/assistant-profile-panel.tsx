@@ -9,6 +9,7 @@ import { PushNotificationButton } from "@/features/agents/components/session/pus
 import { relativeTimeLabel } from "@/features/agents/lib/session"
 import { AgentAvatar } from "@/features/agents/components/session/agent-avatar"
 import { avatarFromFile } from "@/features/agents/lib/agent-avatar"
+import { AgentIntegrationsPanel } from "@/features/agents/components/session/agent-integrations-panel"
 
 export function AssistantProfilePanel({ open, onOpenChange, agentId, name, state, accounts, accountId, onAccountChange, disabled, onRefresh, onEditProfile, onAvatarChange, onGenerateAvatar, onCancelFollowUp, shell }: {
   open: boolean
@@ -79,6 +80,7 @@ export function AssistantProfilePanel({ open, onOpenChange, agentId, name, state
           <Tabs.List aria-label="Agent details" className="flex shrink-0 gap-5 border-b border-border px-6">
             <Tabs.Tab value="profile" className="border-b-2 border-transparent pb-3 text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-active:border-foreground data-active:text-foreground">Profile</Tabs.Tab>
             <Tabs.Tab value="activity" className="border-b-2 border-transparent pb-3 text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-active:border-foreground data-active:text-foreground">Activity{activeFollowUps.length ? <span className="ml-2 rounded-md bg-secondary px-1.5 py-0.5 text-[11px]">{activeFollowUps.length}</span> : null}</Tabs.Tab>
+            <Tabs.Tab value="integrations" className="border-b-2 border-transparent pb-3 text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-active:border-foreground data-active:text-foreground">Integrations</Tabs.Tab>
           </Tabs.List>
           <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
             <Tabs.Panel value="profile" className="space-y-5 outline-none">
@@ -154,6 +156,9 @@ export function AssistantProfilePanel({ open, onOpenChange, agentId, name, state
                 </button>)}</div> : <p className="text-xs text-muted-foreground">No coding tasks yet.</p>}
               </section>
               <button className="inline-flex items-center gap-2 rounded-md text-xs text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring" type="button" onClick={() => closeWithAction(() => shell.selectNavigationView("projects"))}><Folder className="size-3.5" />Browse projects<ArrowUpRight className="size-3" /></button>
+            </Tabs.Panel>
+            <Tabs.Panel value="integrations" className="outline-none">
+              <AgentIntegrationsPanel agentId={agentId} agentName={name} />
             </Tabs.Panel>
           </div>
         </Tabs.Root>

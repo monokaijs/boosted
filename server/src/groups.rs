@@ -1,10 +1,10 @@
 //! Durable peer conversations. Application state mutations are serialized; turns never hold the gate.
 use super::*;
-use std::time::Duration;
 use group_models::{GroupDelivery, GroupMessage, GroupReview, GroupState, GroupSummary, GroupTask};
 use providers::{document, text};
 use sha2::{Digest, Sha256};
-use tokio::sync::{watch, Mutex};
+use std::time::Duration;
+use tokio::sync::{Mutex, watch};
 
 #[derive(Clone, Default)]
 pub(crate) struct GroupManager {
@@ -25,6 +25,31 @@ pub(crate) struct GroupContext {
 tokio::task_local! { pub(crate) static CONTEXT: GroupContext; }
 pub(crate) fn context() -> Option<GroupContext> {
     CONTEXT.try_with(Clone::clone).ok()
+}
+pub(crate) fn turn_instructions(c: &GroupContext, leader_id: &str) -> String {
+    let workflow = match c.purpose.as_str() {
+        "message" if leader_id == c.agent_id => {
+            "You are the group leader in a message turn. For a human project-work request, inspect existing assignments and use create_group_task to assign a distinct outcome to a named owner unless an existing assignment covers it. Assignment creation queues an execute turn automatically. Your next step is assignment management, not starting a coding chat in this turn. Do not end a project-work request with only a plan or a claim that coding tools must be restored."
+        }
+        "message" => {
+            "You are a specialist in a message turn. For project work without an assignment, use request_group_peers to ask the leader for an assignment within the original human request. Do not ask the human to restore coding tools or create your assignment. Only the leader can create assignments; execution is queued separately."
+        }
+        "execute" => {
+            "You are executing your running assignment. Use create_chat or send_message to dispatch a watched coding run for this assignment, inspect its actual result, and continue until verified or genuinely blocked. Submit verified results with submit_group_result for independent peer review. Do not implement project work with native tools."
+        }
+        "review" => {
+            "You are independently reviewing an assignment. Inspect its result and run meaningful verification with read-only native tools, then use review_group_task with the exact revision and evidence. Do not implement the assignment or launch a coding chat during review."
+        }
+        _ => "Read the current group context before acting.",
+    };
+    let tools = if c.purpose == "execute" {
+        "Coding-chat dispatch tools are available for this assignment."
+    } else {
+        "Coding-chat dispatch tools are intentionally absent in this turn; this is not a permission or setup error. Ignore historical claims that their absence requires human intervention."
+    };
+    format!(
+        "{workflow} {tools} Preserve the original human scope, attachments, and pre-existing checkout changes."
+    )
 }
 fn now() -> String {
     Utc::now().to_rfc3339()
@@ -72,8 +97,10 @@ fn normalized_member(member: &Value) -> AppResult<Value> {
         serde_json::from_value(roles.clone())
             .map_err(|_| AppError::BadRequest("Invalid group roles".into()))?
     } else {
-        vec![serde_json::from_value(member["role"].clone())
-            .map_err(|_| AppError::BadRequest("Invalid group role".into()))?]
+        vec![
+            serde_json::from_value(member["role"].clone())
+                .map_err(|_| AppError::BadRequest("Invalid group role".into()))?,
+        ]
     };
     if roles.is_empty() || roles.iter().collect::<HashSet<_>>().len() != roles.len() {
         return Err(AppError::BadRequest(
@@ -91,7 +118,7 @@ fn normalized_member(member: &Value) -> AppResult<Value> {
         _ => {
             return Err(AppError::BadRequest(
                 "Responsibilities must be text of at most 4000 characters".into(),
-            ))
+            ));
         }
     };
     Ok(serde_json::to_value(group_models::GroupMemberRole {
@@ -381,14 +408,16 @@ pub(crate) async fn snapshot(state: &AppState, group: &str) -> AppResult<Value> 
     value["members"] = json!(profiles);
     let messages = all(&state.db, "group_messages", group).await?;
     value["messageCount"] = json!(messages.len());
-    value["messages"] = json!(messages
-        .into_iter()
-        .rev()
-        .take(120)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>());
+    value["messages"] = json!(
+        messages
+            .into_iter()
+            .rev()
+            .take(120)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+    );
     for (key, table) in [
         ("tasks", "group_tasks"),
         ("reviews", "group_reviews"),
@@ -399,10 +428,12 @@ pub(crate) async fn snapshot(state: &AppState, group: &str) -> AppResult<Value> 
         value[key] = json!(all(&state.db, table, group).await?);
     }
     let deliveries: Vec<String>=sqlx::query_scalar("SELECT data FROM group_deliveries WHERE group_id=? AND status IN ('queued','processing') ORDER BY created_at").bind(group).fetch_all(&state.db.pool).await?;
-    value["deliveries"] = json!(deliveries
-        .iter()
-        .map(|v| serde_json::from_str::<GroupDelivery>(v))
-        .collect::<Result<Vec<_>, _>>()?);
+    value["deliveries"] = json!(
+        deliveries
+            .iter()
+            .map(|v| serde_json::from_str::<GroupDelivery>(v))
+            .collect::<Result<Vec<_>, _>>()?
+    );
     let _: Vec<GroupTask> = serde_json::from_value(value["tasks"].clone())?;
     let _: Vec<GroupReview> = serde_json::from_value(value["reviews"].clone())?;
     Ok(value)
@@ -1744,10 +1775,7 @@ async fn run_delivery(
         }
         None => json!({"id":c.delivery_id,"content":format!("{} assignment: {}",c.purpose,task)}),
     };
-    if c.purpose == "message"
-        && c.task_id.is_none()
-        && planning_agent(&view, &root) == c.agent_id
-    {
+    if c.purpose == "message" && c.task_id.is_none() && planning_agent(&view, &root) == c.agent_id {
         if let Some(recipient) = greeting_recipient(&view, &message, &c.agent_id) {
             if *cancel.borrow() {
                 return Err(AppError::Conflict("Group stopped".into()));
@@ -1776,7 +1804,7 @@ async fn run_delivery(
     snapshot["groupContext"] = model_context(snapshot["groupContext"].clone());
     let current = vec![message];
     let mut excluded = HashSet::new();
-    let mut account = agents::choose_account(state, agent["accountId"].as_str(), &excluded).await?;
+    let mut account = agents::choose_account(state, None, &excluded).await?;
     loop {
         agents::set_group_account(state, &c.agent_id, &account).await?;
         let result = agents::run_turn(
@@ -1795,6 +1823,7 @@ async fn run_delivery(
                 .err()
                 .is_some_and(|e| agents::quota_error(&e.to_string()))
         {
+            providers::mark_exhausted(state, &account).await?;
             excluded.insert(account.clone());
             if let Ok(next) = agents::choose_account(state, None, &excluded).await {
                 account = next;
@@ -1957,17 +1986,20 @@ async fn finish(
             } else {
                 "failed"
             });
-            task["error"] = json!(result
-                .as_ref()
-                .err()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| {
-                    "Owner ended its turn without submitting a result and verification".into()
-                }));
+            task["error"] = json!(
+                result
+                    .as_ref()
+                    .err()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| {
+                        "Owner ended its turn without submitting a result and verification".into()
+                    })
+            );
             save_task(state, &c.group_id, &mut task).await?;
         } else if c.purpose == "review" && task["status"] == "awaiting_review" && !stopped {
             // A silent reviewer must not leave a permanently unserviceable assignment.
-            task["error"] = json!(result
+            task["error"] =
+                json!(result
                 .as_ref()
                 .err()
                 .map(ToString::to_string)
@@ -2317,12 +2349,19 @@ pub(crate) async fn execute_tool(
         serde_json::from_str(include_str!("agent-tools.json"))?,
         &c.purpose,
     );
-    let spec = specs
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|s| s["name"] == name)
-        .ok_or_else(|| AppError::BadRequest("Tool unavailable in this group turn".into()))?;
+    let spec = specs.as_array().unwrap().iter().find(|s| s["name"] == name);
+    let Some(spec) = spec else {
+        let reason = if matches!(name, "create_chat" | "send_message" | "watch_chat") {
+            let leader = group_leader(state, &c.group_id).await?;
+            format!(
+                "Coding-chat dispatch is available only in an execute assignment turn. {}",
+                turn_instructions(c, &leader)
+            )
+        } else {
+            "Tool unavailable in this group turn".into()
+        };
+        return Err(AppError::BadRequest(reason));
+    };
     let fields = args
         .as_object()
         .ok_or_else(|| AppError::BadRequest("Tool arguments must be an object".into()))?;
@@ -2438,10 +2477,12 @@ async fn execute_action(
                 "forward_group_message" => forward_message(state, c, args, current).await,
                 "list_group_agents" => {
                     let agents = agents::list_agents(State(state.clone())).await.0;
-                    Ok(json!(agents
-                        .into_iter()
-                        .map(|agent| json!({"id":agent["id"],"name":agent["profile"]["name"]}))
-                        .collect::<Vec<_>>()))
+                    Ok(json!(
+                        agents
+                            .into_iter()
+                            .map(|agent| json!({"id":agent["id"],"name":agent["profile"]["name"]}))
+                            .collect::<Vec<_>>()
+                    ))
                 }
                 "read_group_context" => {
                     let mut view = snapshot(state, &c.group_id).await?;
@@ -2787,7 +2828,10 @@ pub(crate) async fn record_child_event(
     if method == "thread/tokenUsage/updated" {
         if let Ok(chat) = document(&state.db, "provider-chats", chat_id).await {
             if let Some(group) = chat["groupId"].as_str() {
-                let mut agent = chat["groupAgentId"].as_str().or_else(|| chat["managedByAgentId"].as_str()).map(str::to_owned);
+                let mut agent = chat["groupAgentId"]
+                    .as_str()
+                    .or_else(|| chat["managedByAgentId"].as_str())
+                    .map(str::to_owned);
                 if agent.is_none() {
                     if let Some(task) = chat["groupTaskId"].as_str() {
                         if let Ok(task) = get(&state.db, "group_tasks", task).await {
@@ -2913,4 +2957,58 @@ async fn validate_task_input(state: &AppState, group: &str, input: &Value) -> Ap
         }
     }
     Ok(())
+}
+
+pub(crate) async fn checkbox(
+    State(state): State<AppState>,
+    AxumPath(group): AxumPath<String>,
+    Json(input): Json<markdown_checkboxes::CheckboxEdit>,
+) -> AppResult<Json<Value>> {
+    let _gate = state.groups.gate.lock().await;
+    let meta = get(&state.db, "groups", &group).await?;
+    if state
+        .groups
+        .active
+        .lock()
+        .await
+        .values()
+        .any(|(c, _)| c.group_id == group)
+    {
+        return Err(AppError::Conflict(
+            "Wait for group turns to finish before editing Markdown".into(),
+        ));
+    }
+    let record_id = input
+        .record_id
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("Record ID required".into()))?;
+    let (table, field) = match input.target.as_str() {
+        "message" => ("group_messages", "content"),
+        "instructions" => ("group_tasks", "instructions"),
+        "result" => ("group_tasks", "result"),
+        _ => return Err(AppError::BadRequest("Invalid Markdown target".into())),
+    };
+    let mut record = get(&state.db, table, record_id).await?;
+    if record["groupId"] != group {
+        return Err(AppError::NotFound("Record not found in group".into()));
+    }
+    if field == "instructions"
+        && (meta["stopped"] != true
+            || terminal(&record)
+            || matches!(
+                record["status"].as_str(),
+                Some("running" | "awaiting_review")
+            ))
+    {
+        return Err(AppError::Conflict(
+            "This assignment is read-only. Stop execution before editing.".into(),
+        ));
+    }
+    record[field] = json!(input.apply(record[field].as_str().unwrap_or_default())?);
+    if table == "group_tasks" {
+        record["updatedAt"] = json!(now());
+    }
+    put(&state.db, table, &group, &record).await?;
+    touch(&state, &group, "group.updated").await?;
+    Ok(Json(record))
 }

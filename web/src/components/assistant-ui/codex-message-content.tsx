@@ -1,12 +1,11 @@
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { TaskMarkdown } from "./task-markdown";
 import { useAuiState } from "@assistant-ui/react";
 import type { MessageAttachment } from "@/lib/types";
 import { parseCodexMessage } from "@/lib/codex-message-format";
 import { WorkspaceAttachment, workspaceFileMarkdownComponents, workspaceMarkdownUrlTransform } from "@/components/assistant-ui/workspace-file-markdown";
 
 function Markdown({ text }: { text: string }) {
-  return <div className="aui-markdown"><ReactMarkdown components={workspaceFileMarkdownComponents} remarkPlugins={[remarkGfm]} urlTransform={workspaceMarkdownUrlTransform}>{text}</ReactMarkdown></div>;
+  return <TaskMarkdown className="aui-markdown" content={text} components={workspaceFileMarkdownComponents} urlTransform={workspaceMarkdownUrlTransform} />;
 }
 
 function artifactLink(path: string, label: string) {
@@ -18,7 +17,7 @@ export function CodexMessageContent({ content, user = false, attachments = [] }:
   return <div className="space-y-2">{parseCodexMessage(content).map((part, index) => {
     switch (part.type) {
       case "text": return user
-        ? <div key={index} className="whitespace-pre-wrap break-words">{part.text}</div>
+        ? <Markdown key={index} text={part.text} />
         : <Markdown key={index} text={part.text} />;
       case "question-reply": return <div key={index} className="space-y-3">{part.replies.map((reply, replyIndex) => <div key={replyIndex}>
         <div className="mb-1 text-[10px] font-medium text-muted-foreground">Reply to Codex</div>

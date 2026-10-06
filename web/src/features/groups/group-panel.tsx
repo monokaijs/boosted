@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowDown, ArrowUp, Check, ChevronDown, ListTodo, LoaderCircle, Play, Plus, Square, TriangleAlert } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, ChevronDown, ListTodo, LoaderCircle, MessageSquare, Play, Plus, Square, TriangleAlert, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { AssistantAttachmentList } from '@/features/agents/components/session/assistant-attachment-list';
@@ -14,6 +14,7 @@ import { useBoostedApiClient } from '@/lib/api-context';
 import { ApiError } from '@/lib/api';
 import { conversationQueryOptions } from '@/lib/query-client';
 import { machinePreferenceKey, useAppStore } from '@/lib/store';
+import { AttachmentPreviewSplitGuard } from '@/components/attachment-preview-layout';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -36,7 +37,20 @@ function persisted<T>(key: string, fallback: T): T {
 }
 function persistValue(key: string, value: unknown) { try { sessionStorage.setItem(key, JSON.stringify(value)); } catch { /* Keep unsent content in memory when browser storage is full. */ } }
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : 'Unable to complete this action.';
+const CodexChatPanel = lazy(() => import('@/components/panels/codex-chat-panel').then((module) => ({ default: module.CodexChatPanel })));
+
 export function GroupPanel({ groupId, headerTarget }: { groupId: string; headerTarget?: HTMLElement | null }) {
+  const [chatId, setChatId] = useState<string>();
+  return <AttachmentPreviewSplitGuard blocked={Boolean(chatId)}><div className="group-chat-layout" data-split={Boolean(chatId)}>
+    <GroupConversation key={groupId} groupId={groupId} headerTarget={headerTarget} onOpenChat={setChatId} />
+    {chatId && <aside className="group-coding-chat" aria-label="Agent coding chat">
+      <header className="group-coding-chat-header"><MessageSquare className="size-4 text-muted-foreground" /><h2>Agent coding chat</h2><Button variant="ghost" size="icon-sm" aria-label="Close coding chat" onClick={() => setChatId(undefined)}><X /></Button></header>
+      <Suspense fallback={<div className="empty-state">Loading chat…</div>}><CodexChatPanel key={chatId} threadId={chatId} onThreadChange={setChatId} /></Suspense>
+    </aside>}
+  </div></AttachmentPreviewSplitGuard>;
+}
+
+function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: string; headerTarget?: HTMLElement | null; onOpenChat(chatId: string): void }) {
   const client = useBoostedApiClient();
   const groups = useMemo(() => createGroupsApi(client), [client]);
   const queryClient = useQueryClient();
@@ -176,13 +190,14 @@ export function GroupPanel({ groupId, headerTarget }: { groupId: string; headerT
     const tasks = group!.tasks.filter((task) => task.rootId === rootId);
     const executions = group!.executions.filter((execution) => execution.rootId === rootId);
     const receipts = group!.receipts.filter((receipt) => isChatActionVisible(receipt) && executions.some((execution) => execution.id === receipt.executionId));
-    if (!tasks.length && !receipts.length && !executions.some((execution) => execution.error)) return null;
+    if (!tasks.length && !receipts.length && !executions.some((execution) => execution.error || execution.chatId)) return null;
     return <div className="group-work-summary">
       {tasks.map((task) => <button type="button" className="group-task-update" key={task.id} onClick={(event) => openDetails('tasks', event.currentTarget)}>
         {task.status === 'completed' ? <Check className="size-3.5 shrink-0" /> : ['running', 'awaiting_review'].includes(task.status) ? <LoaderCircle className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none" /> : <ListTodo className="size-3.5 shrink-0" />}
         <span><strong>{task.title}</strong><small>{agentName(task.ownerId)} · {taskLabels[task.status]}</small></span>
       </button>)}
-      {group!.members.filter((member) => receipts.some((receipt) => receipt.agentId === member.id)).map((member) => <div key={member.id} className="group-work-tools"><span>{member.profile.name}</span><ActionGroup actions={receipts.filter((receipt) => receipt.agentId === member.id)} /></div>)}
+      {executions.filter((execution, index) => execution.chatId && executions.findIndex((other) => other.chatId === execution.chatId) === index).map((execution) => <button type="button" className="group-task-update" key={execution.id} onClick={() => onOpenChat(execution.chatId!)}><MessageSquare className="size-3.5 shrink-0" /><span>Open {agentName(execution.agentId)}’s chat</span></button>)}
+      {group!.members.filter((member) => receipts.some((receipt) => receipt.agentId === member.id)).map((member) => <div key={member.id} className="group-work-tools"><span>{member.profile.name}</span><ActionGroup actions={receipts.filter((receipt) => receipt.agentId === member.id)} onOpenChat={onOpenChat} /></div>)}
       {executions.filter((execution) => execution.error && (!execution.taskId || group!.tasks.some((task) => task.id === execution.taskId && ['failed', 'blocked', 'interrupted'].includes(task.status)))).map((execution) => <p className="px-2 text-xs text-destructive" key={execution.id}>{agentName(execution.agentId)}: {execution.error}</p>)}
     </div>;
   }
@@ -221,7 +236,10 @@ export function GroupPanel({ groupId, headerTarget }: { groupId: string; headerT
               {message.role !== 'user' && boundary && <div className="group-message-sender"><AgentAvatar name={message.senderName} avatar={member?.profile.avatar} className="size-5" /><span>{message.senderName}</span>{message.kind === 'request' && <small>asked a peer</small>}</div>}
               {message.recipientIds.length > 0 && (message.kind === 'request' || message.recipientIds.length < group.memberIds.length) && <p className={cn('group-message-recipient', message.role === 'user' && 'text-right')}>To {message.recipientIds.map(agentName).join(', ')}</p>}
               {message.attachments?.length ? <div className={cn('mb-2 flex max-w-[88%]', message.role === 'user' && 'ml-auto justify-end')}><AssistantAttachmentList attachments={message.attachments} /></div> : null}
-              {message.content && <div className={cn('assistant-message-bubble w-fit min-w-0 max-w-[88%] rounded-[22px] px-4 py-2.5', message.role === 'user' ? 'assistant-message-user ml-auto text-white' : 'assistant-message-reply text-foreground')}><MarkdownContent content={message.content} /></div>}
+              {message.content && <div className={cn('assistant-message-bubble w-fit min-w-0 max-w-[88%] rounded-[22px] px-4 py-2.5', message.role === 'user' ? 'assistant-message-user ml-auto text-white' : 'assistant-message-reply text-foreground')}><MarkdownContent content={message.content} saveCheckbox={!message.pending && !group.executions.some((e) => ['running', 'waiting'].includes(e.status)) ? async (edit) => {
+                try { await client.toggleMarkdownCheckbox(`/groups/${encodeURIComponent(groupId)}`, 'message', message.id, edit); }
+                finally { void queryClient.invalidateQueries({ queryKey: ['groups', groupId] }); }
+              } : undefined} /></div>}
               {message.pending ? <div role="status" className="mt-1 flex items-center justify-end gap-1 pr-4 text-[11px] text-muted-foreground">
                 {message.pending.status === 'sending' ? <><LoaderCircle className="size-3 animate-spin" />Sending…</> : <><TriangleAlert className="size-3 text-destructive" /><span title={message.pending.error}>Not sent</span><button type="button" className="underline underline-offset-2" aria-label="Retry message" onClick={() => dispatch(message.pending!)}>Retry</button></>}
               </div> : showSentTime && <p aria-live={showDeliveryStatus ? 'polite' : undefined} className={cn('mt-1 pr-4 text-right text-[11px] text-muted-foreground', !showDeliveryStatus && 'opacity-0 group-hover/message:opacity-100 group-focus-within/message:opacity-100')}>Delivered</p>}
@@ -229,7 +247,7 @@ export function GroupPanel({ groupId, headerTarget }: { groupId: string; headerT
             {message.senderType === 'user' && !message.pending && workSummary(message.rootId)}
           </div>;
         })}
-        {Array.from(new Set(group.tasks.map((task) => task.rootId))).filter((rootId) => !messages.some((message) => message.senderType === 'user' && message.rootId === rootId)).map((rootId) => <div key={rootId}>{workSummary(rootId)}</div>)}
+        {Array.from(new Set([...group.tasks, ...group.executions].map((item) => item.rootId))).filter((rootId) => !messages.some((message) => message.senderType === 'user' && message.rootId === rootId)).map((rootId) => <div key={rootId}>{workSummary(rootId)}</div>)}
         {!group.stopped && running.filter((execution) => execution.status === 'running' && execution.activity).map((execution) => <div key={execution.id} className="mt-3" role="status" aria-label={agentName(execution.agentId) + ' is typing'}>
           <div className="group-message-sender"><span>{agentName(execution.agentId)}</span></div>
           <div className="assistant-message-bubble assistant-message-reply w-fit rounded-[22px] px-4 py-2.5 text-muted-foreground"><span aria-hidden="true" className="animate-pulse tracking-widest motion-reduce:animate-none">•••</span></div>
@@ -254,7 +272,7 @@ export function GroupPanel({ groupId, headerTarget }: { groupId: string; headerT
         <button type="submit" className="assistant-message-send grid size-8 shrink-0 place-items-center rounded-full text-white disabled:opacity-40" aria-label="Send message" disabled={(!draft.trim() && !attachments.length) || readingFiles}><ArrowUp className="size-4" /></button>
       </form>
     </div></div>
-    <GroupDetails group={group} open={drawer} onOpenChange={setDrawer} tab={detailTab} onTabChange={setDetailTab} busy={busy} error={error} opener={opener} onDelete={() => setDeleting(true)} onControl={control} onEdit={() => setEditing(true)} onCreateTask={() => setCreatingTask(true)} onEditTask={setEditingTask} onTaskAction={(task, next) => void action(() => groups.taskAction(groupId, task.id, next))} />
+    <GroupDetails group={group} open={drawer} onOpenChange={setDrawer} tab={detailTab} onTabChange={setDetailTab} busy={busy} error={error} opener={opener} onOpenChat={onOpenChat} onDelete={() => setDeleting(true)} onControl={control} onEdit={() => setEditing(true)} onCreateTask={() => setCreatingTask(true)} onEditTask={setEditingTask} onTaskAction={(task, next) => void action(() => groups.taskAction(groupId, task.id, next))} />
     <DeleteGroupDialog group={group} open={deleting} onOpenChange={setDeleting} />
     <GroupDialog open={editing} onOpenChange={setEditing} initial={group} />
     <AssignmentDialog key={editingTask?.id ?? 'new'} group={group} initial={editingTask} open={creatingTask || Boolean(editingTask)} onOpenChange={(open) => { if (!open) { setCreatingTask(false); setEditingTask(undefined); } }} onSave={async (body) => {

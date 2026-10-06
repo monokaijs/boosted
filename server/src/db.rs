@@ -7,7 +7,7 @@ use crate::{
 };
 use chrono::Utc;
 use serde_json::Value;
-use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
+use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
 use std::path::Path;
 
 #[derive(Clone)]
@@ -42,6 +42,19 @@ impl Database {
             sqlx::query(statement).execute(&self.pool).await?;
         }
         sqlx::query("CREATE TABLE IF NOT EXISTS feature_documents (namespace TEXT NOT NULL, id TEXT NOT NULL, content_json TEXT NOT NULL, PRIMARY KEY(namespace,id))").execute(&self.pool).await?;
+        let columns = sqlx::query("PRAGMA table_info(projects)")
+            .fetch_all(&self.pool)
+            .await?;
+        if !columns
+            .iter()
+            .any(|row| row.get::<String, _>("name") == "icon")
+        {
+            sqlx::query("ALTER TABLE projects ADD COLUMN icon TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
+        crate::gitlab_connections::migrate(self).await?;
+        crate::agent_integrations::migrate(self).await?;
         crate::groups::migrate(self).await?;
         crate::agent_usage::migrate(self).await?;
         Ok(())
@@ -156,7 +169,7 @@ impl Database {
 
     pub async fn projects(&self) -> AppResult<Vec<Project>> {
         let rows = sqlx::query(
-            "SELECT id,name,repo_path,default_branch,created_at FROM projects ORDER BY created_at",
+            "SELECT id,name,icon,repo_path,default_branch,created_at FROM projects ORDER BY created_at",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -165,7 +178,7 @@ impl Database {
 
     pub async fn project(&self, id: &str) -> AppResult<Project> {
         let row = sqlx::query(
-            "SELECT id,name,repo_path,default_branch,created_at FROM projects WHERE id=?",
+            "SELECT id,name,icon,repo_path,default_branch,created_at FROM projects WHERE id=?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -174,18 +187,30 @@ impl Database {
         Ok(project_from_row(&row))
     }
 
-    pub async fn tasks(&self, project_id: Option<&str>) -> AppResult<Vec<Task>> {
-        let rows = if let Some(project_id) = project_id {
-            let query = TASK_SELECT.to_owned() + " WHERE t.project_id=? ORDER BY t.updated_at DESC";
-            sqlx::query(&query)
-                .bind(project_id)
-                .fetch_all(&self.pool)
-                .await?
-        } else {
-            sqlx::query(&(TASK_SELECT.to_owned() + " ORDER BY t.updated_at DESC"))
-                .fetch_all(&self.pool)
-                .await?
-        };
+    pub async fn update_project_icon(&self, id: &str, icon: Option<&str>) -> AppResult<Project> {
+        if let Some(icon) = icon {
+            if icon.len() > 2_000_000 {
+                return Err(AppError::BadRequest("Project icon is too large".into()));
+            }
+            crate::agents::validate_image(icon)?;
+        }
+        let result = sqlx::query("UPDATE projects SET icon=? WHERE id=?")
+            .bind(icon)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound("project not found".into()));
+        }
+        self.project(id).await
+    }
+
+    pub async fn tasks(&self, project_id: &str) -> AppResult<Vec<Task>> {
+        let query = TASK_SELECT.to_owned() + " WHERE t.project_id=? ORDER BY t.updated_at DESC";
+        let rows = sqlx::query(&query)
+            .bind(project_id)
+            .fetch_all(&self.pool)
+            .await?;
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {
             tasks.push(self.task_from_row(&row).await?);
@@ -316,6 +341,7 @@ fn project_from_row(row: &sqlx::sqlite::SqliteRow) -> Project {
     Project {
         id: row.get("id"),
         name: row.get("name"),
+        icon: row.get("icon"),
         repo_path: row.get("repo_path"),
         default_branch: row.get("default_branch"),
         created_at: row.get("created_at"),
@@ -362,3 +388,87 @@ CREATE TABLE IF NOT EXISTS task_sources(task_id TEXT PRIMARY KEY REFERENCES task
 CREATE TABLE IF NOT EXISTS codex_settings(id INTEGER PRIMARY KEY CHECK(id=1), binary_path TEXT, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS workspace_codex_settings(project_id TEXT PRIMARY KEY REFERENCES projects(id), instructions TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL);
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ICON: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII=";
+
+    async fn insert_project(db: &Database) {
+        sqlx::query("INSERT INTO users(id,username,password_hash,role,created_at) VALUES('user','tester','unused','member','2026-10-06')")
+            .execute(&db.pool).await.unwrap();
+        sqlx::query("INSERT INTO projects(id,name,repo_path,default_branch,created_by,created_at) VALUES('project','alpha','/alpha','main','user','2026-10-06')")
+            .execute(&db.pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn project_icon_migrates_persists_and_can_be_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("boosted.sqlite3");
+        let db = Database::connect(&path).await.unwrap();
+        insert_project(&db).await;
+        // Reproduce an existing database from before project icons were supported.
+        sqlx::query("ALTER TABLE projects DROP COLUMN icon")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        db.pool.close().await;
+
+        let db = Database::connect(&path).await.unwrap();
+        assert!(db.project("project").await.unwrap().icon.is_none());
+        let saved = db.update_project_icon("project", Some(ICON)).await.unwrap();
+        assert_eq!(saved.icon.as_deref(), Some(ICON));
+        assert_eq!(db.projects().await.unwrap()[0].icon.as_deref(), Some(ICON));
+        db.pool.close().await;
+
+        let db = Database::connect(&path).await.unwrap();
+        assert_eq!(
+            db.project("project").await.unwrap().icon.as_deref(),
+            Some(ICON)
+        );
+        assert!(
+            db.update_project_icon("project", None)
+                .await
+                .unwrap()
+                .icon
+                .is_none()
+        );
+        db.pool.close().await;
+        let db = Database::connect(&path).await.unwrap();
+        assert!(db.project("project").await.unwrap().icon.is_none());
+    }
+
+    #[tokio::test]
+    async fn project_icon_rejects_invalid_images_and_missing_projects() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Database::connect(&root.path().join("boosted.sqlite3"))
+            .await
+            .unwrap();
+        insert_project(&db).await;
+        db.update_project_icon("project", Some(ICON)).await.unwrap();
+        for invalid in [
+            "https://example.com/icon.png",
+            "data:image/png;base64,bm90IGFuIGltYWdl",
+            "data:image/png;base64,!",
+        ] {
+            assert!(matches!(
+                db.update_project_icon("project", Some(invalid)).await,
+                Err(AppError::BadRequest(_))
+            ));
+        }
+        assert!(matches!(
+            db.update_project_icon("project", Some(&"x".repeat(2_000_001)))
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
+        assert_eq!(
+            db.project("project").await.unwrap().icon.as_deref(),
+            Some(ICON)
+        );
+        assert!(matches!(
+            db.update_project_icon("missing", None).await,
+            Err(AppError::NotFound(_))
+        ));
+    }
+}

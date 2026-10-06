@@ -87,6 +87,9 @@ pub async fn write(
     content: &str,
     expected_revision: &str,
 ) -> AppResult<FileContent> {
+    // Serialize application writes so concurrent revision checks cannot both succeed.
+    static WRITE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _gate = WRITE_GATE.lock().await;
     let path = safe_path(root, relative, true)?;
     if path.exists() {
         let current = tokio::fs::read(&path).await?;

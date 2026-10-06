@@ -28,6 +28,7 @@ pub struct ImportedIssue {
 #[serde(rename_all = "camelCase")]
 pub struct IntegrationDiscoveryResult {
     pub targets: Vec<DiscoveredIntegrationTarget>,
+    pub has_more: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -156,6 +157,10 @@ async fn response_json_limited(
     }
     serde_json::from_slice(&body)
         .map_err(|error| AppError::BadRequest(format!("{context} returned invalid JSON: {error}")))
+}
+
+pub fn validate_gitlab_connection(config: &Value) -> AppResult<()> {
+    gitlab_connection(config).map(|_| ())
 }
 
 fn gitlab_connection<'a>(config: &'a Value) -> AppResult<(Url, &'a str)> {
@@ -316,10 +321,13 @@ fn finish_discovery(mut targets: Vec<DiscoveredIntegrationTarget>) -> Integratio
             target.identifier.clone(),
         )
     });
-    IntegrationDiscoveryResult { targets }
+    IntegrationDiscoveryResult {
+        targets,
+        has_more: false,
+    }
 }
 
-fn gitlab_discovery_url(base: &Url, resource: &str, page: Option<&str>) -> AppResult<Url> {
+fn gitlab_discovery_url(base: &Url, resource: &str, search: Option<&str>) -> AppResult<Url> {
     let mut url = base.clone();
     url.set_query(None);
     url.set_fragment(None);
@@ -339,14 +347,14 @@ fn gitlab_discovery_url(base: &Url, resource: &str, page: Option<&str>) -> AppRe
                     .append_pair("archived", "false")
                     .append_pair("order_by", "path")
                     .append_pair("sort", "asc")
-                    .append_pair("per_page", "100");
+                    .append_pair("per_page", "10");
             }
             "groups" => {
                 query
                     .append_pair("min_access_level", "10")
                     .append_pair("order_by", "path")
                     .append_pair("sort", "asc")
-                    .append_pair("per_page", "100");
+                    .append_pair("per_page", "10");
             }
             _ => {
                 return Err(AppError::Internal(format!(
@@ -354,8 +362,8 @@ fn gitlab_discovery_url(base: &Url, resource: &str, page: Option<&str>) -> AppRe
                 )));
             }
         }
-        if let Some(page) = page {
-            query.append_pair("page", page);
+        if let Some(search) = search.filter(|search| !search.trim().is_empty()) {
+            query.append_pair("search", search.trim());
         }
     }
     Ok(url)
@@ -428,61 +436,37 @@ async fn fetch_gitlab_discovery_resource(
     base: &Url,
     token: &str,
     resource: &str,
-) -> AppResult<Vec<Value>> {
-    let mut items = Vec::new();
-    let mut page = None;
-    let mut seen_pages = HashSet::from(["1".to_string()]);
-    let mut pages_read = 0;
-
-    loop {
-        let url = gitlab_discovery_url(base, resource, page.as_deref())?;
-        let current_url = url.clone();
-        let response = client
-            .get(url)
-            .header("PRIVATE-TOKEN", token)
-            .send()
-            .await
-            .map_err(|error| {
-                AppError::Internal(format!("GitLab discovery request failed: {error}"))
-            })?;
-        if !response.status().is_success() {
-            return Err(AppError::BadRequest(format!(
-                "GitLab returned {} while discovering {resource}",
-                response.status()
-            )));
-        }
-        let next_page = gitlab_next_page(response.headers(), &current_url)?;
-        let value = response_json_limited(
-            response,
-            MAX_DISCOVERY_RESPONSE_BYTES,
-            &format!("GitLab {resource} discovery"),
-        )
-        .await?;
-        let page_items = value.as_array().ok_or_else(|| {
-            AppError::BadRequest(format!(
-                "GitLab discovery response for {resource} must be an array"
-            ))
-        })?;
-        items.extend(page_items.iter().cloned());
-        pages_read += 1;
-
-        let Some(next_page) = next_page else {
-            break;
-        };
-        if pages_read >= MAX_GITLAB_PAGES {
-            return Err(AppError::BadRequest(format!(
-                "GitLab {resource} discovery exceeded the {MAX_GITLAB_PAGES}-page limit"
-            )));
-        }
-        if !seen_pages.insert(next_page.clone()) {
-            return Err(AppError::BadRequest(format!(
-                "GitLab returned a repeated discovery page `{next_page}` for {resource}"
-            )));
-        }
-        page = Some(next_page);
+    search: Option<&str>,
+) -> AppResult<(Vec<Value>, bool)> {
+    let url = gitlab_discovery_url(base, resource, search)?;
+    let response = client
+        .get(url.clone())
+        .header("PRIVATE-TOKEN", token)
+        .send()
+        .await
+        .map_err(|error| AppError::Internal(format!("GitLab discovery request failed: {error}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::BadRequest(format!(
+            "GitLab returned {} while discovering {resource}",
+            response.status()
+        )));
     }
-
-    Ok(items)
+    let has_more = gitlab_next_page(response.headers(), &url)?.is_some();
+    let value = response_json_limited(
+        response,
+        MAX_DISCOVERY_RESPONSE_BYTES,
+        &format!("GitLab {resource} discovery"),
+    )
+    .await?;
+    let items = value.as_array().ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "GitLab discovery response for {resource} must be an array"
+        ))
+    })?;
+    Ok((
+        items.iter().take(10).cloned().collect(),
+        has_more || items.len() > 10,
+    ))
 }
 
 fn parse_gitlab_discovery_targets(
@@ -537,12 +521,20 @@ async fn discover_gitlab(config: &Value) -> AppResult<IntegrationDiscoveryResult
     let (base, token) = gitlab_connection(config)?;
     let client = integration_client()?;
     let (projects, groups) = tokio::try_join!(
-        fetch_gitlab_discovery_resource(&client, &base, token, "projects"),
-        fetch_gitlab_discovery_resource(&client, &base, token, "groups"),
+        fetch_gitlab_discovery_resource(
+            &client,
+            &base,
+            token,
+            "projects",
+            config["search"].as_str()
+        ),
+        fetch_gitlab_discovery_resource(&client, &base, token, "groups", config["search"].as_str()),
     )?;
-    let mut targets = parse_gitlab_discovery_targets("projects", &projects)?;
-    targets.extend(parse_gitlab_discovery_targets("groups", &groups)?);
-    Ok(finish_discovery(targets))
+    let mut targets = parse_gitlab_discovery_targets("projects", &projects.0)?;
+    targets.extend(parse_gitlab_discovery_targets("groups", &groups.0)?);
+    let mut result = finish_discovery(targets);
+    result.has_more = projects.1 || groups.1;
+    Ok(result)
 }
 
 fn parse_huly_workspaces(workspaces: &[Value]) -> AppResult<Vec<DiscoveredIntegrationTarget>> {
@@ -998,8 +990,13 @@ mod tests {
             != Some("gitlab-token")
             || query.get("membership").map(String::as_str) != Some("true")
             || query.get("archived").map(String::as_str) != Some("false")
+            || query.get("per_page").map(String::as_str) != Some("10")
         {
             return StatusCode::UNAUTHORIZED.into_response();
+        }
+        if query.get("search").map(String::as_str) == Some("Two") {
+            return Json(json!([{"id":2,"name":"Two","path_with_namespace":"acme/two"}]))
+                .into_response();
         }
         let page = query.get("page").map(String::as_str).unwrap_or("1");
         let mut response = match page {
@@ -1029,8 +1026,12 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             != Some("gitlab-token")
             || query.get("min_access_level").map(String::as_str) != Some("10")
+            || query.get("per_page").map(String::as_str) != Some("10")
         {
             return StatusCode::UNAUTHORIZED.into_response();
+        }
+        if query.get("search").map(String::as_str) == Some("Two") {
+            return Json(json!([])).into_response();
         }
         Json(json!([{"id":7,"name":"Acme","full_path":"acme"}])).into_response()
     }
@@ -1224,18 +1225,18 @@ mod tests {
             gitlab_discovery_url(&base, "projects", None)
                 .unwrap()
                 .as_str(),
-            "https://gitlab.example/gitlab/api/v4/projects?membership=true&simple=true&archived=false&order_by=path&sort=asc&per_page=100"
+            "https://gitlab.example/gitlab/api/v4/projects?membership=true&simple=true&archived=false&order_by=path&sort=asc&per_page=10"
         );
         assert_eq!(
-            gitlab_discovery_url(&base, "groups", Some("3"))
+            gitlab_discovery_url(&base, "groups", Some("Acme & Team"))
                 .unwrap()
                 .as_str(),
-            "https://gitlab.example/gitlab/api/v4/groups?min_access_level=10&order_by=path&sort=asc&per_page=100&page=3"
+            "https://gitlab.example/gitlab/api/v4/groups?min_access_level=10&order_by=path&sort=asc&per_page=10&search=Acme+%26+Team"
         );
     }
 
     #[tokio::test]
-    async fn discovers_gitlab_pages_and_huly_targets_over_the_connector_contract() {
+    async fn loads_only_first_gitlab_page_and_huly_targets_over_the_connector_contract() {
         let app = Router::new()
             .route("/api/v4/projects", get(mock_gitlab_projects))
             .route("/api/v4/groups", get(mock_gitlab_groups))
@@ -1251,10 +1252,20 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(gitlab.targets.len(), 3);
+        assert_eq!(gitlab.targets.len(), 2);
+        assert!(gitlab.has_more);
         assert_eq!(gitlab.targets[0].identifier, "7");
         assert_eq!(gitlab.targets[1].identifier, "1");
-        assert_eq!(gitlab.targets[2].identifier, "2");
+
+        let searched = discover(
+            "gitlab",
+            &json!({"baseUrl":format!("http://{address}"),"token":"gitlab-token","search":"Two"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(searched.targets.len(), 1);
+        assert_eq!(searched.targets[0].identifier, "2");
+        assert!(!searched.has_more);
 
         let huly = discover(
             "huly",

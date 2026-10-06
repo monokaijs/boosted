@@ -9,13 +9,13 @@ export const destinations = [
 ] as const;
 export type AppPage = typeof destinations[number]["id"];
 
-export const settingsSections = ["providers", "connections", "notifications", "web", "application", "team", "usage", "workspace", "integrations", "codex"] as const;
-export type SettingsSectionId = typeof settingsSections[number];
+export const settingsSections = ["providers", "connections", "notifications", "web", "application", "team", "usage", "integrations"] as const;
+export type SettingsSectionId = typeof settingsSections[number] | "workspace" | "codex";
 
 export function settingsSectionFromHash(): SettingsSectionId | undefined {
   if (window.location.hash === "#usage") return "usage";
   const id = window.location.hash.replace(/^#settings\//, "");
-  return settingsSections.find((section) => section === id);
+  return settingsSections.find((section): section is typeof settingsSections[number] => section === id);
 }
 
 export function navigateSettings(section?: SettingsSectionId) {

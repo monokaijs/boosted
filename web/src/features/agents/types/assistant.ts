@@ -66,6 +66,7 @@ export type AssistantState = {
   messages: AssistantMessage[]
   status: "idle" | "running"
   activeGroupId?: string | null
+  activeExternalSession?: { id: string; provider: "slack" | "telegram"; chatName: string } | null
   activity?: "thinking" | "working" | "responding" | null
   followUps?: AssistantFollowUp[]
   timeZone?: string
@@ -73,7 +74,7 @@ export type AssistantState = {
   error: string | null
 }
 
-export type AssistantSummary = Pick<AssistantState, "id" | "profile" | "status" | "accountId" | "createdAt" | "updatedAt"> & { lastMessageAt?: string | null }
+export type AssistantSummary = Pick<AssistantState, "id" | "profile" | "status" | "accountId" | "activeExternalSession" | "createdAt" | "updatedAt"> & { lastMessageAt?: string | null }
 export type CreateAssistantRequest = Partial<Pick<AssistantProfile, "name" | "personality">>
 
 export type AssistantMessageRequest = {
@@ -82,4 +83,46 @@ export type AssistantMessageRequest = {
   accountId?: string
   attachments?: AssistantAttachment[]
   timeZone?: string
+}
+
+export type AgentIntegrationProvider = "slack" | "telegram"
+export type AgentIntegrationChat = {
+  id: string
+  integrationId: string
+  externalId: string
+  name: string
+  kind: string
+  status: "pending" | "approved" | "revoked"
+  approvedAt?: string | null
+  lastSeenAt: string
+  createdAt: string
+}
+export type AgentIntegration = {
+  id: string
+  agentId: string
+  provider: AgentIntegrationProvider
+  name: string
+  enabled: boolean
+  bot: { id?: string | number; name?: string; username?: string }
+  workspace?: string | null
+  status: "starting" | "connected" | "reconnecting" | "error" | "disabled"
+  lastConnectedAt?: string | null
+  lastActivityAt?: string | null
+  lastError?: string | null
+  hasBotToken: boolean
+  hasAppToken: boolean
+  slackManifest?: string | null
+  chats: AgentIntegrationChat[]
+  createdAt: string
+  updatedAt: string
+}
+export type AgentIntegrationCreate = {
+  provider: AgentIntegrationProvider
+  name: string
+  botToken: string
+  appToken?: string
+  enabled?: boolean
+}
+export type AgentIntegrationUpdate = Partial<Omit<AgentIntegrationCreate, "provider">> & {
+  reconnect?: boolean
 }

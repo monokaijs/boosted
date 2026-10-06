@@ -2,12 +2,18 @@
 use super::*;
 use tokio::sync::Mutex;
 
+mod selection;
+pub(crate) use selection::{
+    account_available, choose_account, mark_exhausted, new_work_client, start_turn, task_client,
+};
+
 #[derive(Clone)]
 pub(crate) struct ProviderManager {
     pub home: PathBuf,
     clients: Arc<Mutex<HashMap<String, CodexClient>>>,
     chat_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     account_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    selection_lock: Arc<Mutex<()>>,
     #[cfg(test)]
     test_program: Option<PathBuf>,
 }
@@ -18,6 +24,7 @@ impl ProviderManager {
             clients: Default::default(),
             chat_locks: Default::default(),
             account_locks: Default::default(),
+            selection_lock: Default::default(),
             #[cfg(test)]
             test_program: None,
         }
@@ -431,7 +438,16 @@ pub(crate) async fn update_account(
             chat["accountId"] == id && active.contains_key(chat["id"].as_str().unwrap_or_default())
         });
         drop(active);
-        if state.agents.uses_account(&id).await || has_active_chat {
+        let active_task_threads = sqlx::query_scalar::<_, String>(
+            "SELECT provider_thread_id FROM tasks WHERE active_turn_id IS NOT NULL AND provider_thread_id IS NOT NULL",
+        ).fetch_all(&state.db.pool).await?;
+        let has_active_task = chats.iter().any(|chat| {
+            chat["accountId"] == id
+                && active_task_threads
+                    .iter()
+                    .any(|thread| chat["id"] == *thread)
+        });
+        if state.agents.uses_account(&id).await || has_active_chat || has_active_task {
             return Err(AppError::Conflict(
                 "Stop this account's active agents and coding runs before changing its Codex home"
                     .into(),

@@ -1,7 +1,8 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ChartNoAxesCombined, Bell, Bot, Code2, ExternalLink, GitBranch, Globe2, LoaderCircle, ChevronRight, Pencil, Plug, Plus, RefreshCw, Search, Server, Settings2, Shield, Trash2, UserPlus, Users, X } from "lucide-react";
+import { ArrowLeft, ChartNoAxesCombined, Bell, Code2, ExternalLink, GitBranch, Globe2, LoaderCircle, ChevronRight, Pencil, Plug, Plus, RefreshCw, Search, Server, Settings2, Shield, Trash2, UserPlus, Users, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ProjectIconEditor } from "@/components/project-icon-editor";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -15,19 +16,19 @@ import { refreshWebApp } from "@/lib/web-update";
 import type { Integration, IntegrationDiscoveryTarget } from "@/lib/types";
 import { checkAndInstallAppUpdate, formatUpdateProgress, refreshAppUpdateAvailability, useAppUpdateState } from "@/lib/updater";
 import { cn, relativeTime } from "@/lib/utils";
+import { GitlabConnectionsSettings } from "@/components/settings-gitlab";
 import { ConnectionsManager } from "@/components/machine-manager";
 import { SettingsGroup, SettingsRow, SettingsSection, SettingsSelect } from "@/components/settings-primitives";
 import "./settings.css";
 
 const Gitlab = GitBranch;
 const UsageSettings = lazy(() => import("./settings-usage").then((m) => ({ default: m.UsageSettings })));
-const CodexSettings = lazy(() => import("./settings-codex").then((m) => ({ default: m.CodexSettings })));
 const ProvidersSettings = lazy(() => import("@/features/agents/providers-settings").then((m) => ({ default: m.ProvidersSettings })));
 
 import { useMobileLayout } from "@/hooks/use-mobile-layout";
 import type { SettingsSectionId } from "@/lib/navigation";
 export type { SettingsSectionId } from "@/lib/navigation";
-type Section = SettingsSectionId;
+type Section = Exclude<SettingsSectionId, "workspace" | "codex">;
 
 const sectionGroups: { label: string; sections: { id: Section; label: string; icon: typeof Settings2 }[] }[] = [
   { label: "Device", sections: [
@@ -36,15 +37,11 @@ const sectionGroups: { label: string; sections: { id: Section; label: string; ic
   ] },
   { label: "Machine", sections: [
     { id: "providers", label: "Providers", icon: Plug },
+    { id: "integrations", label: "Integrations", icon: Plug },
     { id: "usage", label: "Usage", icon: ChartNoAxesCombined },
     { id: "web", label: "Web interface", icon: Globe2 },
     { id: "application", label: "Application", icon: RefreshCw },
     { id: "team", label: "Team", icon: Users },
-  ] },
-  { label: "Workspace", sections: [
-    { id: "workspace", label: "General", icon: Settings2 },
-    { id: "integrations", label: "Integrations", icon: Plug },
-    { id: "codex", label: "Codex", icon: Bot },
   ] },
 ];
 
@@ -98,15 +95,17 @@ function GlobalWebSettings() {
   </div>;
 }
 
-function WorkspaceSettings() {
+export function ProjectSettingsContent() {
   const projectId = useAppStore((state) => state.selectedProjectId);
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const project = projects.data?.find((entry) => entry.id === projectId);
   return <div className="settings-content">
-    <SettingsSection title="Workspace details" description="The repository currently open in Boosted.">
-      {project ? <SettingsGroup><SettingsRow label="Name"><span>{project.name}</span></SettingsRow><SettingsRow label="Repository" description="Working directory for this workspace."><code className="settings-path" title={project.repoPath}>{project.repoPath}</code></SettingsRow><SettingsRow label="Default branch"><code>{project.defaultBranch}</code></SettingsRow></SettingsGroup> : <p className="settings-empty">Open a workspace to view its settings.</p>}
+    <SettingsSection title="Project details" description="The repository currently open in Boosted.">
+      {project ? <SettingsGroup><SettingsRow label="Name"><span>{project.name}</span></SettingsRow><SettingsRow label="Repository" description="Working directory for this project."><code className="settings-path" title={project.repoPath}>{project.repoPath}</code></SettingsRow><SettingsRow label="Default branch"><code>{project.defaultBranch}</code></SettingsRow></SettingsGroup> : <p className="settings-empty">Open a project to view its settings.</p>}
       {projects.error && <p role="alert" className="settings-error">{projects.error.message}</p>}
     </SettingsSection>
+    {project && <SettingsSection title="Project icon" description="Without an icon, the first letter of the project name appears over its gradient."><ProjectIconEditor key={project.id} project={project} /></SettingsSection>}
+    {project && <IntegrationsSettings key={project.id} embedded />}
     {project && <SettingsSection title="Task defaults"><SettingsGroup><SettingsRow label="Starting branch" description="Imported and manually created tasks start from the default branch."><code>{project.defaultBranch}</code></SettingsRow><SettingsRow label="Isolated worktrees" description="Each task gets its own boosted/* branch and execution directory."><span className="settings-value">Enabled</span></SettingsRow></SettingsGroup></SettingsSection>}
   </div>;
 }
@@ -296,10 +295,6 @@ function hulyTargetMatches(target: HulyTarget, discovered: DiscoveredIntegration
     && (target.project === discovered.identifier || Boolean(discovered.fullPath && target.project === discovered.fullPath));
 }
 
-function sameGitlabTarget(left: GitlabTarget, right: GitlabTarget) {
-  return left.kind === right.kind && left.identifier === right.identifier;
-}
-
 function sameHulyTarget(left: HulyTarget, right: HulyTarget) {
   return left.workspace === right.workspace && left.project === right.project;
 }
@@ -313,7 +308,7 @@ function DiscoveryTargetOption({ target, selected, onToggle }: { target: Discove
   </label>;
 }
 
-export function IntegrationsSettings() {
+export function IntegrationsSettings({ embedded = false }: { embedded?: boolean } = {}) {
   const projectId = useAppStore((state) => state.selectedProjectId);
   const queryClient = useQueryClient();
   const [installing, setInstalling] = useState<Integration["provider"]>();
@@ -333,34 +328,36 @@ export function IntegrationsSettings() {
   const [discoveryRefresh, setDiscoveryRefresh] = useState(0);
   const discoveryGeneration = useRef(0);
   const immediateDiscovery = useRef(false);
-  const persistedGitlabTargets = useRef<GitlabTarget[]>([]);
   const persistedHulyTargets = useRef<HulyTarget[]>([]);
   const selectionConnectionKey = useRef("");
+  const connections = useQuery({ queryKey: ["gitlab-connections"], queryFn: api.gitlabConnections });
+  const [discoveryHasMore, setDiscoveryHasMore] = useState(false);
+  const connectionId = configString(config, "connectionId");
   const integrations = useQuery({ queryKey: ["integrations", projectId], queryFn: () => api.integrations(projectId!), enabled: Boolean(projectId) });
-  const baseUrl = configString(config, "baseUrl", "https://gitlab.com").trim();
   const endpoint = configString(config, "endpoint").trim();
-  const accessToken = configString(config, "token").trim();
   const hulyUsername = configString(config, "username").trim();
   const hulyPassword = configString(config, "password");
+  const serverSearch = installing === "gitlab" ? discoverySearch.trim() : "";
   const connectionKey = installing === "gitlab"
-    ? `${installing}\0${baseUrl}\0${accessToken}`
+    ? `${installing}\0${connectionId}`
     : installing === "huly"
       ? `${installing}\0${endpoint}\0${hulyUsername}\0${hulyPassword}`
       : "";
   const discoveryReady = Boolean(projectId && installing && (installing === "gitlab"
-    ? baseUrl && accessToken
+    ? connectionId && connections.data?.some((entry) => entry.id === connectionId)
     : endpoint && hulyUsername && hulyPassword.trim()));
 
   useEffect(() => {
     if (selectionConnectionKey.current !== connectionKey) {
       selectionConnectionKey.current = connectionKey;
-      setGitlabTargets((current) => current.filter((target) => persistedGitlabTargets.current.some((saved) => sameGitlabTarget(target, saved))));
+      setGitlabTargets([]);
       setHulyTargets((current) => current.filter((target) => persistedHulyTargets.current.some((saved) => sameHulyTarget(target, saved))));
     }
     const generation = ++discoveryGeneration.current;
     setDiscoveredTargets([]);
     setDiscoveryError(undefined);
     setDiscoveryAttempted(false);
+    setDiscoveryHasMore(false);
     setDiscoveryLoading(false);
     if (!projectId || !installing || !discoveryReady) return;
 
@@ -371,12 +368,13 @@ export function IntegrationsSettings() {
     const timeout = window.setTimeout(() => {
       setDiscoveryLoading(true);
       const connectionConfig = installing === "gitlab"
-        ? { baseUrl, token: accessToken }
+        ? { connectionId, search: serverSearch }
         : { endpoint, username: hulyUsername, password: hulyPassword };
       void api.discoverIntegrationTargets(projectId, { provider: installing, config: connectionConfig }, controller.signal)
         .then((result) => {
           if (cancelled || generation !== discoveryGeneration.current) return;
           setDiscoveredTargets(result.targets);
+          setDiscoveryHasMore(Boolean(result.hasMore));
           setDiscoveryAttempted(true);
         })
         .catch((caught: unknown) => {
@@ -393,7 +391,7 @@ export function IntegrationsSettings() {
       controller.abort();
       window.clearTimeout(timeout);
     };
-  }, [accessToken, baseUrl, connectionKey, discoveryReady, discoveryRefresh, endpoint, hulyPassword, hulyUsername, installing, projectId]);
+  }, [connectionKey, discoveryReady, discoveryRefresh, endpoint, hulyPassword, hulyUsername, installing, projectId, connectionId, serverSearch, connections.data]);
 
   const save = useMutation({
     mutationFn: () => {
@@ -402,6 +400,8 @@ export function IntegrationsSettings() {
         targets: _targets,
         project: _project,
         workspace: _workspace,
+        baseUrl: _baseUrl,
+        search: _search,
         token: _token,
         username: _username,
         password: _password,
@@ -410,7 +410,7 @@ export function IntegrationsSettings() {
       const validGitlabTargets = gitlabTargets.filter((target) => target.identifier.trim());
       const validHulyTargets = hulyTargets.filter((target) => target.workspace.trim() && target.project.trim());
       const nextConfig = installing === "gitlab"
-        ? { ...sharedConfig, baseUrl, token: accessToken, targets: validGitlabTargets.map((target) => ({ kind: target.kind, identifier: target.identifier.trim(), legacyExternalIds: Boolean(target.legacyExternalIds) })) }
+        ? { ...sharedConfig, connectionId, targets: validGitlabTargets.map((target) => ({ kind: target.kind, identifier: target.identifier.trim(), legacyExternalIds: Boolean(target.legacyExternalIds) })) }
         : { ...sharedConfig, endpoint, username: hulyUsername, password: hulyPassword, targets: validHulyTargets.map((target) => ({ workspace: target.workspace.trim(), project: target.project.trim(), legacyExternalIds: Boolean(target.legacyExternalIds) })) };
       const enabled = editingId ? integrations.data?.find((entry) => entry.id === editingId)?.enabled ?? true : true;
       const input = { name, config: nextConfig, enabled, syncIntervalMinutes: schedule ? Number(schedule) : undefined };
@@ -435,12 +435,13 @@ export function IntegrationsSettings() {
     setDiscoveryError(undefined);
     setDiscoveryLoading(false);
     setDiscoveryAttempted(false);
+    setDiscoveryHasMore(false);
     setDiscoveryRefresh((current) => current + 1);
   }
 
   function begin(provider: Integration["provider"]) {
     resetDiscovery();
-    persistedGitlabTargets.current = [];
+    immediateDiscovery.current = true;
     persistedHulyTargets.current = [];
     selectionConnectionKey.current = "";
     setInstalling(provider);
@@ -448,7 +449,7 @@ export function IntegrationsSettings() {
     setName(provider === "gitlab" ? "GitLab issues" : "Huly tasks");
     setSchedule("");
     setConfig(provider === "gitlab"
-      ? { baseUrl: "https://gitlab.com", token: "" }
+      ? { connectionId: connections.data?.[0]?.id ?? "" }
       : { endpoint: "", username: "", password: "" });
     setGitlabTargets([]);
     setHulyTargets([]);
@@ -456,6 +457,7 @@ export function IntegrationsSettings() {
 
   function edit(entry: Integration) {
     resetDiscovery();
+    immediateDiscovery.current = true;
     setInstalling(entry.provider);
     setEditingId(entry.id);
     setName(entry.name);
@@ -470,9 +472,8 @@ export function IntegrationsSettings() {
       });
       const legacyProject = configString(entry.config, "project").trim();
       const savedTargets = parsed.length ? parsed : legacyProject ? [{ kind: "project" as const, identifier: legacyProject, legacyExternalIds: true }] : [];
-      persistedGitlabTargets.current = savedTargets;
       persistedHulyTargets.current = [];
-      selectionConnectionKey.current = "";
+      selectionConnectionKey.current = `gitlab\0${configString(entry.config, "connectionId")}`;
       setGitlabTargets(savedTargets);
       setHulyTargets([]);
     } else {
@@ -484,7 +485,6 @@ export function IntegrationsSettings() {
       const legacyWorkspace = configString(entry.config, "workspace").trim();
       const legacyProject = configString(entry.config, "project").trim();
       const savedTargets = parsed.length ? parsed : legacyWorkspace && legacyProject ? [{ workspace: legacyWorkspace, project: legacyProject, legacyExternalIds: true }] : [];
-      persistedGitlabTargets.current = [];
       persistedHulyTargets.current = savedTargets;
       selectionConnectionKey.current = "";
       setHulyTargets(savedTargets);
@@ -494,7 +494,6 @@ export function IntegrationsSettings() {
 
   function closeEditor() {
     resetDiscovery();
-    persistedGitlabTargets.current = [];
     persistedHulyTargets.current = [];
     selectionConnectionKey.current = "";
     setInstalling(undefined);
@@ -538,7 +537,7 @@ export function IntegrationsSettings() {
   const selectedTargetCount = installing === "gitlab"
     ? gitlabTargets.filter((target) => target.identifier.trim()).length
     : hulyTargets.filter((target) => target.workspace.trim() && target.project.trim()).length;
-  const visibleDiscoveredTargets = discoveredTargets.filter((target) => discoveryTargetMatchesSearch(target, discoverySearch));
+  const visibleDiscoveredTargets = installing === "gitlab" ? discoveredTargets : discoveredTargets.filter((target) => discoveryTargetMatchesSearch(target, discoverySearch));
   const missingGitlabTargets = installing === "gitlab"
     ? gitlabTargets.filter((target) => target.identifier.trim() && !discoveredTargets.some((discovered) => gitlabTargetMatches(target, discovered)))
     : [];
@@ -561,8 +560,10 @@ export function IntegrationsSettings() {
   const visibleIntegrations = integrations.data?.filter((entry) => `${entry.name} ${entry.provider}`.toLocaleLowerCase().includes(searchQuery));
   const pluginVisible = (provider: string) => provider.toLocaleLowerCase().includes(searchQuery);
 
-  return <div className="settings-content">
+  return <div className={embedded ? "settings-section space-y-8" : "settings-content"}>
     <div className="settings-list-toolbar"><div className="settings-filters" aria-label="Filter integrations">{(["all", "installed", "available"] as const).map((filter) => <Button variant="ghost" key={filter} type="button" aria-pressed={listFilter === filter} onClick={() => setListFilter(filter)}>{filter === "all" ? "All" : filter === "installed" ? "Installed" : "Available"}{filter === "installed" && <span>{integrations.data?.length ?? 0}</span>}</Button>)}</div><label className="settings-list-search"><Search /><Input aria-label="Search integrations" placeholder="Search integrations" value={listSearch} onChange={(event) => setListSearch(event.target.value)} /></label></div>
+    {connections.error && <p role="alert" className="settings-error">{connections.error.message}</p>}
+    {connections.data?.length === 0 && <p className="settings-note">Add a GitLab connection in Settings → Integrations before connecting this project.</p>}
     {!projectId && <p className="settings-empty">Open a workspace to install integrations.</p>}
     {listFilter !== "available" && <SettingsSection title="Installed integrations" description="Import issues from external projects, repositories, or groups.">
       <div className="grid gap-2">
@@ -592,22 +593,20 @@ export function IntegrationsSettings() {
         {integrations.error && <p role="alert" className="settings-error">{integrations.error.message}</p>}
       </div>
     </SettingsSection>}
-    {listFilter !== "installed" && <SettingsSection title="Available integrations" description="Choose a provider to add to this workspace.">
+    {listFilter !== "installed" && <SettingsSection title="Available integrations" description="Connect external sources to this project’s taskboard. Configure GitLab accounts in Settings → Integrations.">
       <div className="settings-plugin-list">
-        {pluginVisible("gitlab") && <Button variant="ghost" type="button" className="integration-plugin-card" disabled={save.isPending || !projectId} onClick={() => begin("gitlab")}><span className="grid size-10 place-items-center rounded-lg bg-[#FC6D26]/10 text-[#FC6D26]"><Gitlab className="size-5" /></span><span className="min-w-0 flex-1"><span className="block text-xs font-medium">GitLab</span><span className="mt-1 block text-[11px] leading-4 text-muted-foreground">Import open issues from GitLab projects and groups.</span></span><Plus className="size-4 text-muted-foreground" /></Button>}
+        {pluginVisible("gitlab") && <Button variant="ghost" type="button" className="integration-plugin-card" disabled={save.isPending || !projectId || !connections.data?.length} onClick={() => begin("gitlab")}><span className="grid size-10 place-items-center rounded-lg bg-[#FC6D26]/10 text-[#FC6D26]"><Gitlab className="size-5" /></span><span className="min-w-0 flex-1"><span className="block text-xs font-medium">GitLab</span><span className="mt-1 block text-[11px] leading-4 text-muted-foreground">Import open issues from GitLab projects and groups.</span></span><Plus className="size-4 text-muted-foreground" /></Button>}
         {pluginVisible("huly") && <Button variant="ghost" type="button" className="integration-plugin-card" disabled={save.isPending || !projectId} onClick={() => begin("huly")}><span className="grid size-10 place-items-center rounded-lg bg-primary/10 text-primary"><Code2 className="size-5" /></span><span className="min-w-0 flex-1"><span className="block text-xs font-medium">Huly</span><span className="mt-1 block text-[11px] leading-4 text-muted-foreground">Import issues from Huly workspace projects.</span></span><Plus className="size-4 text-muted-foreground" /></Button>}
         {!pluginVisible("gitlab") && !pluginVisible("huly") && <div className="settings-empty"><p>No available integrations match your search.</p><Button variant="ghost" size="sm" onClick={() => setListSearch("")}>Clear search</Button></div>}
       </div>
     </SettingsSection>}
-    {installing && <SettingsSection title={`${editingId ? "Edit" : "Install"} ${installing === "gitlab" ? "GitLab" : "Huly"}`} description={installing === "gitlab" ? "Add every project, repository, or group whose open issues should feed this workspace." : "Add every Huly workspace/project pair that should feed this workspace through the connector."}>
+    {installing && <SettingsSection title={`${editingId ? "Edit" : "Connect"} ${installing === "gitlab" ? "GitLab" : "Huly"}`} description={installing === "gitlab" ? "Choose a saved GitLab connection and the projects or groups to import into this project’s taskboard." : "Add every Huly workspace/project pair that should feed this workspace through the connector."}>
       <form className="settings-card grid gap-4" onSubmit={(event) => { event.preventDefault(); if (!save.isPending && name.trim() && targetsValid) save.mutate(); }}>
-        <label className="grid gap-1.5"><span className="settings-label">Connection name</span><Input value={name} onChange={(event) => setName(event.target.value)} required /></label>
+        <label className="grid gap-1.5"><span className="settings-label">Import name</span><Input value={name} onChange={(event) => setName(event.target.value)} required /></label>
         {installing === "gitlab"
-          ? <label className="grid gap-1.5"><span className="settings-label">GitLab URL</span><Input value={configString(config, "baseUrl", "https://gitlab.com")} onChange={(event) => setConfig((current) => ({ ...current, baseUrl: event.target.value }))} placeholder="https://gitlab.com" required /></label>
+          ? <label className="grid gap-1.5"><span className="settings-label">GitLab connection</span><SettingsSelect aria-label="GitLab connection" value={connectionId} onValueChange={(value) => setConfig((current) => ({ ...current, connectionId: value }))} options={(connections.data ?? []).map((entry) => ({ value: entry.id, label: entry.name }))} /></label>
           : <label className="grid gap-1.5"><span className="settings-label">Connector endpoint</span><Input value={configString(config, "endpoint")} onChange={(event) => setConfig((current) => ({ ...current, endpoint: event.target.value }))} placeholder="https://connector.example.com/huly/issues" required /></label>}
-        {installing === "gitlab"
-          ? <label className="grid gap-1.5"><span className="settings-label">Access token</span><Input type="password" value={configString(config, "token")} onChange={(event) => setConfig((current) => ({ ...current, token: event.target.value }))} required /></label>
-          : <div className="grid gap-4 sm:grid-cols-2">
+        {installing === "huly" && <div className="grid gap-4 sm:grid-cols-2">
             <label className="grid gap-1.5"><span className="settings-label">Username</span><Input value={configString(config, "username")} onChange={(event) => setConfig((current) => ({ ...current, username: event.target.value }))} autoComplete="username" required /></label>
             <label className="grid gap-1.5"><span className="settings-label">Password</span><Input type="password" value={configString(config, "password")} onChange={(event) => setConfig((current) => ({ ...current, password: event.target.value }))} autoComplete="current-password" required /></label>
           </div>}
@@ -618,7 +617,7 @@ export function IntegrationsSettings() {
           </div>
           <Input aria-label="Search integration targets" value={discoverySearch} onChange={(event) => setDiscoverySearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") event.preventDefault(); }} placeholder={installing === "gitlab" ? "Search groups and projects…" : "Search workspaces and projects…"} disabled={!discoveryReady} />
           <div className="max-h-80 overflow-y-auto rounded-lg border border-border bg-background/35 p-2">
-            {!discoveryReady && <p className="px-2 py-5 text-center text-[11px] text-muted-foreground">{installing === "gitlab" ? "Enter the connection URL and access token to explore available targets." : "Enter the connector endpoint, username, and password to explore available targets."}</p>}
+            {!discoveryReady && <p className="px-2 py-5 text-center text-[11px] text-muted-foreground">{installing === "gitlab" ? "Choose a saved GitLab connection to explore available targets." : "Enter the connector endpoint, username, and password to explore available targets."}</p>}
             {discoveryReady && discoveryLoading && <p className="flex items-center justify-center gap-2 px-2 py-5 text-[11px] text-muted-foreground"><LoaderCircle className="size-3.5 animate-spin" />Exploring available targets…</p>}
             {discoveryReady && !discoveryLoading && !discoveryAttempted && !discoveryError && <p className="px-2 py-5 text-center text-[11px] text-muted-foreground">Preparing to explore available targets…</p>}
             {discoveryError && <div className="px-2 py-4 text-center"><p className="text-[11px] text-destructive">{discoveryError}</p>{selectedTargetCount > 0 && <p className="mt-1 text-[10px] text-muted-foreground">Your {selectedTargetCount} saved {selectedTargetCount === 1 ? "selection remains" : "selections remain"} selected and can be reviewed under advanced manual entry.</p>}<Button className="mt-2" type="button" variant="secondary" size="sm" onClick={refreshTargets}>Try again</Button></div>}
@@ -629,11 +628,12 @@ export function IntegrationsSettings() {
             {!discoveryLoading && !discoveryError && installing === "huly" && <div className="grid gap-3">
               {Array.from(hulyWorkspaces.entries()).map(([workspace, group]) => <section key={workspace}><div className="flex items-center justify-between px-2 pb-1"><div><p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{group.name}</p>{group.name !== workspace && <p className="font-mono text-[9px] text-muted-foreground">{workspace}</p>}</div><span className="text-[10px] text-muted-foreground">{group.targets.length}</span></div>{group.targets.map((target) => <DiscoveryTargetOption key={`${workspace}:${target.identifier}`} target={target} selected={hulyTargets.some((entry) => hulyTargetMatches(entry, target))} onToggle={(selected) => toggleDiscoveredTarget(target, selected)} />)}</section>)}
             </div>}
-            {visibleMissingGitlabTargets.length > 0 && <section className="mt-3"><p className="px-2 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Saved or manual selections</p>{visibleMissingGitlabTargets.map((target, index) => <label key={`${target.kind}:${target.identifier}:${index}`} className="flex cursor-pointer items-start gap-2.5 rounded-md px-2 py-2 hover:bg-accent"><Checkbox className="mt-0.5" checked onChange={() => setGitlabTargets((current) => current.filter((entry) => entry !== target))} /><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{target.identifier}</span><span className="mt-0.5 block text-[10px] capitalize text-muted-foreground">{target.kind} · {discoveryAttempted ? "not returned by discovery" : "saved selection"}</span></span></label>)}</section>}
-            {visibleMissingHulyTargets.length > 0 && <section className="mt-3"><p className="px-2 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Saved or manual selections</p>{visibleMissingHulyTargets.map((target, index) => <label key={`${target.workspace}:${target.project}:${index}`} className="flex cursor-pointer items-start gap-2.5 rounded-md px-2 py-2 hover:bg-accent"><Checkbox className="mt-0.5" checked onChange={() => setHulyTargets((current) => current.filter((entry) => entry !== target))} /><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{target.project}</span><span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">{target.workspace} · {discoveryAttempted ? "not returned by discovery" : "saved selection"}</span></span></label>)}</section>}
+            {visibleMissingGitlabTargets.length > 0 && <section className="mt-3"><p className="px-2 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Saved or manual selections</p>{visibleMissingGitlabTargets.map((target, index) => <label key={`${target.kind}:${target.identifier}:${index}`} className="flex cursor-pointer items-start gap-2.5 rounded-md px-2 py-2 hover:bg-accent"><Checkbox className="mt-0.5" checked onChange={() => setGitlabTargets((current) => current.filter((entry) => entry !== target))} /><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{target.identifier}</span><span className="mt-0.5 block text-[10px] capitalize text-muted-foreground">{target.kind} · saved selection</span></span></label>)}</section>}
+            {visibleMissingHulyTargets.length > 0 && <section className="mt-3"><p className="px-2 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Saved or manual selections</p>{visibleMissingHulyTargets.map((target, index) => <label key={`${target.workspace}:${target.project}:${index}`} className="flex cursor-pointer items-start gap-2.5 rounded-md px-2 py-2 hover:bg-accent"><Checkbox className="mt-0.5" checked onChange={() => setHulyTargets((current) => current.filter((entry) => entry !== target))} /><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{target.project}</span><span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">{target.workspace} · saved selection</span></span></label>)}</section>}
             {discoveryAttempted && !discoveryLoading && !discoveryError && discoveredTargets.length === 0 && selectedTargetCount === 0 && <p className="px-2 py-5 text-center text-[11px] text-muted-foreground">No available targets were returned.</p>}
             {discoveryAttempted && !discoveryLoading && !discoveryError && discoveredTargets.length > 0 && visibleDiscoveredTargets.length === 0 && visibleMissingGitlabTargets.length === 0 && visibleMissingHulyTargets.length === 0 && <p className="px-2 py-5 text-center text-[11px] text-muted-foreground">No targets match your search.</p>}
           </div>
+          {installing === "gitlab" && discoveryHasMore && !discoveryLoading && <p className="text-[10px] text-muted-foreground">Showing the first 10 groups and 10 projects. Search to find more targets.</p>}
           <p className="text-[10px] text-muted-foreground">{selectedTargetCount} {selectedTargetCount === 1 ? "target" : "targets"} selected</p>
         </div>
         <details className="rounded-lg border border-border bg-background/25 p-3">
@@ -658,7 +658,7 @@ export function IntegrationsSettings() {
         {hasPartialHulyTarget && <p className="text-xs text-destructive">Complete or remove each manual Huly workspace/project row before saving.</p>}
         <label className="grid gap-1.5"><span className="settings-label">Automatic import</span><SettingsSelect aria-label="Automatic import" value={schedule} onValueChange={setSchedule} options={scheduleOptions} /></label>
         {save.error && <p className="text-xs text-destructive">{save.error.message}</p>}
-        <div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={closeEditor}>Cancel</Button><Button disabled={save.isPending || !name.trim() || !targetsValid}>{save.isPending && <LoaderCircle className="animate-spin" />}{editingId ? "Save integration" : "Install plugin"}</Button></div>
+        <div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={closeEditor}>Cancel</Button><Button disabled={save.isPending || !name.trim() || !targetsValid}>{save.isPending && <LoaderCircle className="animate-spin" />}{editingId ? "Save integration" : "Connect sources"}</Button></div>
       </form>
     </SettingsSection>}
     {sync.data && <p className="text-xs text-success">{sync.data.message}</p>}{sync.error && <p className="text-xs text-destructive">{sync.error.message}</p>}
@@ -691,20 +691,18 @@ const sectionDescriptions: Record<Section, string> = {
   web: "Configure browser access to this machine.",
   application: "Keep Boosted up to date.",
   team: "Manage access to this machine.",
-  workspace: "Repository details and task defaults.",
-  integrations: "Bring external issues into your workspace.",
-  codex: "Instructions, tools, and the shared account connection.",
+  integrations: "Manage shared connections to external services.",
   usage: "Token activity across agents, groups, and the shared Codex account.",
 };
 
-export function SettingsPage({ section: requestedSection, onSectionChange, onBack, onClose }: { section?: Section; onSectionChange: (section: Section) => void; onBack: () => void; onClose: () => void }) {
+export function SettingsPage({ section: requestedSection, onSectionChange, onBack, onClose }: { section?: SettingsSectionId; onSectionChange: (section: SettingsSectionId) => void; onBack: () => void; onClose: () => void }) {
   const isMobile = useMobileLayout();
-  const section = requestedSection ?? "connections";
+  const normalizedSection: Section | undefined = requestedSection === "workspace" || requestedSection === "codex" ? undefined : requestedSection;
+  const section: Section = normalizedSection ?? "connections";
   const showCategories = isMobile && !requestedSection;
-  const lastSection = useRef<Section | undefined>(requestedSection);
+  const lastSection = useRef<Section | undefined>(normalizedSection);
   const categoryScrollTop = useRef(0);
   const [search, setSearch] = useState("");
-  const projectId = useAppStore((state) => state.selectedProjectId);
   const scrollRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const navigationRef = useRef<HTMLElement>(null);
@@ -715,7 +713,7 @@ export function SettingsPage({ section: requestedSection, onSectionChange, onBac
   useEffect(() => {
     scrollRef.current?.scrollTo?.(0, showCategories ? categoryScrollTop.current : 0);
     const previous = lastSection.current;
-    lastSection.current = requestedSection ?? previous;
+    lastSection.current = normalizedSection ?? previous;
     const target = showCategories && previous ? navigationRef.current?.querySelector<HTMLButtonElement>(`[data-section="${previous}"]`) : undefined;
     (target ?? headingRef.current)?.focus({ preventScroll: true });
     if (target && scrollRef.current) {
@@ -726,7 +724,7 @@ export function SettingsPage({ section: requestedSection, onSectionChange, onBac
       if (row.top < top) scrollRef.current.scrollTop += row.top - top;
       else if (row.bottom > bounds.bottom) scrollRef.current.scrollTop += row.bottom - bounds.bottom;
     }
-  }, [requestedSection, showCategories]);
+  }, [normalizedSection, requestedSection, showCategories]);
   function select(id: Section) { categoryScrollTop.current = scrollRef.current?.scrollTop ?? 0; onSectionChange(id); }
   const navigation = <>
     <div className="settings-sidebar-heading"><h2>Settings</h2><Button variant="ghost" size="icon-sm" type="button" aria-label="Back to workspace" title="Back to workspace" onClick={onClose}><ArrowLeft /></Button></div>
@@ -735,14 +733,13 @@ export function SettingsPage({ section: requestedSection, onSectionChange, onBac
       <p className="settings-nav-heading">{group.label}</p>
       {group.sections.map(({ id, label, icon: Icon }) => <Button variant="ghost" size="sm" type="button" key={id} aria-current={section === id ? "page" : undefined} className={cn("settings-nav-item", section === id && "settings-nav-item-active")} onClick={() => select(id)}><Icon />{label}</Button>)}
     </div>)}{!visibleGroups.some((group) => group.sections.length) && <p className="settings-search-empty">No settings match your search.</p>}</nav>
-    <p className="settings-sidebar-scope">{projectId ? "Workspace settings apply to the open repository." : "Open a workspace to configure repository settings."}</p>
   </>;
   return <section className="settings-page" aria-label="Settings">
     {!isMobile && <aside className="settings-sidebar immersive-panel">{navigation}</aside>}
     <div className="settings-main" ref={scrollRef}>
       {isMobile && <div className="settings-mobile-controls"><Button variant="ghost" size="sm" onClick={showCategories ? onClose : onBack}><ArrowLeft />{showCategories ? "Workspace" : "Settings"}</Button></div>}
       {showCategories ? <>
-        <div className="settings-page-heading"><h1 ref={headingRef} tabIndex={-1}>Settings</h1><p>Choose a category to manage your device, machine, or workspace.</p></div>
+        <div className="settings-page-heading"><h1 ref={headingRef} tabIndex={-1}>Settings</h1><p>Choose a category to manage your device or machine.</p></div>
         <div className="settings-content settings-categories">
           <div className="settings-search"><Search /><Input aria-label="Search settings" placeholder="Search settings" value={search} onChange={(event) => setSearch(event.target.value)} />{search && <Button variant="ghost" size="icon-sm" aria-label="Clear settings search" onClick={() => setSearch("")}><X /></Button>}</div>
           <nav ref={navigationRef} aria-label="Settings sections">{visibleGroups.map((group) => group.sections.length > 0 && <div key={group.label} className="settings-category-group"><h2>{group.label}</h2><div className="settings-group">{group.sections.map(({ id, label, icon: Icon }) => <button type="button" key={id} data-section={id} aria-label={label} aria-describedby={`settings-category-${id}-description`} className="settings-category" onClick={() => select(id)}><Icon /><span><span>{label}</span><small id={`settings-category-${id}-description`}>{sectionDescriptions[id]}</small></span><ChevronRight /></button>)}</div></div>)}{!visibleGroups.some((group) => group.sections.length) && <p className="settings-search-empty">No settings match your search.</p>}</nav>
@@ -757,9 +754,7 @@ export function SettingsPage({ section: requestedSection, onSectionChange, onBac
         {section === "web" && <GlobalWebSettings />}
         {section === "application" && <ApplicationSettings />}
         {section === "team" && <TeamSettings />}
-        {section === "workspace" && <WorkspaceSettings />}
-        {section === "integrations" && <IntegrationsSettings />}
-        {section === "codex" && (projectId ? <CodexSettings key={projectId} /> : <div className="settings-content"><p className="settings-empty">Open a workspace to configure Codex instructions and MCP servers.</p></div>)}
+        {section === "integrations" && <GitlabConnectionsSettings />}
       </div></Suspense>
       </>}
     </div>

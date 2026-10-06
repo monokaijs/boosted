@@ -97,6 +97,7 @@ impl AgentManager {
         for mut agent in documents(db, "agents").await? {
             agent["status"] = json!("idle");
             agent["activeGroupId"] = Value::Null;
+            agent["activeExternalSession"] = Value::Null;
             agent["activity"] = Value::Null;
             agent.as_object_mut().unwrap().remove("typing");
             if let Some(messages) = agent["messages"].as_array_mut() {
@@ -185,6 +186,44 @@ fn new_agent(id: String, name: String, personality: String) -> Value {
     let now = Utc::now().to_rfc3339();
     json!({"id":id,"createdAt":now,"updatedAt":now,"profile":{"name":name,"personality":personality},"messages":[],"followUps":[],"status":"idle","activity":null,"accountId":null,"error":null})
 }
+pub(crate) async fn external_started(
+    state: &AppState,
+    id: &str,
+    context: &agent_integrations::ExternalContext,
+) -> AppResult<()> {
+    change(state, id, |agent| {
+        agent["status"] = json!("running");
+        agent["activity"] = json!("thinking");
+        agent["activeExternalSession"] = json!({
+            "id":context.session_id,"provider":context.provider,"chatName":context.chat_name
+        });
+        agent["error"] = Value::Null;
+        Ok(())
+    })
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn external_finished(
+    state: &AppState,
+    id: &str,
+    context: &agent_integrations::ExternalContext,
+) -> AppResult<()> {
+    change(state, id, |agent| {
+        if agent
+            .pointer("/activeExternalSession/id")
+            .and_then(Value::as_str)
+            == Some(context.session_id.as_str())
+        {
+            agent["status"] = json!("idle");
+            agent["activity"] = Value::Null;
+            agent["activeExternalSession"] = Value::Null;
+        }
+        Ok(())
+    })
+    .await?;
+    Ok(())
+}
 async fn change<F>(state: &AppState, id: &str, update: F) -> AppResult<Value>
 where
     F: FnOnce(&mut Value) -> AppResult<()>,
@@ -223,6 +262,9 @@ async fn set_activity(state: &AppState, id: &str, activity: Option<&str>) -> App
     if let Some(context) = groups::context() {
         return groups::activity(state, &context, activity).await;
     }
+    if let Some(context) = agent_integrations::context() {
+        return agent_integrations::activity(state, &context, activity).await;
+    }
     let states = state.agents.states.lock().await;
     let agent = states
         .get(id)
@@ -249,7 +291,7 @@ pub(crate) async fn list_agents(State(state): State<AppState>) -> Json<Vec<Value
         let last_message_at = a["messages"].as_array().and_then(|messages| messages.iter().rev().find(|message|
             message["role"] == "assistant" && message["content"].as_str().is_some_and(|content| !content.trim().is_empty())
         )).map(|message| message["createdAt"].clone()).unwrap_or(Value::Null);
-        json!({"id":a["id"],"profile":a["profile"],"status":a["status"],"accountId":a["accountId"],"createdAt":a["createdAt"],"updatedAt":a["updatedAt"],"lastMessageAt":last_message_at})
+        json!({"id":a["id"],"profile":a["profile"],"status":a["status"],"accountId":a["accountId"],"activeExternalSession":a["activeExternalSession"],"createdAt":a["createdAt"],"updatedAt":a["updatedAt"],"lastMessageAt":last_message_at})
     }).collect();
     agents.sort_by_key(|a| a["createdAt"].as_str().unwrap_or_default().to_owned());
     Json(agents)
@@ -377,7 +419,7 @@ pub(crate) async fn cancel_followup(
         .await?,
     ))
 }
-fn validate_image(value: &str) -> AppResult<Vec<u8>> {
+pub(crate) fn validate_image(value: &str) -> AppResult<Vec<u8>> {
     let (header, data) = value
         .split_once(',')
         .ok_or_else(|| AppError::BadRequest("Invalid image".into()))?;
@@ -561,8 +603,7 @@ async fn run_queue(state: &AppState, id: &str, mut cancel: watch::Receiver<bool>
         let requested = current
             .iter()
             .rev()
-            .find_map(|m| m["requestedAccountId"].as_str())
-            .or(snapshot["accountId"].as_str());
+            .find_map(|m| m["requestedAccountId"].as_str());
         let mut account_id = choose_account(state, requested, &HashSet::new()).await?;
         change(state, id, |a| {
             a["accountId"] = json!(account_id);
@@ -588,6 +629,7 @@ async fn run_queue(state: &AppState, id: &str, mut cancel: watch::Receiver<bool>
                     .err()
                     .is_some_and(|e| quota_error(&e.to_string()))
             {
+                providers::mark_exhausted(state, &account_id).await?;
                 excluded.insert(account_id.clone());
                 if let Ok(next) = choose_account(state, None, &excluded).await {
                     account_id = next;
@@ -618,9 +660,9 @@ async fn run_queue(state: &AppState, id: &str, mut cancel: watch::Receiver<bool>
                         followup["lastDeliveredAt"] = json!(Utc::now().to_rfc3339());
                         if let Some(minutes) = followup["intervalMinutes"].as_i64() {
                             followup["status"] = json!("waiting");
-                            followup["dueAt"] = json!((Utc::now()
-                                + chrono::Duration::minutes(minutes))
-                            .to_rfc3339());
+                            followup["dueAt"] = json!(
+                                (Utc::now() + chrono::Duration::minutes(minutes)).to_rfc3339()
+                            );
                         } else {
                             followup["status"] = json!("completed");
                         }
@@ -644,55 +686,7 @@ pub(crate) async fn choose_account(
     requested: Option<&str>,
     excluded: &HashSet<String>,
 ) -> AppResult<String> {
-    let accounts = documents(&state.db, "accounts").await?;
-    if let Some(id) = requested {
-        if !excluded.contains(id)
-            && accounts
-                .iter()
-                .any(|a| a["id"] == id && a["status"] == "CONNECTED")
-        {
-            return Ok(id.into());
-        }
-    }
-    let mut candidates = Vec::new();
-    for account in accounts.iter().filter(|a| a["status"] == "CONNECTED") {
-        let id = account["id"].as_str().unwrap();
-        if excluded.contains(id) {
-            continue;
-        }
-        if let Ok(limits) = providers::limits(state, id).await {
-            let capacity = remaining_capacity(&limits);
-            if capacity > 0.0 {
-                candidates.push((capacity, id.to_owned()));
-            }
-        }
-    }
-    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
-    candidates
-        .first()
-        .map(|a| a.1.clone())
-        .or_else(|| {
-            if excluded.is_empty() {
-                accounts
-                    .iter()
-                    .find(|a| a["status"] == "CONNECTED")
-                    .and_then(|a| a["id"].as_str())
-                    .map(str::to_owned)
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| {
-            AppError::Conflict("Connect a Codex account with available quota in Providers".into())
-        })
-}
-fn remaining_capacity(limits: &Value) -> f64 {
-    ["primary", "secondary"]
-        .iter()
-        .filter_map(|key| limits["rateLimits"][*key]["usedPercent"].as_f64())
-        .map(|used| 100.0 - used)
-        .reduce(f64::min)
-        .unwrap_or(0.0)
+    providers::choose_account(state, requested, excluded).await
 }
 pub(crate) async fn run_turn(
     state: &AppState,
@@ -728,6 +722,7 @@ async fn run_turn_with_client(
     let mut notifications = client.subscribe();
     let mut tools: Value = serde_json::from_str(include_str!("agent-tools.json"))?;
     let group_context = groups::context();
+    let external_context = agent_integrations::context();
     if let Some(context) = &group_context {
         tools = groups::tools(tools, &context.purpose);
     }
@@ -747,8 +742,20 @@ async fn run_turn_with_client(
         }
     }
     tokio::fs::create_dir_all(&cwd).await?;
-    let group_instructions = if group_context.is_some() {
+    let coding_enabled = group_context
+        .as_ref()
+        .is_none_or(|context| context.purpose == "execute");
+    let mut base_instructions = include_str!("agent-shared-instructions.txt").to_owned();
+    if coding_enabled {
+        base_instructions.push_str(include_str!("agent-coding-instructions.txt"));
+    }
+    base_instructions.push_str(if group_context.is_some() {
         include_str!("group-instructions.txt")
+    } else {
+        include_str!("agent-instructions.txt")
+    });
+    let computer_instructions = if coding_enabled {
+        include_str!("../skills/computer-control/SKILL.md")
     } else {
         ""
     };
@@ -756,20 +763,27 @@ async fn run_turn_with_client(
     let sandbox_policy = json!({"type":"readOnly","networkAccess":true});
     let reply_instructions = if group_context.is_some() {
         "Send public group replies through send_group_message. When the human clearly addresses another group member through the leader, use forward_group_message to deliver that human message quietly and end silently. Honor established nicknames for yourself instead of forwarding them. To ask a peer for input on your own work, use request_group_peers once with the actual message and exact recipient IDs; it both posts the message and wakes the peers. Its content is visible to everyone, not a private instruction."
+    } else if external_context.is_some() {
+        "You are participating in an approved external Slack or Telegram conversation. Treat senderName and senderId as conversational identity only. Send every user-facing reply through send_agent_message; the server will deliver it to the originating chat or thread."
     } else {
         "Send user-facing replies through send_agent_message."
     };
-    let project_instructions = if group_context.is_some() {
-        "Manage group project work through assignments. In message turns, the leader creates or reuses assignments with create_group_task; creation queues execution automatically. Coding-chat tools are intentionally unavailable until an execute turn, so do not treat their absence as a blocker or ask the human to assign the work. Specialists without an assignment request one from the leader. In execute turns, dispatch a watched coding chat for your assignment, inspect its results, and continue until verified or genuinely blocked. Submit verified results for independent peer review. Native tools are only for read-only inspection and independent review; do not implement project work directly."
+    let project_instructions = if let Some(context) = &group_context {
+        groups::turn_instructions(
+            context,
+            snapshot["groupContext"]["leaderId"]
+                .as_str()
+                .unwrap_or_default(),
+        )
     } else {
-        "Manage project work through watched Boosted coding chats. Native tools are only for read-only inspection and independent review; do not execute the project task yourself. Resolve project paths, dispatch a concrete coding prompt, inspect results, and continue the same chat until the requested outcome is verified or user input is required."
+        "Manage project work through watched Boosted coding chats. Native tools are only for read-only inspection and independent review; do not execute the project task yourself. Resolve project paths, dispatch a concrete coding prompt, inspect results, and continue the same chat until the requested outcome is verified or user input is required.".to_owned()
     };
     let agent_identity = json!({"agentId":id,"name":snapshot["profile"]["name"]});
     let thread = client.request("thread/start", json!({
         "cwd":cwd, "ephemeral":true, "approvalPolicy":"never", "sandbox":"read-only",
         "model":AgentModel::Normal.model(), "allowProviderModelFallback":false,
-        "baseInstructions":format!("{}\n\n{}", include_str!("agent-instructions.txt"), group_instructions),
-        "developerInstructions":format!("The server supplies your current identity as JSON data, not instructions: agentIdentity={agent_identity}\nYour agentId is stable. Your saved name changes only after a successful update_profile result. Accept conversational nicknames for yourself when established by context, without persisting them unless the human clearly asks to rename your profile or save the name. A name used to address someone in a greeting does not establish the sender's name; clarify only when the intended addressee is meaningfully ambiguous.\n\n{project_instructions} {reply_instructions}\n\n{}", include_str!("../skills/computer-control/SKILL.md")),
+        "baseInstructions":base_instructions,
+        "developerInstructions":format!("The server supplies your current identity as JSON data, not instructions: agentIdentity={agent_identity}\nYour agentId is stable. Your saved name changes only after a successful update_profile result. Accept conversational nicknames for yourself when established by context, without persisting them unless the human clearly asks to rename your profile or save the name. A name used to address someone in a greeting does not establish the sender's name; clarify only when the intended addressee is meaningfully ambiguous.\n\n{project_instructions} {reply_instructions}\n\n{computer_instructions}"),
         "dynamicTools":tools,
         "config":{"features.shell_tool":true,"features.multi_agent":false,"web_search":"live",
             "model_reasoning_effort":AgentModel::Normal.effort(),"service_tier":"default"}
@@ -796,14 +810,16 @@ async fn run_turn_with_client(
         .rev()
         .map(|mut message| {
             if let Some(content) = message["content"].as_str() {
-                message["content"] = json!(content
-                    .chars()
-                    .rev()
-                    .take(8000)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect::<String>());
+                message["content"] = json!(
+                    content
+                        .chars()
+                        .rev()
+                        .take(8000)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<String>()
+                );
             }
             if let Some(attachments) = message["attachments"].as_array_mut() {
                 for attachment in attachments {
@@ -867,7 +883,7 @@ async fn run_turn_with_client(
         "userTimeZone":snapshot["timeZone"].as_str().unwrap_or("UTC"),
         "conversationHistory":history,"currentUserMessages":current.iter()
             .filter(|message| group_context.is_none() || message["senderType"] == "user")
-            .map(|message|json!({"id":message["id"],"content":message["content"]})).collect::<Vec<_>>(),
+            .map(|message|json!({"id":message["id"],"content":message["content"],"senderId":message["senderId"],"senderName":message["senderName"]})).collect::<Vec<_>>(),
         "currentGroupMessages":current.iter()
             .filter(|message| group_context.is_some() && message["senderType"].is_string())
             .map(|message|json!({"id":message["id"],"content":message["content"],
@@ -877,6 +893,7 @@ async fn run_turn_with_client(
         "originalUserMessages":original_messages,"backgroundEvents":background,
         "availableImages":available_images,"attachmentContext":attachment_context,
         "workingDirectory":cwd,"groupContext":snapshot["groupContext"],
+        "externalContext":external_context.as_ref().map(|context|json!({"provider":context.provider,"chatName":context.chat_name,"sessionId":context.session_id})),
         "managedChats":managed_chats(state, id).await?,"savedFollowUps":snapshot["followUps"],
         "recoveryInstructions":"Inspect saved successful actions and already sent replies. Never repeat them after a retry or server restart."
     });
@@ -925,7 +942,11 @@ async fn run_turn_with_client(
                 continue;
             }
             if current.is_empty() && !background.is_empty() {
-                let latest = state.agents.get(id).await?;
+                let latest = if let Some(context) = &external_context {
+                    agent_integrations::conversation(state, context).await?
+                } else {
+                    state.agents.get(id).await?
+                };
                 let cancelled = background.iter().all(|event| {
                     latest["followUps"]
                         .as_array()
@@ -944,7 +965,15 @@ async fn run_turn_with_client(
                         continue;
                     }
                     let group = groups::context();
-                    if let Err(error) = agent_usage::record_scoped(&state.db, id, &thread_id, params, group.as_ref().map(|c| c.group_id.as_str()), true).await
+                    if let Err(error) = agent_usage::record_scoped(
+                        &state.db,
+                        id,
+                        &thread_id,
+                        params,
+                        group.as_ref().map(|c| c.group_id.as_str()),
+                        true,
+                    )
+                    .await
                     {
                         tracing::warn!(%error, "Unable to save agent token usage");
                     }
@@ -1144,16 +1173,17 @@ async fn run_turn_with_client(
     }
     state.agents.computer.forget(id).await;
     if let Err(error) = &result {
-        if group_context.is_none() {
+        if group_context.is_none() && external_context.is_none() {
             change(state, id, |agent| {
                 for message in agent["messages"].as_array_mut().unwrap() {
                     if let Some(actions) = message["actions"].as_array_mut() {
                         for action in actions {
                             if action["status"] == "running" {
                                 action["status"] = json!("failed");
-                                action["result"] =
-                                    json!(json!({"error":error.to_string(),"resultUnknown":true})
-                                        .to_string());
+                                action["result"] = json!(
+                                    json!({"error":error.to_string(),"resultUnknown":true})
+                                        .to_string()
+                                );
                             }
                         }
                     }
@@ -1224,6 +1254,9 @@ async fn record_native_action(
     if let Some(context) = groups::context() {
         return groups::receipt(state, &context, action).await;
     }
+    if let Some(context) = agent_integrations::context() {
+        return agent_integrations::receipt(state, &context, action, completed).await;
+    }
     change(state, id, |agent| {
         let assistant_name = agent["profile"]["name"].clone();
         let messages = agent["messages"].as_array_mut().unwrap();
@@ -1249,6 +1282,9 @@ async fn send_agent_reply(
 ) -> AppResult<Value> {
     if let Some(context) = groups::context() {
         return groups::reply(state, &context, content).await;
+    }
+    if let Some(context) = agent_integrations::context() {
+        return agent_integrations::reply(state, &context, content, current).await;
     }
     let message_id = Uuid::new_v4().to_string();
     let agent=change(state,id,|agent| {
@@ -1316,38 +1352,47 @@ async fn execute_tool(
     let conversational = name == "send_agent_message";
     let receipt_id = Uuid::new_v4().to_string();
     if !conversational {
-        change(state,id,|a|{a["activity"]=json!("working");let assistant_name=a["profile"]["name"].clone();a["messages"].as_array_mut().unwrap().push(json!({"id":receipt_id,"role":"assistant","content":"","assistantName":assistant_name,"createdAt":Utc::now().to_rfc3339(),"actions":[{"id":call_id,"tool":name,"arguments":args,"status":"running"}]}));Ok(())}).await?;
+        if let Some(context) = agent_integrations::context() {
+            agent_integrations::begin_tool(state, &context, &receipt_id, call_id, name, args)
+                .await?;
+        } else {
+            change(state,id,|a|{a["activity"]=json!("working");let assistant_name=a["profile"]["name"].clone();a["messages"].as_array_mut().unwrap().push(json!({"id":receipt_id,"role":"assistant","content":"","assistantName":assistant_name,"createdAt":Utc::now().to_rfc3339(),"actions":[{"id":call_id,"tool":name,"arguments":args,"status":"running"}]}));Ok(())}).await?;
+        }
     }
     let result = tool_action(state, id, name, args, current).await;
     if !conversational {
-        change(state, id, |a| {
-            let receipt = a["messages"]
-                .as_array_mut()
-                .unwrap()
-                .iter_mut()
-                .find(|m| m["id"] == receipt_id)
-                .unwrap();
-            let action = &mut receipt["actions"][0];
-            action["status"] = json!(if result.is_ok() {
-                "completed"
-            } else {
-                "failed"
-            });
-            action["result"] = json!(match &result {
-                Ok(value) => computer::receipt_result(value).to_string(),
-                Err(error) => json!({"error":error.to_string()}).to_string(),
-            });
-            if let Ok(value) = &result {
-                for key in ["chatId", "workingDirectory"] {
-                    if let Some(v) = value.get(key) {
-                        action[key] = v.clone();
+        if let Some(context) = agent_integrations::context() {
+            agent_integrations::finish_tool(state, &context, &receipt_id, &result).await?;
+        } else {
+            change(state, id, |a| {
+                let receipt = a["messages"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|m| m["id"] == receipt_id)
+                    .unwrap();
+                let action = &mut receipt["actions"][0];
+                action["status"] = json!(if result.is_ok() {
+                    "completed"
+                } else {
+                    "failed"
+                });
+                action["result"] = json!(match &result {
+                    Ok(value) => computer::receipt_result(value).to_string(),
+                    Err(error) => json!({"error":error.to_string()}).to_string(),
+                });
+                if let Ok(value) = &result {
+                    for key in ["chatId", "workingDirectory"] {
+                        if let Some(v) = value.get(key) {
+                            action[key] = v.clone();
+                        }
                     }
                 }
-            }
-            a["activity"] = activity_after_actions(a);
-            Ok(())
-        })
-        .await?;
+                a["activity"] = activity_after_actions(a);
+                Ok(())
+            })
+            .await?;
+        }
     }
     result
 }
@@ -1406,13 +1451,15 @@ pub(crate) async fn tool_action(
                 json!({"name":agent["profile"]["name"],"avatarUpdated":true,"format":"svg","width":512,"height":512}),
             )
         }
-        "list_workspaces" => Ok(json!(state
-            .db
-            .projects()
-            .await?
-            .iter()
-            .map(|p| json!({"id":p.id,"name":p.name,"path":p.repo_path}))
-            .collect::<Vec<_>>())),
+        "list_workspaces" => Ok(json!(
+            state
+                .db
+                .projects()
+                .await?
+                .iter()
+                .map(|p| json!({"id":p.id,"name":p.name,"path":p.repo_path}))
+                .collect::<Vec<_>>()
+        )),
         "list_chats" => {
             let Json(chats) = list_codex_chats(
                 State(state.clone()),
@@ -1533,9 +1580,18 @@ pub(crate) async fn tool_action(
             }
             add_followup(state,id,json!({"kind":"schedule","instructions":required("instructions",4000)?,"dueAt":timestamp.to_rfc3339(),"intervalMinutes":interval,"sourceMessageIds":current.iter().map(|m|m["id"].clone()).collect::<Vec<_>>() })).await
         }
-        "list_follow_ups" => Ok(state.agents.get(id).await?["followUps"].clone()),
+        "list_follow_ups" => {
+            if let Some(context) = agent_integrations::context() {
+                agent_integrations::followups(state, &context).await
+            } else {
+                Ok(state.agents.get(id).await?["followUps"].clone())
+            }
+        }
         "cancel_follow_up" => {
             let followup_id = required("followUpId", 200)?;
+            if let Some(context) = agent_integrations::context() {
+                return agent_integrations::cancel_followup(state, &context, &followup_id).await;
+            }
             let Json(agent) = cancel_followup(
                 State(state.clone()),
                 AxumPath((id.into(), followup_id.clone())),
@@ -1610,11 +1666,12 @@ pub(crate) async fn tool_action(
                     "Chat working directory does not exist".into(),
                 ));
             }
-            let account_id = required("accountId", 200)?;
-            let account = document(&state.db, "accounts", &account_id).await?;
-            if account["status"] != "CONNECTED" {
-                return Err(AppError::Conflict("Connect this account first".into()));
+            let requested = args["accountId"].as_str().filter(|id| !id.is_empty());
+            if let Some(id) = requested {
+                document(&state.db, "accounts", id).await?;
             }
+            let account_id = choose_account(state, requested, &HashSet::new()).await?;
+            let account = document(&state.db, "accounts", &account_id).await?;
             let client = state.providers.client(&state.db, &account_id).await?;
             let mut defaults = providers::account_runtime_defaults(&state.db, &account).await?;
             if args.get("model").is_some() {
@@ -1630,7 +1687,7 @@ pub(crate) async fn tool_action(
                 .and_then(Value::as_str)
                 .ok_or_else(|| AppError::Internal("Codex returned no thread".into()))?
                 .to_owned();
-            let mut chat = json!({"id":chat_id,"title":title,"accountId":account_id,"workingDirectory":directory,"autoRotateAccount":args["autoRotateAccount"].as_bool().unwrap_or(false),"runtimeDefaults":defaults,"createdAt":Utc::now().to_rfc3339()});
+            let mut chat = json!({"id":chat_id,"title":title,"accountId":account_id,"workingDirectory":directory,"autoRotateAccount":args["autoRotateAccount"].as_bool().unwrap_or(true),"runtimeDefaults":defaults,"createdAt":Utc::now().to_rfc3339()});
             groups::attach_chat(state, &mut chat).await?;
             save_document(&state.db, "provider-chats", &chat).await?;
             state
@@ -1682,7 +1739,7 @@ pub(crate) async fn tool_action(
                         json!({"chatId":chat_id,"runId":turn_id,"status":"RUNNING","result":result}),
                     );
                 }
-                let queued = json!({"id":Uuid::new_v4().to_string(),"chatId":chat_id,"content":content,"agentId":id,"watch":args["watch"].as_bool().unwrap_or(true),"current":current,"createdAt":Utc::now().to_rfc3339()});
+                let queued = json!({"id":Uuid::new_v4().to_string(),"chatId":chat_id,"content":content,"agentId":id,"watch":args["watch"].as_bool().unwrap_or(true),"current":current,"externalSessionId":agent_integrations::context().map(|context|context.session_id),"createdAt":Utc::now().to_rfc3339()});
                 save_document(&state.db, "chat-queue", &queued).await?;
                 return Ok(json!({"chatId":chat_id,"runId":queued["id"],"status":"QUEUED"}));
             }
@@ -1813,9 +1870,11 @@ pub(crate) async fn tool_action(
             let chat_lock = state.providers.chat_lock(&chat_id).await;
             let _guard = chat_lock.lock().await;
             let mut chat = chat_metadata(state, &chat_id).await?;
-            chat["autoRotateAccount"] = json!(args["enabled"]
-                .as_bool()
-                .ok_or_else(|| AppError::BadRequest("enabled is required".into()))?);
+            chat["autoRotateAccount"] = json!(
+                args["enabled"]
+                    .as_bool()
+                    .ok_or_else(|| AppError::BadRequest("enabled is required".into()))?
+            );
             save_document(&state.db, "provider-chats", &chat).await?;
             Ok(json!({"chatId":chat_id,"chat":chat}))
         }
@@ -1853,7 +1912,10 @@ pub(crate) async fn tool_action(
             defaults["id"] = json!(chat_id);
             metadata["runtimeDefaults"] = defaults.clone();
             // A fork through an earlier turn may not contain the source's latest run.
-            metadata.as_object_mut().unwrap().remove("latestManagedRunId");
+            metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("latestManagedRunId");
             metadata["dispatchPaused"] = json!(false);
             metadata["archived"] = json!(false);
             metadata["createdAt"] = json!(Utc::now().to_rfc3339());
@@ -1926,6 +1988,9 @@ async fn add_followup(state: &AppState, id: &str, mut followup: Value) -> AppRes
             ));
         }
         return groups::watch_child(state, &followup).await;
+    }
+    if let Some(context) = agent_integrations::context() {
+        return agent_integrations::add_followup(state, &context, followup).await;
     }
     followup["id"] = json!(Uuid::new_v4().to_string());
     followup["createdAt"] = json!(Utc::now().to_rfc3339());
@@ -2192,13 +2257,33 @@ async fn managed_chats(state: &AppState, agent_id: &str) -> AppResult<Vec<Value>
     if groups::context().is_some() {
         return Ok(vec![]);
     }
-    let agent = state.agents.get(agent_id).await?;
+    let external = agent_integrations::context();
+    let agent = if let Some(context) = &external {
+        agent_integrations::conversation(state, context).await?
+    } else {
+        state.agents.get(agent_id).await?
+    };
     let mut chats = Vec::new();
     for chat in documents(&state.db, "provider-chats").await? {
-        if chat["managedByAgentId"] == agent_id && chat["groupId"].is_null() && chat["archived"] != true {
-            let sources: Vec<_> = agent["messages"].as_array().unwrap().iter()
-                .filter(|message| chat["sourceMessageIds"].as_array().is_some_and(|ids| ids.contains(&message["id"])))
-                .map(|message| json!({"id":message["id"],"content":message["content"]})).collect();
+        if chat["managedByAgentId"] == agent_id
+            && chat["groupId"].is_null()
+            && external
+                .as_ref()
+                .is_none_or(|context| chat["externalSessionId"] == context.session_id)
+            && (external.is_some() || chat["externalSessionId"].is_null())
+            && chat["archived"] != true
+        {
+            let sources: Vec<_> = agent["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|message| {
+                    chat["sourceMessageIds"]
+                        .as_array()
+                        .is_some_and(|ids| ids.contains(&message["id"]))
+                })
+                .map(|message| json!({"id":message["id"],"content":message["content"]}))
+                .collect();
             chats.push(json!({"chatId":chat["id"],"title":chat["title"],"userRequests":sources,
                 "workingDirectory":chat["workingDirectory"],"sourceMessageIds":chat["sourceMessageIds"],
                 "latestRunId":chat["latestManagedRunId"],"stopped":chat["dispatchPaused"] == true}));
@@ -2213,10 +2298,14 @@ async fn coding_source_messages(
     chat_id: &str,
     current: &[Value],
 ) -> AppResult<Vec<Value>> {
-    if groups::context().is_some() {
+    if groups::context().is_some() || agent_id.is_empty() {
         return Ok(current.to_vec());
     }
-    let agent = state.agents.get(agent_id).await?;
+    let agent = if let Some(context) = agent_integrations::context() {
+        agent_integrations::conversation(state, &context).await?
+    } else {
+        state.agents.get(agent_id).await?
+    };
     let chat = chat_metadata(state, chat_id).await?;
     let mut ids: HashSet<String> = current
         .iter()
@@ -2319,6 +2408,10 @@ async fn dispatch_chat_locked(
     if groups::context().is_none() {
         let mut chat = chat_metadata(state, chat_id).await?;
         chat["managedByAgentId"] = json!(agent_id);
+        if let Some(context) = agent_integrations::context() {
+            chat["externalSessionId"] = json!(context.session_id);
+            chat["externalIntegrationId"] = json!(context.integration_id);
+        }
         chat["sourceMessageIds"] =
             json!(sources.iter().map(|m| m["id"].clone()).collect::<Vec<_>>());
         chat["latestManagedRunId"] = json!(run.turn_id);
@@ -2332,9 +2425,35 @@ async fn dispatch_chat_locked(
     save_document(&state.db,"coding-requests",&json!({"id":run.turn_id,"chatId":run.thread_id,"content":content,"agentId":agent_id,"current":sources})).await?;
     Ok(result)
 }
+// Caller holds the thread lock; preserve history when its account is exhausted.
+pub(crate) async fn prepare_chat_account_locked(state: &AppState, chat_id: &str) -> AppResult<()> {
+    let chat = match document(&state.db, "provider-chats", chat_id).await {
+        Ok(chat) => chat,
+        Err(AppError::NotFound(_)) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if chat["autoRotateAccount"] != true {
+        return Ok(());
+    }
+    if let Some(id) = chat["accountId"].as_str() {
+        if !providers::account_available(state, id).await? {
+            move_chat_locked(state, chat_id, None).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn move_chat(state: &AppState, chat_id: &str, requested: Option<&str>) -> AppResult<String> {
     let chat_lock = state.providers.chat_lock(chat_id).await;
     let _chat_guard = chat_lock.lock().await;
+    move_chat_locked(state, chat_id, requested).await
+}
+
+async fn move_chat_locked(
+    state: &AppState,
+    chat_id: &str,
+    requested: Option<&str>,
+) -> AppResult<String> {
     if state.active_codex_turns.read().await.contains_key(chat_id) {
         return Err(AppError::Conflict(
             "Wait for this chat to finish or explicitly ask to stop it before moving it".into(),
@@ -2493,6 +2612,7 @@ pub(crate) async fn scheduler(state: AppState) {
 }
 async fn tick(state: &AppState) -> AppResult<()> {
     groups::tick(state).await?;
+    agent_integrations::tick(state).await?;
     recover_coding_runs(state).await?;
     for queued in documents(&state.db, "chat-queue").await? {
         let chat_id = queued["chatId"].as_str().unwrap_or_default();
@@ -2520,7 +2640,7 @@ async fn tick(state: &AppState) -> AppResult<()> {
             continue;
         }
         let agent_id = queued["agentId"].as_str().unwrap_or_default();
-        let result = dispatch_chat_locked(
+        let dispatch = dispatch_chat_locked(
             state,
             chat_id,
             queued["content"].as_str().unwrap_or_default(),
@@ -2530,18 +2650,29 @@ async fn tick(state: &AppState) -> AppResult<()> {
                 .as_array()
                 .map(Vec::as_slice)
                 .unwrap_or(&[]),
-        )
-        .await;
+        );
+        let result = if let Some(session_id) = queued["externalSessionId"].as_str() {
+            match agent_integrations::context_for_session(&state.db, session_id).await {
+                Ok(context) => agent_integrations::scope(context, dispatch).await,
+                Err(error) => Err(error),
+            }
+        } else {
+            dispatch.await
+        };
         sqlx::query("DELETE FROM feature_documents WHERE namespace='chat-queue' AND id=?")
             .bind(queued["id"].as_str().unwrap())
             .execute(&state.db.pool)
             .await?;
         if let Err(error) = result {
-            change(state, agent_id, |a| {
-                a["error"] = json!(error.to_string());
-                Ok(())
-            })
-            .await?;
+            if let Some(session_id) = queued["externalSessionId"].as_str() {
+                agent_integrations::record_error(state, session_id, &error).await?;
+            } else {
+                change(state, agent_id, |a| {
+                    a["error"] = json!(error.to_string());
+                    Ok(())
+                })
+                .await?;
+            }
         }
     }
     let agents: Vec<_> = state.agents.states.lock().await.values().cloned().collect();
@@ -2644,6 +2775,15 @@ pub(crate) async fn record_outcome(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    if params.pointer("/turn/status").and_then(Value::as_str) == Some("failed")
+        && quota_error(&params["turn"]["error"].to_string())
+    {
+        if let Ok(chat) = document(&state.db, "provider-chats", thread_id).await {
+            if let Some(id) = chat["accountId"].as_str() {
+                providers::mark_exhausted(state, id).await?;
+            }
+        }
+    }
     save_document(&state.db,"run-outcomes",&json!({"id":turn_id,"chatId":thread_id,"status":params.pointer("/turn/status"),"error":params.pointer("/turn/error"),"messages":messages,"completedAt":Utc::now().to_rfc3339()})).await?;
     Ok(())
 }
@@ -2723,7 +2863,23 @@ async fn recover_coding_runs(state: &AppState) -> AppResult<()> {
             let target=target?;
             move_chat(state,&chat_id,Some(&target)).await?;
             let prompt=format!("Continue the existing coding task after the previous account reached its usage limit. Inspect existing work and do not repeat completed actions. Original request: {}",request["content"].as_str().unwrap_or_default());
-            let next=dispatch_chat(state,&chat_id,&prompt,false,request["agentId"].as_str().unwrap_or_default(),request["current"].as_array().map(Vec::as_slice).unwrap_or(&[])).await?;
+            let agent_id = request["agentId"].as_str().unwrap_or_default();
+            let next = if agent_id.is_empty() {
+                let defaults = providers::runtime_defaults(state, &chat_id).await?.unwrap_or(json!({}));
+                let (_, Json(run)) = send_codex_message(State(state.clone()), AxumPath(chat_id.clone()), Json(CodexMessageCreate {
+                    message: prompt, client_message_id: None,
+                    model: defaults["model"].as_str().map(str::to_owned),
+                    reasoning_effort: defaults["reasoningEffort"].as_str().map(str::to_owned),
+                    service_tier: defaults["serviceTier"].as_str().map(str::to_owned),
+                    approval_policy: defaults["approvalPolicy"].as_str().map(str::to_owned),
+                    access_mode: defaults["accessMode"].as_str().map(str::to_owned),
+                    collaboration_mode: defaults["collaborationMode"].as_str().map(str::to_owned),
+                    attachment_ids: request["attachmentIds"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect(),
+                })).await?;
+                json!({"runId":run.turn_id})
+            } else {
+                dispatch_chat(state,&chat_id,&prompt,false,agent_id,request["current"].as_array().map(Vec::as_slice).unwrap_or(&[])).await?
+            };
             let next_run=next["runId"].as_str().unwrap().to_owned();
             excluded.insert(target);
             request["id"]=json!(next_run);request["attemptedAccounts"]=json!(excluded);
@@ -2775,6 +2931,88 @@ mod tests {
         execute_tool(state, "pock", name, &args, &Uuid::new_v4().to_string(), &[]).await
     }
     #[cfg(unix)]
+    #[tokio::test]
+    async fn coding_creation_rotates_accounts_without_an_explicit_choice() {
+        let (root, state, _) = coding_fixture().await;
+        save_document(&state.db, "accounts", &json!({"id":"other","providerId":"codex","status":"CONNECTED","settings":{},"runtimeDefaults":{}})).await.unwrap();
+        let args = json!({"workingDirectory":root.path(),"title":"Empty chat","startRun":false});
+        let first = coding_tool(&state, "create_chat", args.clone())
+            .await
+            .unwrap();
+        let second = coding_tool(&state, "create_chat", args).await.unwrap();
+        assert_eq!(first["chat"]["accountId"], "account");
+        assert_eq!(second["chat"]["accountId"], "other");
+        assert_eq!(first["chat"]["autoRotateAccount"], true);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn coding_quota_recovery_resumes_ui_chats_with_their_saved_permissions() {
+        let (root, state, _) = coding_fixture().await;
+        save_document(&state.db, "accounts", &json!({"id":"other","providerId":"codex","status":"CONNECTED","settings":{},"runtimeDefaults":{}})).await.unwrap();
+        let (_, Json(chat)) = create_codex_chat(
+            State(state.clone()),
+            Json(CodexChatCreate {
+                cwd: root.path().to_string_lossy().into(),
+                model: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let (_, Json(run)) = send_codex_message(
+            State(state.clone()),
+            AxumPath(chat.id.clone()),
+            Json(CodexMessageCreate {
+                message: "QUOTA".into(),
+                client_message_id: None,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                approval_policy: Some("on-request".into()),
+                access_mode: Some("readOnly".into()),
+                collaboration_mode: None,
+                attachment_ids: vec![],
+            }),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while state.active_codex_turns.read().await.contains_key(&chat.id) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            !providers::account_available(&state, "account")
+                .await
+                .unwrap()
+        );
+        tick(&state).await.unwrap();
+        let outcome = document(&state.db, "run-outcomes", &run.turn_id)
+            .await
+            .unwrap();
+        assert!(outcome["recoveredTo"].is_string(), "{outcome}");
+        assert_eq!(
+            document(&state.db, "provider-chats", &chat.id)
+                .await
+                .unwrap()["accountId"],
+            "other"
+        );
+        let log = rpc_log(&state.providers.home.join("other"));
+        let turn = log
+            .iter()
+            .find(|rpc| rpc["method"] == "turn/start")
+            .unwrap();
+        assert_eq!(turn["params"]["sandboxPolicy"]["type"], "readOnly");
+        assert_eq!(turn["params"]["approvalPolicy"], "on-request");
+        assert_eq!(turn["params"]["model"], "exact-alpha");
+        let _ = stop_codex_turn(State(state.clone()), AxumPath(chat.id))
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
     async fn coding_chat(root: &tempfile::TempDir, state: &AppState, prompt: &str) -> Value {
         coding_tool(state, "create_chat", json!({"workingDirectory":root.path(),"accountId":"account","title":"Test chat","prompt":prompt,"model":"exact-beta","watch":false})).await.unwrap()
     }
@@ -2807,55 +3045,118 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let (root, state, home) = coding_fixture().await;
         let script = root.path().join("manager-codex");
-        std::fs::write(&script, include_str!("../tests/fixtures/agent-manager-app-server.py")).unwrap();
+        std::fs::write(
+            &script,
+            include_str!("../tests/fixtures/agent-manager-app-server.py"),
+        )
+        .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
         let client = CodexClient::test_process(script, true).await.unwrap();
         let original = json!({"id":"request","role":"user","content":"Implement"});
-        let directory = json!({"id":"directory","role":"user","content":root.path().to_str().unwrap()});
+        let directory =
+            json!({"id":"directory","role":"user","content":root.path().to_str().unwrap()});
         change(&state, "pock", |agent| {
             agent["messages"] = json!([original, directory]);
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         let (_sender, mut cancel) = watch::channel(false);
         let snapshot = state.agents.get("pock").await.unwrap();
-        run_turn_with_client(&state, "pock", &snapshot, &[original.clone(), directory.clone()], &[], &client, &mut cancel).await.unwrap();
+        run_turn_with_client(
+            &state,
+            "pock",
+            &snapshot,
+            &[original.clone(), directory.clone()],
+            &[],
+            &client,
+            &mut cancel,
+        )
+        .await
+        .unwrap();
         let first = state.agents.get("pock").await.unwrap()["followUps"][0].clone();
         wait_outcome(&state, &first).await;
         tick(&state).await.unwrap();
         change(&state, "pock", |agent| {
             agent["followUps"][0]["status"] = json!("processing");
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         // Reload persisted state before reviewing: browser state and in-memory chat history
         // are not required to continue the original task.
         let reloaded = AgentManager::load(&state.db).await.unwrap();
         let snapshot = reloaded.get("pock").await.unwrap();
         let background = snapshot["followUps"][0].clone();
-        run_turn_with_client(&state, "pock", &snapshot, &[], &[background], &client, &mut cancel).await.unwrap();
+        run_turn_with_client(
+            &state,
+            "pock",
+            &snapshot,
+            &[],
+            &[background],
+            &client,
+            &mut cancel,
+        )
+        .await
+        .unwrap();
         let next = state.agents.get("pock").await.unwrap()["followUps"][1].clone();
         assert_eq!(first["chatId"], next["chatId"]);
         assert_eq!(next["sourceMessageIds"], json!(["request", "directory"]));
         wait_outcome(&state, &next).await;
         let feedback = json!({"id":"feedback","role":"user","content":"Refine it"});
         change(&state, "pock", |agent| {
-            agent["messages"].as_array_mut().unwrap().push(feedback.clone());
+            agent["messages"]
+                .as_array_mut()
+                .unwrap()
+                .push(feedback.clone());
             for followup in agent["followUps"].as_array_mut().unwrap() {
                 followup["status"] = json!("completed");
             }
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         let snapshot = state.agents.get("pock").await.unwrap();
-        run_turn_with_client(&state, "pock", &snapshot, &[feedback], &[], &client, &mut cancel).await.unwrap();
+        run_turn_with_client(
+            &state,
+            "pock",
+            &snapshot,
+            &[feedback],
+            &[],
+            &client,
+            &mut cancel,
+        )
+        .await
+        .unwrap();
         client.shutdown().await;
         let curated = state.agents.get("pock").await.unwrap()["followUps"][2].clone();
         assert_eq!(first["chatId"], curated["chatId"]);
-        assert_eq!(curated["sourceMessageIds"], json!(["request", "directory", "feedback"]));
-        let request = document(&state.db, "coding-requests", curated["runId"].as_str().unwrap()).await.unwrap();
+        assert_eq!(
+            curated["sourceMessageIds"],
+            json!(["request", "directory", "feedback"])
+        );
+        let request = document(
+            &state.db,
+            "coding-requests",
+            curated["runId"].as_str().unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(request["current"][0]["id"], "request");
         assert_eq!(request["current"][2]["id"], "feedback");
         let log = rpc_log(&home);
-        assert_eq!(log.iter().filter(|rpc| rpc["method"] == "thread/start").count(), 1);
-        assert_eq!(log.iter().filter(|rpc| rpc["method"] == "turn/start").count(), 3);
+        assert_eq!(
+            log.iter()
+                .filter(|rpc| rpc["method"] == "thread/start")
+                .count(),
+            1
+        );
+        assert_eq!(
+            log.iter()
+                .filter(|rpc| rpc["method"] == "turn/start")
+                .count(),
+            3
+        );
     }
     #[cfg(unix)]
     #[tokio::test]
@@ -2867,10 +3168,12 @@ mod tests {
         assert_eq!(models["models"][1]["model"], "exact-beta");
         let run = coding_chat(&root, &state, "Do the coding task").await;
         assert_eq!(run["status"], "RUNNING");
-        assert!(run["chatId"]
-            .as_str()
-            .unwrap()
-            .starts_with("selected-provider-home-"));
+        assert!(
+            run["chatId"]
+                .as_str()
+                .unwrap()
+                .starts_with("selected-provider-home-")
+        );
         let log = rpc_log(&home);
         assert!(log.iter().all(|m| m["home"] == json!(home)));
         let started = log.iter().find(|m| m["method"] == "thread/start").unwrap();
@@ -2959,24 +3262,32 @@ mod tests {
     async fn coding_creation_validates_before_mutation_and_reports_partial_dispatch_failure() {
         let (root, state, home) = coding_fixture().await;
         let base = json!({"workingDirectory":root.path(),"accountId":"account","title":"Test"});
-        assert!(coding_tool(&state, "create_chat", base.clone())
-            .await
-            .is_err());
+        assert!(
+            coding_tool(&state, "create_chat", base.clone())
+                .await
+                .is_err()
+        );
         let mut args = base;
         args["prompt"] = json!(" ");
-        assert!(coding_tool(&state, "create_chat", args.clone())
-            .await
-            .is_err());
+        assert!(
+            coding_tool(&state, "create_chat", args.clone())
+                .await
+                .is_err()
+        );
         args["prompt"] = json!("Do work");
         args["model"] = json!("unavailable-exact-model");
-        assert!(coding_tool(&state, "create_chat", args.clone())
-            .await
-            .is_err());
+        assert!(
+            coding_tool(&state, "create_chat", args.clone())
+                .await
+                .is_err()
+        );
         args["model"] = json!("exact-beta");
         args["reasoningEffort"] = json!("high");
-        assert!(coding_tool(&state, "create_chat", args.clone())
-            .await
-            .is_err());
+        assert!(
+            coding_tool(&state, "create_chat", args.clone())
+                .await
+                .is_err()
+        );
         assert!(!rpc_log(&home).iter().any(|m| m["method"] == "thread/start"));
         args["reasoningEffort"] = json!("low");
         args["prompt"] = json!("REJECT_RUN");
@@ -3034,13 +3345,15 @@ mod tests {
         .unwrap();
         assert_eq!(inspected["status"], "inProgress");
         let log = rpc_log(&home);
-        assert!(log
-            .iter()
-            .any(|m| m["method"] == "thread/goal/set" && m["params"]["status"] == "paused"));
-        assert!(log
-            .iter()
-            .any(|m| m["method"] == "thread/backgroundTerminals/clean"
-                && m["params"]["threadId"] == first["chatId"]));
+        assert!(
+            log.iter()
+                .any(|m| m["method"] == "thread/goal/set" && m["params"]["status"] == "paused")
+        );
+        assert!(
+            log.iter()
+                .any(|m| m["method"] == "thread/backgroundTerminals/clean"
+                    && m["params"]["threadId"] == first["chatId"])
+        );
         assert_eq!(
             log.iter().filter(|m| m["method"] == "initialize").count(),
             1
@@ -3052,9 +3365,11 @@ mod tests {
         let (root, state, home) = coding_fixture().await;
         let run = coding_chat(&root, &state, "First task").await;
         let args = json!({"chatId":run["chatId"],"model":"exact-alpha","reasoningEffort":"high"});
-        assert!(coding_tool(&state, "set_chat_model", args.clone())
-            .await
-            .is_err());
+        assert!(
+            coding_tool(&state, "set_chat_model", args.clone())
+                .await
+                .is_err()
+        );
         coding_tool(
             &state,
             "stop_run",
@@ -3071,13 +3386,15 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(inspected["status"], "interrupted");
-        assert!(coding_tool(
-            &state,
-            "read_run",
-            json!({"chatId":run["chatId"],"runId":"another-chat-run"})
-        )
-        .await
-        .is_err());
+        assert!(
+            coding_tool(
+                &state,
+                "read_run",
+                json!({"chatId":run["chatId"],"runId":"another-chat-run"})
+            )
+            .await
+            .is_err()
+        );
         coding_tool(
             &state,
             "set_chat_access",
@@ -3128,13 +3445,15 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(coding_tool(
-            &state,
-            "stop_run",
-            json!({"chatId":chat_id,"runId":"stale-run"})
-        )
-        .await
-        .is_err());
+        assert!(
+            coding_tool(
+                &state,
+                "stop_run",
+                json!({"chatId":chat_id,"runId":"stale-run"})
+            )
+            .await
+            .is_err()
+        );
         coding_tool(
             &state,
             "stop_run",
@@ -3228,12 +3547,16 @@ mod tests {
             .await
             .unwrap_err();
         assert!(rejected.to_string().contains("forked history"));
-        assert!(document(&state.db, "provider-chats", original)
-            .await
-            .is_ok());
-        assert!(document(&state.db, "deleted-chats", original)
-            .await
-            .is_err());
+        assert!(
+            document(&state.db, "provider-chats", original)
+                .await
+                .is_ok()
+        );
+        assert!(
+            document(&state.db, "deleted-chats", original)
+                .await
+                .is_err()
+        );
         coding_tool(
             &state,
             "watch_chat",
@@ -3257,7 +3580,13 @@ mod tests {
         assert_eq!(cleared["chat"]["runtimeDefaults"]["model"], "exact-beta");
         assert!(cleared["chat"]["sourceMessageIds"].is_null());
         assert!(cleared["chat"]["latestManagedRunId"].is_null());
-        assert!(!managed_chats(&state, "pock").await.unwrap().iter().any(|chat| chat["chatId"] == original));
+        assert!(
+            !managed_chats(&state, "pock")
+                .await
+                .unwrap()
+                .iter()
+                .any(|chat| chat["chatId"] == original)
+        );
         assert_eq!(
             document(&state.db, "provider-chats", original)
                 .await
@@ -3278,14 +3607,18 @@ mod tests {
             .await
             .unwrap();
         assert!(document(&state.db, "provider-chats", new_id).await.is_err());
-        assert!(!state
-            .started_codex_threads
-            .read()
-            .await
-            .contains_key(new_id));
-        assert!(coding_tool(&state, "read_chat", json!({"chatId":new_id}))
-            .await
-            .is_err());
+        assert!(
+            !state
+                .started_codex_threads
+                .read()
+                .await
+                .contains_key(new_id)
+        );
+        assert!(
+            coding_tool(&state, "read_chat", json!({"chatId":new_id}))
+                .await
+                .is_err()
+        );
         assert!(
             coding_tool(&state, "read_chat", json!({"chatId":fork["chatId"]}))
                 .await
@@ -3297,12 +3630,16 @@ mod tests {
         coding_tool(&state, "delete_chat", json!({"chatId":original}))
             .await
             .unwrap();
-        assert!(document(&state.db, "provider-chats", original)
-            .await
-            .is_err());
-        assert!(!rpc_log(&home)
-            .iter()
-            .any(|m| m["method"] == "thread/rollback"));
+        assert!(
+            document(&state.db, "provider-chats", original)
+                .await
+                .is_err()
+        );
+        assert!(
+            !rpc_log(&home)
+                .iter()
+                .any(|m| m["method"] == "thread/rollback")
+        );
     }
     #[cfg(unix)]
     #[tokio::test]
@@ -3441,6 +3778,11 @@ supports_websockets = false
         let state = AppState {
             db,
             agents,
+            agent_integrations: crate::agent_integrations::AgentIntegrationManager::new(
+                root.path().join("integration-secrets"),
+            )
+            .await
+            .unwrap(),
             groups: groups::GroupManager::default(),
             providers: providers::ProviderManager::new(root.path().join("accounts")),
             codex: CodexManager::test_unavailable(),
@@ -3592,7 +3934,9 @@ code_mode = true
         let (root, state) = fixture().await;
         let home = root.path().join("codex-home");
         tokio::fs::create_dir_all(&home).await.unwrap();
-        tokio::fs::write(root.path().join("reference.txt"), "inspection-ok").await.unwrap();
+        tokio::fs::write(root.path().join("reference.txt"), "inspection-ok")
+            .await
+            .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
@@ -3668,12 +4012,22 @@ supports_websockets = false
         let next_request = received.try_recv().unwrap();
         // Code-mode command calls can return their result without commandExecution
         // notifications. Check the actual tool result sent back to the model.
-        let outputs: Vec<_> = next_request["input"].as_array().unwrap().iter()
-            .filter(|item| matches!(item["type"].as_str(), Some("custom_tool_call_output" | "function_call_output")))
+        let outputs: Vec<_> = next_request["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item["type"].as_str(),
+                    Some("custom_tool_call_output" | "function_call_output")
+                )
+            })
             .collect();
         let outputs = serde_json::to_string(&outputs).unwrap();
         assert!(outputs.contains("inspection-ok"));
-        assert!(outputs.contains("operation not permitted") || outputs.contains("Permission denied"));
+        assert!(
+            outputs.contains("operation not permitted") || outputs.contains("Permission denied")
+        );
         let replies: Vec<_> = agent["messages"]
             .as_array()
             .unwrap()
@@ -3763,15 +4117,17 @@ supports_websockets = false
     #[tokio::test]
     async fn followups_validate_timezones_and_survive_cancellation() {
         let (_root, state) = fixture().await;
-        assert!(tool_action(
-            &state,
-            "pock",
-            "schedule_follow_up",
-            &json!({"instructions":"Check progress","dueAt":"2027-01-01T10:00:00"}),
-            &[]
-        )
-        .await
-        .is_err());
+        assert!(
+            tool_action(
+                &state,
+                "pock",
+                "schedule_follow_up",
+                &json!({"instructions":"Check progress","dueAt":"2027-01-01T10:00:00"}),
+                &[]
+            )
+            .await
+            .is_err()
+        );
         assert!(tool_action(&state,"pock","schedule_follow_up",&json!({"instructions":"Check progress","dueAt":"2099-01-01T10:00:00Z","intervalMinutes":0}),&[]).await.is_err());
         let followup=tool_action(&state,"pock","schedule_follow_up",&json!({"instructions":"Check progress","dueAt":"2099-01-01T10:00:00+07:00","intervalMinutes":60}),&[]).await.unwrap();
         let _ = cancel_followup(
@@ -3806,16 +4162,18 @@ supports_websockets = false
         assert_eq!(agent["messages"][0]["id"], reply["messageId"]);
         assert_eq!(agent["messages"][0]["content"], "Hello");
         assert_eq!(agent["activity"], Value::Null);
-        assert!(execute_tool(
-            &state,
-            "pock",
-            "update_profile",
-            &json!({"name":"Nova","shell":"rm"}),
-            "call",
-            &[]
-        )
-        .await
-        .is_err());
+        assert!(
+            execute_tool(
+                &state,
+                "pock",
+                "update_profile",
+                &json!({"name":"Nova","shell":"rm"}),
+                "call",
+                &[]
+            )
+            .await
+            .is_err()
+        );
         assert!(
             execute_tool(&state, "pock", "shell", &json!({}), "call", &[])
                 .await
@@ -3828,24 +4186,78 @@ supports_websockets = false
     #[tokio::test]
     async fn provider_model_presets_persist_validate_and_require_admin() {
         let (_root, state) = fixture().await;
-        let admin = AuthUser { id: "admin".into(), username: "Admin".into(), role: "admin".into() };
-        let member = AuthUser { role: "member".into(), ..admin.clone() };
+        let admin = AuthUser {
+            id: "admin".into(),
+            username: "Admin".into(),
+            role: "admin".into(),
+        };
+        let member = AuthUser {
+            role: "member".into(),
+            ..admin.clone()
+        };
         let input = json!({"default":{"model":"exact-alpha","reasoningEffort":"high"},"providers":{"codex":{"model":"exact-beta","reasoningEffort":"low"}}});
-        assert!(providers::update_model_presets(State(state.clone()), Extension(member), Json(input.clone())).await.is_err());
-        assert_eq!(providers::model_presets(&state.db).await.unwrap()["providers"], json!({}));
-        let Json(saved) = providers::update_model_presets(State(state.clone()), Extension(admin.clone()), Json(input.clone())).await.unwrap();
-        assert_eq!(providers::read_model_presets(State(state.clone())).await.unwrap().0, saved);
+        assert!(
+            providers::update_model_presets(
+                State(state.clone()),
+                Extension(member),
+                Json(input.clone())
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            providers::model_presets(&state.db).await.unwrap()["providers"],
+            json!({})
+        );
+        let Json(saved) = providers::update_model_presets(
+            State(state.clone()),
+            Extension(admin.clone()),
+            Json(input.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            providers::read_model_presets(State(state.clone()))
+                .await
+                .unwrap()
+                .0,
+            saved
+        );
         for invalid in [
             json!({"default":{"model":false,"reasoningEffort":"low"},"providers":{}}),
             json!({"default":{"model":"exact-alpha","reasoningEffort":"bogus"},"providers":{}}),
             json!({"default":input["default"],"providers":{"unknown":input["providers"]["codex"]}}),
         ] {
-            assert!(providers::update_model_presets(State(state.clone()), Extension(admin.clone()), Json(invalid)).await.is_err());
+            assert!(
+                providers::update_model_presets(
+                    State(state.clone()),
+                    Extension(admin.clone()),
+                    Json(invalid)
+                )
+                .await
+                .is_err()
+            );
             assert_eq!(providers::model_presets(&state.db).await.unwrap(), saved);
         }
-        assert_eq!(providers::provider_model_defaults(&state.db, "codex").await.unwrap(), input["providers"]["codex"]);
-        let _ = providers::update_model_presets(State(state.clone()), Extension(admin), Json(json!({"default":input["default"],"providers":{}}))).await.unwrap();
-        assert_eq!(providers::provider_model_defaults(&state.db, "codex").await.unwrap(), input["default"]);
+        assert_eq!(
+            providers::provider_model_defaults(&state.db, "codex")
+                .await
+                .unwrap(),
+            input["providers"]["codex"]
+        );
+        let _ = providers::update_model_presets(
+            State(state.clone()),
+            Extension(admin),
+            Json(json!({"default":input["default"],"providers":{}})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            providers::provider_model_defaults(&state.db, "codex")
+                .await
+                .unwrap(),
+            input["default"]
+        );
     }
 
     #[cfg(unix)]
@@ -3853,28 +4265,66 @@ supports_websockets = false
     async fn provider_model_presets_initialize_new_chats_and_preserve_overrides() {
         let (root, state, _home) = coding_fixture().await;
         let presets = json!({"id":"model-presets","default":{"model":"exact-alpha","reasoningEffort":"high"},"providers":{"codex":{"model":"exact-beta","reasoningEffort":"low"}}});
-        save_document(&state.db, "provider-settings", &presets).await.unwrap();
+        save_document(&state.db, "provider-settings", &presets)
+            .await
+            .unwrap();
         let mut account = document(&state.db, "accounts", "account").await.unwrap();
-        assert_eq!(providers::account_runtime_defaults(&state.db, &account).await.unwrap()["model"], "exact-alpha");
+        assert_eq!(
+            providers::account_runtime_defaults(&state.db, &account)
+                .await
+                .unwrap()["model"],
+            "exact-alpha"
+        );
         account["runtimeDefaults"] = json!({"permissionMode":"readOnly"});
-        save_document(&state.db, "accounts", &account).await.unwrap();
+        save_document(&state.db, "accounts", &account)
+            .await
+            .unwrap();
         let client = state.providers.client(&state.db, "account").await.unwrap();
         let options = providers::model_options(&state, &client).await.unwrap();
         assert!(options.has_model_preset);
         assert_eq!(options.default_model, "exact-beta");
-        assert_eq!(options.models.iter().find(|m| m.model == "exact-beta").unwrap().default_reasoning_effort, "low");
+        assert_eq!(
+            options
+                .models
+                .iter()
+                .find(|m| m.model == "exact-beta")
+                .unwrap()
+                .default_reasoning_effort,
+            "low"
+        );
         let chat = coding_tool(&state, "create_chat", json!({"workingDirectory":root.path(),"accountId":"account","title":"Inherited preset","startRun":false})).await.unwrap();
-        let defaults = providers::runtime_defaults(&state, chat["chatId"].as_str().unwrap()).await.unwrap().unwrap();
+        let defaults = providers::runtime_defaults(&state, chat["chatId"].as_str().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(defaults["model"], "exact-beta");
         assert_eq!(defaults["reasoningEffort"], "low");
         let override_chat = coding_tool(&state, "create_chat", json!({"workingDirectory":root.path(),"accountId":"account","title":"Chat override","startRun":false,"model":"exact-alpha","reasoningEffort":"high"})).await.unwrap();
-        let overrides = providers::runtime_defaults(&state, override_chat["chatId"].as_str().unwrap()).await.unwrap().unwrap();
+        let overrides =
+            providers::runtime_defaults(&state, override_chat["chatId"].as_str().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(overrides["model"], "exact-alpha");
         assert_eq!(overrides["reasoningEffort"], "high");
-        save_document(&state.db, "provider-settings", &json!({"id":"model-presets","default":presets["default"],"providers":{}})).await.unwrap();
-        assert_eq!(providers::runtime_defaults(&state, chat["chatId"].as_str().unwrap()).await.unwrap().unwrap(), defaults);
+        save_document(
+            &state.db,
+            "provider-settings",
+            &json!({"id":"model-presets","default":presets["default"],"providers":{}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            providers::runtime_defaults(&state, chat["chatId"].as_str().unwrap())
+                .await
+                .unwrap()
+                .unwrap(),
+            defaults
+        );
         account["runtimeDefaults"] = json!({"model":"exact-beta"});
-        let defaults = providers::account_runtime_defaults(&state.db, &account).await.unwrap();
+        let defaults = providers::account_runtime_defaults(&state.db, &account)
+            .await
+            .unwrap();
         assert_eq!(defaults["model"], "exact-beta");
         assert!(defaults.get("reasoningEffort").is_none());
         save_document(&state.db, "provider-settings", &json!({"id":"model-presets","default":{"model":"missing","reasoningEffort":"low"},"providers":{}})).await.unwrap();
@@ -4241,19 +4691,46 @@ supports_websockets = false
         );
         std::fs::write(&script, source).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let client = CodexClient::test_process_with_home(script, Some(root.path()), true).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(10), model_routing_turn(&state, &client, "handoff")).await.unwrap().unwrap();
+        let client = CodexClient::test_process_with_home(script, Some(root.path()), true)
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            model_routing_turn(&state, &client, "handoff"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         client.shutdown().await;
-        let total: i64 = sqlx::query_scalar("SELECT SUM(tokens) FROM agent_usage_buckets WHERE agent_id='pock'")
-            .fetch_one(&state.db.pool).await.unwrap();
+        let total: i64 =
+            sqlx::query_scalar("SELECT SUM(tokens) FROM agent_usage_buckets WHERE agent_id='pock'")
+                .fetch_one(&state.db.pool)
+                .await
+                .unwrap();
         assert_eq!(total, 200);
-        let Json(usage) = agent_usage::read_usage(State(state.clone()), Query(agent_usage::UsageQuery { days: Some(7) })).await.unwrap();
+        let Json(usage) = agent_usage::read_usage(
+            State(state.clone()),
+            Query(agent_usage::UsageQuery { days: Some(7) }),
+        )
+        .await
+        .unwrap();
         assert_eq!(usage["series"][0]["agentId"], "pock");
-        let tokens: i64 = usage["series"][0]["buckets"].as_array().unwrap().iter()
-            .map(|bucket| bucket["tokens"].as_i64().unwrap()).sum();
+        let tokens: i64 = usage["series"][0]["buckets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|bucket| bucket["tokens"].as_i64().unwrap())
+            .sum();
         assert_eq!(tokens, 200);
         assert!(usage["trackedSince"].is_string());
-        assert!(agent_usage::read_usage(State(state), Query(agent_usage::UsageQuery { days: Some(0) })).await.is_err());
+        assert!(
+            agent_usage::read_usage(
+                State(state),
+                Query(agent_usage::UsageQuery { days: Some(0) })
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[cfg(unix)]
@@ -4421,9 +4898,14 @@ supports_websockets = false
                 if event["method"] == "item/started" {
                     loop {
                         let agent = state.agents.get("pock").await.unwrap();
-                        if agent["messages"].as_array().unwrap().iter()
+                        if agent["messages"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
                             .filter_map(|message| message["actions"].as_array())
-                            .flatten().any(|action| action["tool"] == "commandExecution") {
+                            .flatten()
+                            .any(|action| action["tool"] == "commandExecution")
+                        {
                             break;
                         }
                         tokio::task::yield_now().await;
@@ -4571,4 +5053,37 @@ pub(crate) async fn set_group_account(state: &AppState, id: &str, account: &str)
     })
     .await?;
     Ok(())
+}
+
+// Update the existing durable message under the same state lock as deliveries.
+pub(crate) async fn checkbox(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<markdown_checkboxes::CheckboxEdit>,
+) -> AppResult<Json<Value>> {
+    if input.target != "message" {
+        return Err(AppError::BadRequest("Invalid Markdown target".into()));
+    }
+    let next = change(&state, &id, |agent| {
+        if agent["status"] == "running" {
+            return Err(AppError::Conflict(
+                "Wait for the agent to finish before editing Markdown".into(),
+            ));
+        }
+        let message = agent["messages"]
+            .as_array_mut()
+            .and_then(|messages| {
+                messages
+                    .iter_mut()
+                    .find(|m| m["id"].as_str() == input.record_id.as_deref())
+            })
+            .ok_or_else(|| AppError::NotFound("Message not found".into()))?;
+        let content = message["content"]
+            .as_str()
+            .ok_or_else(|| AppError::BadRequest("Message has no Markdown".into()))?;
+        message["content"] = json!(input.apply(content)?);
+        Ok(())
+    })
+    .await?;
+    Ok(Json(next))
 }

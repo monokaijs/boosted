@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import type { ReactNode } from "react";
 
 function avatarGradient(seed: string) {
   // Hash the whole ID so similar IDs still produce distinct gradients.
@@ -19,15 +20,16 @@ function avatarGradient(seed: string) {
   ].join(", ");
 }
 
-export function GradientAvatar({ seed, className, slot = "gradient-avatar" }: {
+export function GradientAvatar({ seed, className, slot = "gradient-avatar", children }: {
   seed: string;
   className?: string;
   slot?: string;
+  children?: ReactNode;
 }) {
   return <span
     aria-hidden="true"
     data-slot={slot}
     className={cn("inline-block size-4 shrink-0 rounded-[4px] ring-1 ring-inset ring-white/10", className)}
     style={{ backgroundImage: avatarGradient(seed) }}
-  />;
+  >{children}</span>;
 }

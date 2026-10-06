@@ -1,3 +1,4 @@
+mod agent_integrations;
 mod agent_usage;
 mod agents;
 mod auth;
@@ -10,43 +11,45 @@ mod dev_web;
 mod error;
 mod files;
 mod git;
+mod gitlab_connections;
 mod group_models;
 mod groups;
 mod integrations;
+mod markdown_checkboxes;
 mod models;
 mod process;
 mod providers;
 pub mod updater;
 
 use axum::{
+    Extension, Json, Router,
     body::Body,
     extract::{
-        ws::{Message as WsMessage, WebSocket},
         ConnectInfo, DefaultBodyLimit, Multipart, Path as AxumPath, Query, Request, State,
         WebSocketUpgrade,
+        ws::{Message as WsMessage, WebSocket},
     },
-    http::{header, HeaderMap, Method, StatusCode},
+    http::{HeaderMap, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
-    Extension, Json, Router,
 };
 use chrono::{TimeZone, Utc};
 use codex_transcript::{codex_item_message, codex_live_item_message};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::Row;
 use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use tower_http::{
     cors::{Any, CorsLayer},
     services::{ServeDir, ServeFile},
@@ -149,6 +152,7 @@ struct AppState {
     db: Database,
     providers: providers::ProviderManager,
     agents: agents::AgentManager,
+    agent_integrations: agent_integrations::AgentIntegrationManager,
     groups: groups::GroupManager,
     codex: CodexManager,
     live: broadcast::Sender<LiveEvent>,
@@ -271,8 +275,13 @@ pub async fn run_with_updater(
     tokio::fs::create_dir_all(&uploads_dir).await?;
     let (live, _) = broadcast::channel(4096);
     let agents = agents::AgentManager::load(&db).await?;
+    let agent_integrations = agent_integrations::AgentIntegrationManager::new(
+        config.data_dir.join("integration-secrets"),
+    )
+    .await?;
     let state = AppState {
         agents,
+        agent_integrations,
         groups: groups::GroupManager::default(),
         providers: providers::ProviderManager::new(
             config.data_dir.join("providers/codex/accounts"),
@@ -370,8 +379,14 @@ fn router(
             get(agents::list_agents).post(agents::create_agent),
         )
         .route("/groups", get(groups::list).post(groups::create))
-        .route("/groups/{id}", get(groups::read).patch(groups::update).delete(groups::delete))
+        .route(
+            "/groups/{id}",
+            get(groups::read)
+                .patch(groups::update)
+                .delete(groups::delete),
+        )
         .route("/groups/{id}/usage", get(agent_usage::read_group_usage))
+        .route("/groups/{id}/checkboxes", patch(groups::checkbox))
         .route(
             "/groups/{id}/messages",
             get(groups::messages)
@@ -392,6 +407,31 @@ fn router(
         .route("/groups/{id}/stop", post(groups::stop))
         .route("/groups/{id}/resume", post(groups::resume))
         .route("/agents/{id}", get(agents::read_agent))
+        .route(
+            "/agents/{id}/integrations",
+            get(agent_integrations::list).post(agent_integrations::create),
+        )
+        .route(
+            "/agents/{agent_id}/integrations/{integration_id}",
+            patch(agent_integrations::update).delete(agent_integrations::delete),
+        )
+        .route(
+            "/agents/{agent_id}/integrations/{integration_id}/test",
+            post(agent_integrations::test),
+        )
+        .route(
+            "/agents/{agent_id}/integrations/{integration_id}/chats",
+            get(agent_integrations::chats),
+        )
+        .route(
+            "/agents/{agent_id}/integrations/{integration_id}/chats/{chat_id}/approve",
+            post(agent_integrations::approve),
+        )
+        .route(
+            "/agents/{agent_id}/integrations/{integration_id}/chats/{chat_id}/revoke",
+            post(agent_integrations::revoke),
+        )
+        .route("/agents/{id}/checkboxes", patch(agents::checkbox))
         .route("/agents/usage", get(agent_usage::read_usage))
         .route(
             "/agents/{id}/messages",
@@ -454,6 +494,7 @@ fn router(
         )
         .route("/folders", get(browse_folders))
         .route("/projects", get(list_projects).post(create_project))
+        .route("/projects/{id}/icon", put(update_project_icon))
         .route("/projects/{id}/files", get(list_project_files))
         .route("/projects/{id}/file", get(read_project_file))
         .route("/projects/{id}/git/branches", get(list_project_branches))
@@ -461,6 +502,12 @@ fn router(
             "/projects/{id}/git/branch",
             get(read_project_branch).post(switch_project_branch),
         )
+        .route("/projects/{id}/git/status", get(project_git_status))
+        .route("/projects/{id}/git/diff", get(project_git_diff))
+        .route("/projects/{id}/git/stage", post(project_git_stage))
+        .route("/projects/{id}/git/unstage", post(project_git_unstage))
+        .route("/projects/{id}/git/discard", post(project_git_discard))
+        .route("/projects/{id}/git/commit", post(project_git_commit))
         .route(
             "/projects/{id}/integrations",
             get(list_integrations).post(create_integration),
@@ -485,9 +532,21 @@ fn router(
             "/projects/{id}/codex-settings/mcps",
             post(upsert_workspace_mcp),
         )
+        .route(
+            "/gitlab-connections",
+            get(gitlab_connections::list).post(gitlab_connections::create),
+        )
+        .route(
+            "/gitlab-connections/{id}",
+            put(gitlab_connections::update).delete(gitlab_connections::delete),
+        )
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/{id}", get(get_task))
         .route("/tasks/{id}/events", get(task_events))
+        .route(
+            "/tasks/{id}/checkboxes",
+            patch(markdown_checkboxes::task_checkbox),
+        )
         .route(
             "/tasks/{task_id}/attachments/{id}",
             get(download_task_attachment),
@@ -1010,14 +1069,18 @@ async fn read_codex_options(
 ) -> AppResult<Json<CodexOptions>> {
     let client = match query.get("threadId") {
         Some(id) => providers::client_for_thread(&state, id).await?,
-        None => state.codex.client().await?,
+        None => providers::new_work_client(&state, false).await?.1,
     };
     // Existing chats keep their runtime; presets initialize new shared chats/tasks.
-    Ok(Json(if query.contains_key("threadId") || query.get("catalog").is_some_and(|value| value == "true") {
-        load_codex_options(&client).await?
-    } else {
-        providers::model_options(&state, &client).await?
-    }))
+    Ok(Json(
+        if query.contains_key("threadId")
+            || query.get("catalog").is_some_and(|value| value == "true")
+        {
+            load_codex_options(&client).await?
+        } else {
+            providers::model_options(&state, &client).await?
+        },
+    ))
 }
 
 fn codex_image_extension(mime_type: &str) -> Option<&'static str> {
@@ -1385,7 +1448,7 @@ async fn list_codex_chats(
         !task_thread_ids.contains(&chat.id) && !deleted_thread_ids.contains(&chat.id)
     });
     for metadata in providers::documents(&state.db, "provider-chats").await? {
-        if metadata["archived"] == true {
+        if metadata["archived"] == true || metadata["taskId"].is_string() {
             continue;
         }
         if query.cwd.as_deref().is_some_and(|cwd| {
@@ -1424,7 +1487,7 @@ async fn create_codex_chat(
             "chat working directory does not exist".into(),
         ));
     }
-    let client = state.codex.client().await?;
+    let (account_id, client) = providers::new_work_client(&state, true).await?;
     let options = if input.model.is_some() {
         load_codex_options(&client).await?
     } else {
@@ -1455,6 +1518,18 @@ async fn create_codex_chat(
     if input.model.is_none() {
         let defaults = providers::provider_model_defaults(&state.db, "codex").await?;
         providers::save_document(&state.db, "chat-runtime", &json!({"id":chat.id,"model":selected_model.model,"reasoningEffort":defaults["reasoningEffort"].as_str().unwrap_or(&selected_model.default_reasoning_effort)})).await?;
+    }
+    if let Some(account_id) = account_id {
+        providers::save_document(
+            &state.db,
+            "provider-chats",
+            &json!({
+                "id":chat.id,"title":chat.title,"workingDirectory":cwd,"accountId":account_id,
+                "autoRotateAccount":true,"createdAt":Utc::now().to_rfc3339()
+            }),
+        )
+        .await?;
+        state.emit("provider-chats.updated", json!({"chatId":chat.id}));
     }
     state
         .started_codex_threads
@@ -1672,6 +1747,7 @@ async fn send_codex_message_locked(
         ));
     }
 
+    agents::prepare_chat_account_locked(state, &requested_thread_id).await?;
     let client = providers::client_for_thread(&state, &requested_thread_id).await?;
     let mut notifications = client.subscribe();
     let started = state
@@ -1811,29 +1887,30 @@ async fn send_codex_message_locked(
         .service_tier
         .as_deref()
         .or(resumed.get("serviceTier").and_then(Value::as_str));
-    let result = client
-        .request(
-            "turn/start",
-            json!({
-                "threadId": thread_id,
-                "clientUserMessageId": client_message_id,
-                "input": turn_input,
-                "approvalPolicy": approval_policy,
-                "sandboxPolicy": sandbox_policy,
-                "model": selected_model.model,
-                "effort": reasoning_effort,
-                "serviceTier": service_tier,
-                "collaborationMode": {
-                    "mode": collaboration_mode,
-                    "settings": {
-                        "model": selected_model.model,
-                        "reasoning_effort": reasoning_effort,
-                        "developer_instructions": null
-                    }
+    let result = providers::start_turn(
+        state,
+        &client,
+        &thread_id,
+        json!({
+            "threadId": thread_id,
+            "clientUserMessageId": client_message_id,
+            "input": turn_input,
+            "approvalPolicy": approval_policy,
+            "sandboxPolicy": sandbox_policy,
+            "model": selected_model.model,
+            "effort": reasoning_effort,
+            "serviceTier": service_tier,
+            "collaborationMode": {
+                "mode": collaboration_mode,
+                "settings": {
+                    "model": selected_model.model,
+                    "reasoning_effort": reasoning_effort,
+                    "developer_instructions": null
                 }
-            }),
-        )
-        .await?;
+            }
+        }),
+    )
+    .await?;
     let turn_id = result
         .pointer("/turn/id")
         .or_else(|| result.get("turnId"))
@@ -1853,7 +1930,7 @@ async fn send_codex_message_locked(
     providers::save_document(
         &state.db,
         "coding-requests",
-        &json!({"id":turn_id,"chatId":thread_id,"content":message}),
+        &json!({"id":turn_id,"chatId":thread_id,"content":message,"attachmentIds":input.attachment_ids}),
     )
     .await?;
     state
@@ -2176,6 +2253,24 @@ async fn list_projects(State(state): State<AppState>) -> AppResult<Json<Vec<Proj
     Ok(Json(state.db.projects().await?))
 }
 
+#[derive(Deserialize)]
+struct ProjectIconUpdate {
+    icon: Option<String>,
+}
+
+async fn update_project_icon(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<ProjectIconUpdate>,
+) -> AppResult<Json<Project>> {
+    let project = state
+        .db
+        .update_project_icon(&id, input.icon.as_deref())
+        .await?;
+    state.emit("project.updated", json!({"projectId":id}));
+    Ok(Json(project))
+}
+
 async fn list_project_branches(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -2239,12 +2334,13 @@ async fn discover_integration_targets(
     Json(input): Json<IntegrationDiscoveryRequest>,
 ) -> AppResult<Json<integrations::IntegrationDiscoveryResult>> {
     state.db.project(&id).await?;
+    let config = gitlab_connections::resolve(&state.db, &input.provider, &input.config).await?;
     Ok(Json(
-        integrations::discover(&input.provider, &input.config).await?,
+        integrations::discover(&input.provider, &config).await?,
     ))
 }
 
-fn validate_integration(input: &IntegrationCreate) -> AppResult<()> {
+async fn validate_integration(state: &AppState, input: &IntegrationCreate) -> AppResult<()> {
     if !matches!(input.provider.as_str(), "gitlab" | "huly") {
         return Err(AppError::BadRequest(
             "provider must be GitLab or Huly".into(),
@@ -2260,7 +2356,17 @@ fn validate_integration(input: &IntegrationCreate) -> AppResult<()> {
             ));
         }
     }
-    integrations::validate_config(&input.provider, &input.config)?;
+    if input.provider == "gitlab"
+        && input.config["connectionId"]
+            .as_str()
+            .is_none_or(|id| id.trim().is_empty())
+    {
+        return Err(AppError::BadRequest(
+            "choose a GitLab connection from Settings → Integrations".into(),
+        ));
+    }
+    let config = gitlab_connections::resolve(&state.db, &input.provider, &input.config).await?;
+    integrations::validate_config(&input.provider, &config)?;
     Ok(())
 }
 
@@ -2271,11 +2377,12 @@ async fn create_integration(
     Json(input): Json<IntegrationCreate>,
 ) -> AppResult<(StatusCode, Json<Integration>)> {
     state.db.project(&project_id).await?;
-    validate_integration(&input)?;
+    validate_integration(&state, &input).await?;
+    let config = gitlab_connections::project_config(&input.provider, &input.config);
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     sqlx::query("INSERT INTO integrations(id,project_id,provider,name,config_json,enabled,sync_interval_minutes,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
-        .bind(&id).bind(&project_id).bind(&input.provider).bind(input.name.trim()).bind(input.config.to_string())
+        .bind(&id).bind(&project_id).bind(&input.provider).bind(input.name.trim()).bind(config.to_string())
         .bind(input.enabled).bind(input.sync_interval_minutes).bind(&user.id).bind(&now).bind(&now).execute(&state.db.pool).await?;
     state.emit(
         "integration.created",
@@ -2300,9 +2407,10 @@ async fn update_integration(
         enabled: input.enabled,
         sync_interval_minutes: input.sync_interval_minutes,
     };
-    validate_integration(&validate)?;
+    validate_integration(&state, &validate).await?;
+    let config = gitlab_connections::project_config(&validate.provider, &input.config);
     sqlx::query("UPDATE integrations SET name=?,config_json=?,enabled=?,sync_interval_minutes=?,updated_at=? WHERE id=?")
-        .bind(input.name.trim()).bind(input.config.to_string()).bind(input.enabled).bind(input.sync_interval_minutes)
+        .bind(input.name.trim()).bind(config.to_string()).bind(input.enabled).bind(input.sync_interval_minutes)
         .bind(Utc::now().to_rfc3339()).bind(&id).execute(&state.db.pool).await?;
     Ok(Json(state.db.integration(&id).await?))
 }
@@ -2338,10 +2446,17 @@ async fn sync_integration(
 }
 
 async fn run_integration_sync(state: &AppState, id: &str) -> AppResult<IntegrationSyncResult> {
-    let integration = state.db.integration(id).await?;
+    let mut integration = state.db.integration(id).await?;
     sqlx::query("UPDATE integrations SET last_sync_status='running',last_sync_error=NULL,updated_at=? WHERE id=?")
         .bind(Utc::now().to_rfc3339()).bind(id).execute(&state.db.pool).await?;
-    let issues = match integrations::fetch_issues(&integration).await {
+    let issues = match async {
+        integration.config =
+            gitlab_connections::resolve(&state.db, &integration.provider, &integration.config)
+                .await?;
+        integrations::fetch_issues(&integration).await
+    }
+    .await
+    {
         Ok(issues) => issues,
         Err(error) => {
             let message = error.to_string();
@@ -2550,13 +2665,14 @@ async fn upsert_workspace_mcp(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TaskListQuery {
-    project_id: Option<String>,
+    project_id: String,
 }
 async fn list_tasks(
     State(state): State<AppState>,
     Query(query): Query<TaskListQuery>,
 ) -> AppResult<Json<Vec<Task>>> {
-    Ok(Json(state.db.tasks(query.project_id.as_deref()).await?))
+    state.db.project(&query.project_id).await?;
+    Ok(Json(state.db.tasks(&query.project_id).await?))
 }
 async fn get_task(
     State(state): State<AppState>,
@@ -2689,7 +2805,13 @@ async fn send_task_message(
             .set_task_state(&id, &pending.resume_status, None)
             .await?;
     } else if matches!(task.status.as_str(), "planning" | "running") {
-        let client = state.codex.client().await?;
+        let client = providers::client_for_thread(
+            &state,
+            task.provider_thread_id
+                .as_deref()
+                .ok_or_else(|| AppError::Conflict("task has no Codex thread".into()))?,
+        )
+        .await?;
         client.request("turn/steer", json!({"threadId":task.provider_thread_id.ok_or_else(|| AppError::Conflict("task has no Codex thread".into()))?,"expectedTurnId":task.active_turn_id.ok_or_else(|| AppError::Conflict("task has no active turn".into()))?,"input":[{"type":"text","text":message}]})).await?;
     } else {
         sqlx::query("UPDATE plans SET approved_at=NULL,approved_by=NULL WHERE task_id=?")
@@ -2798,7 +2920,13 @@ async fn stop_task(
     AxumPath(id): AxumPath<String>,
 ) -> AppResult<Json<Task>> {
     let task = state.db.task(&id).await?;
-    let client = state.codex.client().await?;
+    let client = providers::client_for_thread(
+        &state,
+        task.provider_thread_id
+            .as_deref()
+            .ok_or_else(|| AppError::Conflict("task has no Codex thread".into()))?,
+    )
+    .await?;
     client.request("turn/interrupt",json!({"threadId":task.provider_thread_id.ok_or_else(||AppError::Conflict("task has no Codex thread".into()))?,"turnId":task.active_turn_id.ok_or_else(||AppError::Conflict("task is not running".into()))?})).await?;
     state
         .set_task_state(&id, "failed", Some("Run stopped by user"))
@@ -3088,6 +3216,63 @@ async fn git_commit(
     refresh_diff_stats(&state, &id).await?;
     Ok(Json(json!({"commit":commit})))
 }
+async fn project_git_status(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> AppResult<Json<GitStatus>> {
+    let project = state.db.project(&id).await?;
+    Ok(Json(git::status(Path::new(&project.repo_path)).await?))
+}
+async fn project_git_diff(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<DiffQuery>,
+) -> AppResult<Json<Value>> {
+    let project = state.db.project(&id).await?;
+    Ok(Json(
+        json!({"diff":git::diff(Path::new(&project.repo_path),query.path.as_deref(),query.staged).await?}),
+    ))
+}
+async fn project_git_stage(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<GitPaths>,
+) -> AppResult<Json<GitStatus>> {
+    let project = state.db.project(&id).await?;
+    git::stage(Path::new(&project.repo_path), &input.paths).await?;
+    state.emit("project.git", json!({"projectId":id}));
+    Ok(Json(git::status(Path::new(&project.repo_path)).await?))
+}
+async fn project_git_unstage(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<GitPaths>,
+) -> AppResult<Json<GitStatus>> {
+    let project = state.db.project(&id).await?;
+    git::unstage(Path::new(&project.repo_path), &input.paths).await?;
+    state.emit("project.git", json!({"projectId":id}));
+    Ok(Json(git::status(Path::new(&project.repo_path)).await?))
+}
+async fn project_git_discard(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<GitPaths>,
+) -> AppResult<Json<GitStatus>> {
+    let project = state.db.project(&id).await?;
+    git::discard(Path::new(&project.repo_path), &input.paths).await?;
+    state.emit("project.git", json!({"projectId":id}));
+    Ok(Json(git::status(Path::new(&project.repo_path)).await?))
+}
+async fn project_git_commit(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<GitCommitCreate>,
+) -> AppResult<Json<Value>> {
+    let project = state.db.project(&id).await?;
+    let commit = git::commit(Path::new(&project.repo_path), &input.message).await?;
+    state.emit("project.git", json!({"projectId":id}));
+    Ok(Json(json!({"commit":commit})))
+}
 async fn live_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_live_ws(socket, state))
 }
@@ -3113,8 +3298,8 @@ async fn handle_live_ws(mut socket: WebSocket, state: AppState) {
 }
 
 async fn start_plan(state: AppState, task_id: String, prompt: String) -> AppResult<()> {
-    let client = state.codex.client().await?;
     let task = state.db.task(&task_id).await?;
+    let client = providers::task_client(&state, &task).await?;
     let codex_options = if task.model.is_some() {
         load_codex_options(&client).await?
     } else {
@@ -3166,7 +3351,7 @@ async fn start_plan(state: AppState, task_id: String, prompt: String) -> AppResu
         "Inspect the repository as needed, then create a concise execution plan for the task below. You must publish at least one concrete, actionable plan step before finishing. Do not edit files or execute the task yet.\n\nTask:\n{prompt}"
     );
     let developer_instructions = workspace_instructions(&state, &task.project_id).await?;
-    let result=client.request("turn/start",json!({"threadId":thread_id,"clientUserMessageId":Uuid::new_v4().to_string(),"input":[{"type":"text","text":planning_prompt}],"cwd":task.worktree_path,"approvalPolicy":"never","sandboxPolicy":{"type":"readOnly","networkAccess":false},"model":model,"effort":task.reasoning_effort,"collaborationMode":{"mode":"plan","settings":{"model":model,"reasoning_effort":task.reasoning_effort,"developer_instructions":developer_instructions}}})).await?;
+    let result=providers::start_turn(&state,&client,&thread_id,json!({"threadId":thread_id,"clientUserMessageId":Uuid::new_v4().to_string(),"input":[{"type":"text","text":planning_prompt}],"cwd":task.worktree_path,"approvalPolicy":"never","sandboxPolicy":{"type":"readOnly","networkAccess":false},"model":model,"effort":task.reasoning_effort,"collaborationMode":{"mode":"plan","settings":{"model":model,"reasoning_effort":task.reasoning_effort,"developer_instructions":developer_instructions}}})).await?;
     let turn_id = result
         .pointer("/turn/id")
         .and_then(Value::as_str)
@@ -3195,7 +3380,7 @@ async fn start_execution(state: AppState, task_id: String) -> AppResult<()> {
         .plan
         .clone()
         .ok_or_else(|| AppError::Conflict("approved plan not found".into()))?;
-    let client = state.codex.client().await?;
+    let client = providers::task_client(&state, &task).await?;
     let mut notifications = client.subscribe();
     let (thread_id, model) = ensure_thread(&state, &client, &task).await?;
     set_first_plan_step_in_progress(&state, &task_id, plan.revision).await?;
@@ -3217,7 +3402,7 @@ async fn start_execution(state: AppState, task_id: String) -> AppResult<()> {
         _ => json!({"type":"dangerFullAccess"}),
     };
     let developer_instructions = workspace_instructions(&state, &task.project_id).await?;
-    let result=client.request("turn/start",json!({"threadId":thread_id,"clientUserMessageId":Uuid::new_v4().to_string(),"input":[{"type":"text","text":prompt}],"cwd":task.worktree_path,"approvalPolicy":"never","sandboxPolicy":sandbox_policy,"model":model,"effort":task.reasoning_effort,"collaborationMode":{"mode":"default","settings":{"model":model,"reasoning_effort":task.reasoning_effort,"developer_instructions":developer_instructions}}})).await?;
+    let result=providers::start_turn(&state,&client,&thread_id,json!({"threadId":thread_id,"clientUserMessageId":Uuid::new_v4().to_string(),"input":[{"type":"text","text":prompt}],"cwd":task.worktree_path,"approvalPolicy":"never","sandboxPolicy":sandbox_policy,"model":model,"effort":task.reasoning_effort,"collaborationMode":{"mode":"default","settings":{"model":model,"reasoning_effort":task.reasoning_effort,"developer_instructions":developer_instructions}}})).await?;
     let turn_id = result
         .pointer("/turn/id")
         .and_then(Value::as_str)
@@ -3276,6 +3461,21 @@ async fn ensure_thread(
         .bind(&task.id)
         .execute(&state.db.pool)
         .await?;
+    if task.provider_thread_id.is_none() {
+        if let Ok(owner) = providers::document(&state.db, "task-provider", &task.id).await {
+            if let Some(account_id) = owner["accountId"].as_str() {
+                providers::save_document(
+                    &state.db,
+                    "provider-chats",
+                    &json!({
+                        "id":thread_id,"title":task.title,"workingDirectory":task.worktree_path,
+                        "accountId":account_id,"taskId":task.id,"autoRotateAccount":true
+                    }),
+                )
+                .await?;
+            }
+        }
+    }
     Ok((thread_id, model))
 }
 
@@ -3464,6 +3664,15 @@ async fn consume_turn(
                         .pointer("/turn/error/message")
                         .and_then(Value::as_str)
                         .unwrap_or("Codex turn failed");
+                    if agents::quota_error(&params["turn"]["error"].to_string()) {
+                        if let Ok(chat) =
+                            providers::document(&state.db, "provider-chats", thread_id).await
+                        {
+                            if let Some(id) = chat["accountId"].as_str() {
+                                let _ = providers::mark_exhausted(&state, id).await;
+                            }
+                        }
+                    }
                     let _ = state.set_task_state(task_id, "failed", Some(error)).await;
                 }
                 let _ = sqlx::query("UPDATE tasks SET active_turn_id=NULL WHERE id=?")
@@ -3582,12 +3791,11 @@ fn slugify(value: &str) -> String {
         .take(6)
         .collect::<Vec<_>>()
         .join("-");
-    if slug.is_empty() {
-        "task".into()
-    } else {
-        slug
-    }
+    if slug.is_empty() { "task".into() } else { slug }
 }
+
+#[cfg(test)]
+mod project_git_tests;
 
 #[cfg(test)]
 mod tests {

@@ -54,7 +54,17 @@ On macOS, enable **Screen Recording** and **Accessibility** for Boosted under **
 
 Use **Settings → Providers** to configure a shared default model preset and let each provider inherit it or choose its own model and reasoning level. Presets initialize new chats; account and chat overrides take precedence, and existing chats keep their settings. Use the provider accounts section or the agent panel's provider button to add isolated Codex accounts, sign in with a device code, inspect quotas, and configure each account's model, reasoning, access, speed, personality, and Codex home. Administrators manage provider accounts; authenticated members can use connected accounts and agents. Existing shared Codex task and chat connections continue to work.
 
+New chats, taskboard runs, and automatic agent turns share a persistent round-robin rotation across connected Codex accounts. Exhausted accounts are skipped until quota resets; unknown quota remains usable unless a recent run reported a quota failure. Chats keep their account for follow-ups and automatically move with their history when quota failover is enabled (the default for new chats). An explicit account choice takes priority when usable. If all configured accounts are unavailable, Boosted reports the quota or connection problem; the shared CLI account is used for new work only when no provider accounts are configured.
+
 Agent conversations support queued messages, images and files, action receipts linking to coding chats, stopping, account switching with preserved history, and quota failover. Ask an agent to watch a coding run or schedule a follow-up. These commitments persist and execute while the Boosted server runs, including with the browser closed. Agent notifications use Boosted's existing live PWA notification delivery.
+
+### Slack and Telegram agents
+
+Open an agent's profile and select **Integrations** to connect Slack or Telegram. Connections belong to one agent and use outbound-only transports, so Boosted does not need a public callback URL: Slack uses Socket Mode with an `xoxb-` bot token and `xapp-` app token, while Telegram uses Bot API long polling. The Slack form provides a copyable app manifest. Telegram bots must not have an active webhook; keeping BotFather privacy mode enabled is recommended for groups.
+
+The first message from a Slack channel/DM or Telegram chat creates a pending approval without saving or executing that message. An administrator must approve the chat, after which the bot asks the sender to repeat the request. Every human in an approved chat can exercise the selected agent's existing coding-chat and computer-control capabilities, so approve only trusted chats. Members can inspect sanitized connection status but cannot change connections or approvals.
+
+Direct messages invoke the agent normally. Group conversations require a bot mention or reply; established Slack bot threads continue without another mention. Slack root threads, Slack DMs, Telegram chats, and Telegram forum topics keep separate histories that never enter the agent's direct Boosted transcript. Replies, scheduled follow-ups, watched coding-run results, and action receipts stay in their originating external session. Incoming images and ordinary files use the same 5 MiB per-file and 10 MiB total limits. Disabling or revoking retains history, while deleting a connection removes its credentials, approvals, sessions, and queued deliveries.
 
 The conversation and provider UI, agent instructions, tool definitions, and conversation-state helpers are ported from PockCode. Their runtime is implemented in Rust using Boosted's authenticated API, SQLite storage, and live event stream; no Node sidecar is required by the desktop or headless binaries.
 
@@ -74,7 +84,9 @@ Groups follow the existing shared workspace access policy. Group activity stays 
 
 ## Issue integrations
 
-Install GitLab or Huly under **Settings → Integrations**. After connection details are entered, Boosted discovers the accessible projects, groups, and workspaces and presents them as a searchable multi-select. GitLab discovery uses the supplied access token and the instance's REST API, following pagination so paths or numeric IDs do not need to be copied from GitLab manually.
+Configure GitLab accounts under **Settings → Integrations**. Then use the icon-only project settings button immediately beside the in-chat project selector and open **General** to choose a saved connection and the GitLab projects or groups whose open issues should feed that project's taskboard. Connections are shared across projects; targets and import schedules belong to each project. Project settings and Codex instructions stay in this dedicated dialog rather than normal device/machine Settings. Existing GitLab integrations are migrated automatically, preserving selected targets and imported tasks.
+
+The GitLab target picker initially loads up to 10 groups and 10 projects. Search queries go to GitLab after a short delay, so accounts with many projects can find targets without loading the full account. Saved selections remain selected across searches. Huly connections and workspace/project selections are configured in each project's General settings.
 
 Huly remains connector-based so cloud and self-hosted deployments can use the same adapter. Boosted authenticates to the connector with the configured username and password using HTTP Basic authentication. In addition to the existing issue request (`GET` with `workspace`, `project`, and `state=open`), a connector should support a Basic-authenticated `GET` with `action=discover` and return its accessible workspaces and projects:
 

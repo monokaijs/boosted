@@ -2,6 +2,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CodexMessageContent } from "@/components/assistant-ui/codex-message-content";
 import { CodexQuestionForm } from "@/components/assistant-ui/codex-question-form";
+import { ApiClientProvider } from "@/lib/api-context";
+import { createBoostedApiClient } from "@/lib/api";
 
 describe("Codex transcript rendering", () => {
   afterEach(cleanup);
@@ -25,7 +27,8 @@ describe("Codex transcript rendering", () => {
   });
 
   it("renders review directives with a source link and readable finding", () => {
-    render(<CodexMessageContent content={'::code-comment{title="Fix animation" body="Respect **Reduce Motion**." file="/repo/sheet.tsx" start=12 end=15 priority=2}'} />);
+    const client = createBoostedApiClient({ profile: { id: "test", baseUrl: "http://localhost:4782" }, getToken: () => undefined });
+    render(<ApiClientProvider client={client}><CodexMessageContent content={'::code-comment{title="Fix animation" body="Respect **Reduce Motion**." file="/repo/sheet.tsx" start=12 end=15 priority=2}'} /></ApiClientProvider>);
     expect(screen.getByText("Fix animation")).toBeInTheDocument();
     expect(screen.getByText("Reduce Motion")).toBeInTheDocument();
     expect(screen.getByText("P2")).toBeInTheDocument();

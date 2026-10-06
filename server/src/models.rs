@@ -86,6 +86,7 @@ pub struct CodexBinarySettingsUpdate {
 pub struct Project {
     pub id: String,
     pub name: String,
+    pub icon: Option<String>,
     pub repo_path: String,
     pub default_branch: String,
     pub created_at: String,

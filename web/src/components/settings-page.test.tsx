@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   state: { selectedProjectId: "project-a" as string | undefined, activeMachineId: "machine-a", user: { id: "user-a", role: "admin" } },
   projects: vi.fn(), globalSettings: vi.fn(), updateGlobalSettings: vi.fn(), setupState: vi.fn(),
+  gitlabConnections: vi.fn(), createGitlabConnection: vi.fn(), updateGitlabConnection: vi.fn(), deleteGitlabConnection: vi.fn(),
   integrations: vi.fn(), workspaceCodexSettings: vi.fn(), updateWorkspaceCodexSettings: vi.fn(), usage: vi.fn(), featureRequest: vi.fn(), users: vi.fn(),
   presets: vi.fn(), updatePresets: vi.fn(), codexModelCatalog: vi.fn(), providers: vi.fn(), accounts: vi.fn(), limits: vi.fn(), models: vi.fn(), updateAccount: vi.fn(),
   close: vi.fn(),
@@ -21,7 +22,8 @@ vi.mock("@/features/agents/lib/api-client", () => ({ apiClient: {
   providerAccounts: { list: mocks.accounts, limits: mocks.limits, models: mocks.models, update: mocks.updateAccount },
 } }));
 
-import { SettingsPage, type SettingsSectionId } from "./settings-page";
+import { ProjectSettingsContent, SettingsPage, type SettingsSectionId } from "./settings-page";
+import { ProjectSettingsDialog } from "./project-settings-dialog";
 import { readNotificationSettings } from "@/lib/notifications";
 
 const account = { id: "account-a", providerId: "codex", displayName: "Work account", status: "CONNECTED", settings: { codexHome: "/isolated/codex" }, runtimeDefaults: { permissionMode: "default", reasoningEffort: "medium" }, createdAt: "2026-10-01", updatedAt: "2026-10-01" };
@@ -32,6 +34,11 @@ function renderPage(initial: SettingsSectionId | undefined = "connections") {
     return <SettingsPage section={section} onSectionChange={setSection} onBack={() => setSection(undefined)} onClose={mocks.close} />;
   }
   return render(<QueryClientProvider client={client}><Harness /></QueryClientProvider>);
+}
+function renderProjectSettings(contentOnly = false) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  const project = { id: "project-a", name: "Example", repoPath: "/repo/example", defaultBranch: "main", createdAt: "2026-10-01" };
+  return render(<QueryClientProvider client={client}>{contentOnly ? <ProjectSettingsContent /> : <ProjectSettingsDialog project={project} open onOpenChange={() => {}} />}</QueryClientProvider>);
 }
 function selectSection(name: string) { fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name })); }
 afterEach(cleanup);
@@ -45,6 +52,7 @@ beforeEach(() => {
   mocks.updateGlobalSettings.mockImplementation(async (settings) => settings);
   mocks.setupState.mockResolvedValue({ codex: { available: true, authenticated: true, version: "0.159.3" } });
   mocks.integrations.mockResolvedValue([]);
+  mocks.gitlabConnections.mockResolvedValue([]);
   mocks.workspaceCodexSettings.mockResolvedValue({ instructions: "Follow repository conventions.", mcps: [] });
   mocks.usage.mockResolvedValue({ trackedSince: null, series: [] });
   mocks.featureRequest.mockResolvedValue([]);
@@ -60,6 +68,19 @@ beforeEach(() => {
 });
 
 describe("settings page", () => {
+  it("keeps shared GitLab setup in machine settings and imports in project settings", async () => {
+    const page = renderPage("integrations");
+    expect(await screen.findByRole("heading", { name: "GitLab connections" })).toBeInTheDocument();
+    expect(screen.getByText("Machine settings")).toBeInTheDocument();
+    expect(mocks.integrations).not.toHaveBeenCalled();
+    page.unmount();
+    renderProjectSettings(true);
+    expect(await screen.findByRole("heading", { name: "Installed integrations" })).toBeInTheDocument();
+    expect(mocks.integrations).toHaveBeenCalledWith("project-a");
+    expect(screen.queryByRole("heading", { name: "GitLab connections" })).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Add a GitLab connection in Settings/)).toHaveLength(1);
+  });
+
   it("places analytics under Settings and mounts only the selected usage scope", async () => {
     renderPage("usage");
     expect(await screen.findByText("No recorded usage in this period.")).toBeInTheDocument();
@@ -75,7 +96,8 @@ describe("settings page", () => {
   });
 
   it("separates Codex instructions from tools and connection while retaining edited instructions", async () => {
-    renderPage("codex");
+    renderProjectSettings();
+    fireEvent.click(screen.getByRole("tab", { name: "Codex" }));
     const instructions = await screen.findByRole("textbox", { name: "Instructions" });
     await waitFor(() => expect(instructions).toHaveValue("Follow repository conventions."));
     fireEvent.change(instructions, { target: { value: "Keep my unsaved instructions." } });
@@ -93,12 +115,13 @@ describe("settings page", () => {
   it("renders every section as a page with searchable navigation and a return action", async () => {
     renderPage();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    for (const [label, heading] of [["Usage", "Usage"], ["Providers", "Providers"], ["Connections", "Connections"], ["Notifications", "Notifications"], ["Web interface", "Web interface"], ["Application", "Application"], ["Team", "Team"], ["General", "Workspace"], ["Integrations", "Integrations"], ["Codex", "Codex"]]) {
+    for (const [label, heading] of [["Usage", "Usage"], ["Providers", "Providers"], ["Connections", "Connections"], ["Notifications", "Notifications"], ["Web interface", "Web interface"], ["Application", "Application"], ["Team", "Team"], ["Integrations", "Integrations"]]) {
       selectSection(label);
       expect(screen.getByRole("heading", { level: 1, name: heading })).toBeInTheDocument();
       expect(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: label })).toHaveAttribute("aria-current", "page");
     }
-    await screen.findByRole("textbox", { name: "Instructions" });
+    expect(screen.queryByRole("button", { name: "General" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Codex" })).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole("textbox", { name: "Search settings" }), { target: { value: "web" } });
     expect(within(screen.getByRole("navigation", { name: "Settings sections" })).getAllByRole("button")).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: "Clear settings search" }));
@@ -193,13 +216,13 @@ describe("settings page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(screen.getByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();
     expect(mocks.workspaceCodexSettings).not.toHaveBeenCalled();
-    const category = screen.getByRole("button", { name: /^Codex$/ });
+    expect(screen.queryByRole("button", { name: /^Codex$/ })).not.toBeInTheDocument();
+    const category = screen.getByRole("button", { name: /^Notifications$/ });
     fireEvent.click(category);
     expect(screen.queryByRole("navigation", { name: "Settings sections" })).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { level: 1, name: "Codex" })).toHaveFocus();
-    expect(screen.getByText("Open a workspace to configure Codex instructions and MCP servers.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Notifications" })).toHaveFocus();
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(screen.getByRole("button", { name: /^Codex$/ })).toHaveFocus();
+    expect(screen.getByRole("button", { name: /^Notifications$/ })).toHaveFocus();
     fireEvent.click(screen.getByRole("button", { name: /^Notifications$/ }));
     expect(screen.getByRole("heading", { level: 1, name: "Notifications" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));

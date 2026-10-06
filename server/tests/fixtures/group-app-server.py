@@ -80,6 +80,8 @@ for line in sys.stdin:
         result = {"thread": thread}
         if p.get("ephemeral"):
             assert "leader-managed" in p["baseInstructions"]
+            thread["baseInstructions"] = p["baseInstructions"]
+            thread["developerInstructions"] = p["developerInstructions"]
             thread["dynamicTools"] = p["dynamicTools"]
             identity_line = p["developerInstructions"].split("agentIdentity=", 1)[1].splitlines()[0]
             thread["agentIdentity"] = json.loads(identity_line)
@@ -119,6 +121,19 @@ for line in sys.stdin:
         purpose = execution["purpose"]
         directive = gc["originalUserRequest"]["content"]
         thread = threads[current_thread]
+        coding_workflow = "For every project task that requires investigation"
+        assert (coding_workflow in thread["baseInstructions"]) == (purpose == "execute")
+        assert ("computer-control" in thread["developerInstructions"]) == (purpose == "execute")
+        if purpose == "message":
+            role = "the group leader" if agent == gc["leaderId"] else "a specialist"
+            assert f"You are {role} in a message turn" in thread["developerInstructions"]
+        elif purpose == "execute":
+            assert "You are executing your running assignment" in thread["developerInstructions"]
+            if directive == "REDESIGN":
+                assert prompt["availableImages"] == [{"id": "reference", "name": "reference.png"}]
+                assert any(item.get("type") == "image" for item in p["input"])
+        elif purpose == "review":
+            assert "You are independently reviewing an assignment" in thread["developerInstructions"]
         tool_names = {tool["name"] for tool in thread["dynamicTools"]}
         assert "create_group_task" in tool_names
         for name in ("create_chat", "send_message", "watch_chat", "block_group_task", "submit_group_result"):
@@ -179,6 +194,15 @@ for line in sys.stdin:
                     calls.append(("send_group_message", {"content": "Team result: verified assignments completed"}))
                 next_call()
                 continue
+            if directive == "REDESIGN" and agent == gc["leaderId"] and not has_assignment:
+                owner = next(member["id"] for member in gc["group"]["members"] if member["id"] != agent)
+                calls.append(("create_group_task", {
+                    "title": "Redesign the app", "instructions": "Use the human's attached screenshot",
+                    "expectedResult": "Verified redesign", "ownerId": owner,
+                }))
+                calls.append(("send_group_message", {"content": "The redesign has been assigned."}))
+                next_call()
+                continue
             if directive in ("WORK", "CHILD") and agent == gc["planningAgentId"]:
                 # The planner assigns distinct work; recipients do not each re-plan the request.
                 for member in gc["group"]["members"]:
@@ -196,7 +220,7 @@ for line in sys.stdin:
             assignment = gc["assignment"]
             child_done = any(e.get("taskId") == assignment["id"] and e.get("outcome")
                              for e in gc["group"]["executions"])
-            if directive == "CHILD" and not child_done:
+            if directive in ("CHILD", "REDESIGN") and not child_done:
                 calls.append(("create_chat", {
                     "title": "Child " + agent, "workingDirectory": thread["cwd"],
                     "accountId": "account", "model": "exact-alpha", "prompt": "COMPLETE",

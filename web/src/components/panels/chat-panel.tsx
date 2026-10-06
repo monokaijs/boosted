@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bot, Check, CheckCircle2, ChevronDown, ChevronRight, CircleStop, ExternalLink, FileDiff, FolderOpen, GitBranch, ListChecks, ListTodo, LoaderCircle, Play, Plus, Send, Sparkles, TerminalSquare, UserRound } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { TaskMarkdown, type SaveCheckbox } from "@/components/assistant-ui/task-markdown";
 import { AttachmentPreview } from "@/components/attachment-preview";
 import { Badge } from "@/components/ui/badge";
 import { CodexModeSelect } from "@/components/assistant-ui/codex-mode-select";
@@ -52,7 +51,7 @@ function ToolEvent({ event }: { event: TaskEvent }) {
   );
 }
 
-function TimelineEvent({ event }: { event: TaskEvent }) {
+function TimelineEvent({ event, saveCheckbox }: { event: TaskEvent; saveCheckbox?: SaveCheckbox }) {
   if (["command", "command_output", "file_change"].includes(event.kind)) return <ToolEvent event={event} />;
   if (event.kind === "status_changed" || event.kind === "system") {
     return <div className="my-3 flex items-center gap-2 text-[11px] text-muted-foreground"><span className="h-px flex-1 bg-border" /><span>{textPayload(event)}</span><span className="h-px flex-1 bg-border" /></div>;
@@ -61,7 +60,7 @@ function TimelineEvent({ event }: { event: TaskEvent }) {
     return <div className="my-3 flex items-center gap-2 text-[11px] text-muted-foreground"><span className="h-px flex-1 bg-border" /><ListChecks className="size-3.5" /><span>Plan updated</span><span className="h-px flex-1 bg-border" /></div>;
   }
   if (event.kind === "reasoning") {
-    return <details className="my-2 rounded-md border border-border/70 bg-background/20 px-3 py-2 text-xs text-muted-foreground"><summary className="cursor-pointer select-none">Reasoning summary</summary><div className="selectable-text mt-2 whitespace-pre-wrap leading-5">{textPayload(event)}</div></details>;
+    return <details className="my-2 rounded-md border border-border/70 bg-background/20 px-3 py-2 text-xs text-muted-foreground"><summary className="cursor-pointer select-none">Reasoning summary</summary><TaskMarkdown className="aui-markdown selectable-text mt-2 leading-5" content={textPayload(event)} components={workspaceFileMarkdownComponents} urlTransform={workspaceMarkdownUrlTransform} /></details>;
   }
   const user = event.kind === "user_message";
   const error = event.kind === "error";
@@ -71,8 +70,8 @@ function TimelineEvent({ event }: { event: TaskEvent }) {
       <div className={cn("min-w-0 max-w-[84%]", user && "text-right")}>
         <div className="mb-1 text-[10px] text-muted-foreground">{user ? event.actorName ?? "You" : error ? "Error" : "Codex"}</div>
         <div className={cn("selectable-text text-[13px] leading-5", user && "inline-block whitespace-pre-wrap rounded-lg bg-primary/10 px-3 py-2 text-left", error && "whitespace-pre-wrap text-destructive", !user && !error && "aui-markdown")}>
-          {!user && !error
-            ? <ReactMarkdown components={workspaceFileMarkdownComponents} remarkPlugins={[remarkGfm]} urlTransform={workspaceMarkdownUrlTransform}>{textPayload(event)}</ReactMarkdown>
+          {!error
+            ? <TaskMarkdown className="aui-markdown" content={textPayload(event)} saveCheckbox={saveCheckbox} components={workspaceFileMarkdownComponents} urlTransform={workspaceMarkdownUrlTransform} />
             : textPayload(event)}
         </div>
       </div>
@@ -253,7 +252,6 @@ export function NewChatPanel() {
             {create.error && <p className="mt-2 text-xs text-destructive">{create.error.message}</p>}
             {(branch.error || branches.error || switchBranch.error) && <p className="mt-2 text-xs text-destructive">{switchBranch.error?.message ?? branch.error?.message ?? branches.error?.message}</p>}
             {codexOptions.error && <p className="mt-2 text-xs text-destructive">{codexOptions.error.message}</p>}
-            <p className="new-chat-hint">⌘ Enter to send</p>
           </>
         ) : (
           <div className="mt-4 grid justify-items-start gap-3 text-sm text-muted-foreground"><p>Open a Git repository folder before starting a Codex chat.</p><Button onClick={() => window.dispatchEvent(new CustomEvent("boosted:open-project"))}><FolderOpen />Open project</Button></div>
@@ -296,6 +294,15 @@ export function TaskPanel() {
   const StatusIcon = meta?.icon;
   const active = task.data?.status === "planning" || task.data?.status === "running";
 
+  async function saveCheckbox(target: string, recordId: string | undefined, edit: Parameters<SaveCheckbox>[0]) {
+    try { await api.toggleMarkdownCheckbox(`/tasks/${encodeURIComponent(selectedTaskId!)}`, target, recordId, edit); }
+    finally {
+      void queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      void queryClient.invalidateQueries({ queryKey: ["events", selectedTaskId] });
+      void queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    }
+  }
+
   function sendMessage() {
     if (message.trim() && !send.isPending) send.mutate();
   }
@@ -306,7 +313,7 @@ export function TaskPanel() {
   }
 
   return (
-    <WorkspaceFileProvider scope={{ kind: "task", id: selectedTaskId }}>
+    <WorkspaceFileProvider scope={{ kind: "task", id: selectedTaskId }} readOnly={active}>
       <div className="panel-root">
       {task.data && (
         <section className="border-b border-border bg-background/20 px-4 py-3">
@@ -327,7 +334,7 @@ export function TaskPanel() {
       )}
       <ScrollArea className="chat-scroll min-h-0 flex-1 px-4">
         <div className="mx-auto max-w-3xl py-3">
-          {task.data && <section className="mb-4 rounded-lg border border-border bg-background/25 p-4"><div className="aui-markdown text-xs"><ReactMarkdown components={workspaceFileMarkdownComponents} remarkPlugins={[remarkGfm]} urlTransform={workspaceMarkdownUrlTransform}>{task.data.description}</ReactMarkdown></div>{task.data.source && <a className="mt-3 inline-flex items-center gap-1.5 text-[11px] capitalize text-primary hover:underline" href={task.data.source.externalUrl} target="_blank" rel="noreferrer">Imported from {task.data.source.provider} · {task.data.source.externalId}<ExternalLink className="size-3" /></a>}{task.data.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{task.data.attachments.map((attachment) => <AttachmentPreview key={attachment.id} name={attachment.name} mimeType={attachment.mimeType} sourceKey={`${task.data!.id}:${attachment.id}`} load={() => api.taskAttachment(task.data!.id, attachment.id)} />)}</div>}</section>}
+          {task.data && <section className="mb-4 rounded-lg border border-border bg-background/25 p-4"><div className="aui-markdown text-xs"><TaskMarkdown key={`${selectedTaskId}:description`} content={task.data.description} saveCheckbox={active ? undefined : (edit) => saveCheckbox("description", undefined, edit)} components={workspaceFileMarkdownComponents} urlTransform={workspaceMarkdownUrlTransform} /></div>{task.data.source && <a className="mt-3 inline-flex items-center gap-1.5 text-[11px] capitalize text-primary hover:underline" href={task.data.source.externalUrl} target="_blank" rel="noreferrer">Imported from {task.data.source.provider} · {task.data.source.externalId}<ExternalLink className="size-3" /></a>}{task.data.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{task.data.attachments.map((attachment) => <AttachmentPreview key={attachment.id} name={attachment.name} mimeType={attachment.mimeType} sourceKey={`${task.data!.id}:${attachment.id}`} load={() => api.taskAttachment(task.data!.id, attachment.id)} />)}</div>}</section>}
           {task.data?.status === "queued" && <div className="mb-4 grid gap-2 rounded-lg border border-border bg-background/25 p-4"><div className="flex items-center gap-2 text-xs font-medium"><Sparkles className="size-4 text-primary" />Ready to plan</div><p className="text-xs leading-5 text-muted-foreground">Start planning to let Codex inspect the repository and turn this task into concrete steps. You can answer any follow-up questions here.</p></div>}
           {task.data?.plan && <section className="mb-4 rounded-lg border border-border bg-background/25 p-3" aria-label="Task plan">
             <div className="mb-2 flex items-center gap-2">
@@ -335,7 +342,7 @@ export function TaskPanel() {
               {task.data.status === "ready" && <Button className="ml-auto" size="sm" onClick={() => approve.mutate()} disabled={approve.isPending}>{approve.isPending ? <LoaderCircle className="animate-spin" /> : <Play />}Approve and run</Button>}
             </div>
             {task.data.plan.explanation && <p className="selectable-text mb-2 text-xs leading-5 text-muted-foreground">{task.data.plan.explanation}</p>}
-            {task.data.plan.markdown && <div className="aui-markdown selectable-text mb-3 text-xs"><ReactMarkdown components={workspaceFileMarkdownComponents} remarkPlugins={[remarkGfm]} urlTransform={workspaceMarkdownUrlTransform}>{task.data.plan.markdown}</ReactMarkdown></div>}
+            {task.data.plan.markdown && <div className="aui-markdown selectable-text mb-3 text-xs"><TaskMarkdown key={`${selectedTaskId}:plan:${task.data.plan.revision}`} content={task.data.plan.markdown} saveCheckbox={active ? undefined : (edit) => saveCheckbox("plan", String(task.data!.plan!.revision), edit)} components={workspaceFileMarkdownComponents} urlTransform={workspaceMarkdownUrlTransform} /></div>}
             <ol className="grid gap-1.5">{task.data.plan.steps.map((step, index) => <li key={`${step.step}-${index}`} className="flex gap-2 text-xs leading-5" aria-current={step.status === "in_progress" ? "step" : undefined}>
               <span className={cn("mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border text-[9px]", step.status === "completed" ? "border-success/30 bg-success/10 text-success" : step.status === "in_progress" ? "border-primary/40 bg-primary/10 text-primary" : "border-border text-muted-foreground")}>{step.status === "completed" ? <Check className="size-2.5" /> : index + 1}</span>
               <span className={cn("selectable-text", step.status === "completed" && "text-muted-foreground line-through")}>{step.step}</span>
@@ -345,7 +352,7 @@ export function TaskPanel() {
           </section>}
           <div className="mb-1 flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground"><span>Task chat</span><span className="h-px flex-1 bg-border" /></div>
           {ordered.length === 0 && events.isLoading && <div className="py-16 text-center text-xs text-muted-foreground">Loading conversation…</div>}
-          {ordered.map((event) => <TimelineEvent key={event.id} event={event} />)}
+          {ordered.map((event) => <TimelineEvent key={event.id} event={event} saveCheckbox={!active && ["user_message", "agent_message", "assistant_message"].includes(event.kind) ? (edit) => saveCheckbox("event", String(event.id), edit) : undefined} />)}
           {active && <div className="flex items-center gap-2 py-3 text-xs text-muted-foreground"><LoaderCircle className="size-3.5 animate-spin text-primary" />Codex is working…</div>}
           {task.data?.status === "review" && <div className="my-4 flex items-center gap-2 rounded-lg border border-success/25 bg-success/10 p-3 text-xs text-success"><CheckCircle2 className="size-4" />Execution finished. Review the Git changes before marking the task done.</div>}
         </div>

@@ -22,6 +22,7 @@ import type {
   TaskStatus,
   TaskAttachment,
   Integration,
+  GitlabConnection,
   IntegrationDiscoveryResult,
   IntegrationSyncResult,
   WorkspaceCodexSettings,
@@ -180,6 +181,7 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   },
   browseFolders: (path?: string) => request<FolderBrowseResponse>(`/folders${path ? `?path=${encodeURIComponent(path)}` : ""}`),
   projects: () => request<Project[]>("/projects"),
+  updateProjectIcon: (projectId: string, icon: string | null) => request<Project>(`/projects/${encodeURIComponent(projectId)}/icon`, json("PUT", { icon })),
   openProject: (repoPath: string) => {
     const normalized = repoPath.trim().replace(/[\\/]+$/, "");
     const name = normalized.split(/[\\/]/).pop() || "Project";
@@ -196,7 +198,7 @@ export function createBoostedApiClient(options: ApiClientOptions) {
     return request<TaskAttachment>("/task-attachments", { method: "POST", body: form });
   },
   removePendingTaskAttachment: (id: string) => request<void>(`/task-attachments/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  tasks: (projectId?: string) => request<Task[]>(`/tasks${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`),
+  tasks: (projectId: string) => request<Task[]>(`/tasks?projectId=${encodeURIComponent(projectId)}`),
   task: (id: string) => request<Task>(`/tasks/${id}`),
   createTask: (projectId: string, title: string, description: string, options: { baseBranch?: string; model?: string; reasoningEffort?: string; accessMode?: CodexAccessOption["id"]; attachmentIds?: string[] } = {}) => request<Task>("/tasks", json("POST", { projectId, title, description, ...options })),
   taskAttachment: (taskId: string, id: string) => requestBlob(`/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(id)}`),
@@ -204,6 +206,10 @@ export function createBoostedApiClient(options: ApiClientOptions) {
     const file = await requestBlob(`/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(attachment.id)}`);
     saveBlob(file.blob, file.name ?? attachment.name);
   },
+  gitlabConnections: () => request<GitlabConnection[]>("/gitlab-connections"),
+  createGitlabConnection: (input: Omit<GitlabConnection, "id">) => request<GitlabConnection>("/gitlab-connections", json("POST", input)),
+  updateGitlabConnection: (id: string, input: Omit<GitlabConnection, "id">) => request<GitlabConnection>(`/gitlab-connections/${id}`, json("PUT", input)),
+  deleteGitlabConnection: (id: string) => request<void>(`/gitlab-connections/${id}`, { method: "DELETE" }),
   integrations: (projectId: string) => request<Integration[]>(`/projects/${projectId}/integrations`),
   discoverIntegrationTargets: (projectId: string, input: { provider: Integration["provider"]; config: Record<string, unknown> }, signal?: AbortSignal) => request<IntegrationDiscoveryResult>(`/projects/${projectId}/integrations/discover`, { ...json("POST", input), signal }),
   createIntegration: (projectId: string, input: { provider: Integration["provider"]; name: string; config: Record<string, unknown>; enabled: boolean; syncIntervalMinutes?: number }) => request<Integration>(`/projects/${projectId}/integrations`, json("POST", input)),
@@ -213,6 +219,7 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   workspaceCodexSettings: (projectId: string) => request<WorkspaceCodexSettings>(`/projects/${projectId}/codex-settings`),
   updateWorkspaceCodexSettings: (projectId: string, instructions: string) => request<{ instructions: string }>(`/projects/${projectId}/codex-settings`, json("PUT", { instructions })),
   upsertWorkspaceMcp: (projectId: string, name: string, config: Record<string, unknown>) => request<Record<string, unknown>>(`/projects/${projectId}/codex-settings/mcps`, json("POST", { name, config })),
+  toggleMarkdownCheckbox: <T = unknown>(path: string, target: string, recordId: string | undefined, edit: { expected: string; offset: number; checked: boolean }) => request<T>(`${path}/checkboxes`, json("PATCH", { ...edit, target, recordId })),
   taskEvents: (id: string, after = 0) => request<TaskEvent[]>(`/tasks/${id}/events?after=${after}`),
   startTaskPlan: (id: string) => request<Task>(`/tasks/${id}/plan`, json("POST")),
   sendMessage: (id: string, message: string) => request<Task>(`/tasks/${id}/messages`, json("POST", { message })),
@@ -222,12 +229,12 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   files: (taskId: string, path = "") => request<FileEntry[]>(`/tasks/${taskId}/files?path=${encodeURIComponent(path)}`),
   readFile: (taskId: string, path: string) => request<FileContent>(`/tasks/${taskId}/file?path=${encodeURIComponent(path)}`),
   writeFile: (taskId: string, path: string, content: string, revision: string) => request<FileContent>(`/tasks/${taskId}/file`, json("PUT", { path, content, revision })),
-  gitStatus: (taskId: string) => request<GitStatus>(`/tasks/${taskId}/git/status`),
-  gitDiff: (taskId: string, path?: string, staged = false) => request<{ diff: string }>(`/tasks/${taskId}/git/diff?staged=${staged}${path ? `&path=${encodeURIComponent(path)}` : ""}`),
-  gitStage: (taskId: string, paths: string[]) => request<GitStatus>(`/tasks/${taskId}/git/stage`, json("POST", { paths })),
-  gitUnstage: (taskId: string, paths: string[]) => request<GitStatus>(`/tasks/${taskId}/git/unstage`, json("POST", { paths })),
-  gitDiscard: (taskId: string, paths: string[]) => request<GitStatus>(`/tasks/${taskId}/git/discard`, json("POST", { paths })),
-  gitCommit: (taskId: string, message: string) => request<{ commit: string }>(`/tasks/${taskId}/git/commit`, json("POST", { message })),
+  gitStatus: (projectId: string) => request<GitStatus>(`/projects/${projectId}/git/status`),
+  gitDiff: (projectId: string, path?: string, staged = false) => request<{ diff: string }>(`/projects/${projectId}/git/diff?staged=${staged}${path ? `&path=${encodeURIComponent(path)}` : ""}`),
+  gitStage: (projectId: string, paths: string[]) => request<GitStatus>(`/projects/${projectId}/git/stage`, json("POST", { paths })),
+  gitUnstage: (projectId: string, paths: string[]) => request<GitStatus>(`/projects/${projectId}/git/unstage`, json("POST", { paths })),
+  gitDiscard: (projectId: string, paths: string[]) => request<GitStatus>(`/projects/${projectId}/git/discard`, json("POST", { paths })),
+  gitCommit: (projectId: string, message: string) => request<{ commit: string }>(`/projects/${projectId}/git/commit`, json("POST", { message })),
   };
 
   function webSocket(path: string) {

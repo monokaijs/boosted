@@ -20,12 +20,14 @@ const labels: Record<string, string> = {
   stop_chat: "Stop chat", stop_run: "Stop coding run", set_chat_access: "Change chat access", clear_chat: "Clear conversation", delete_chat: "Delete conversation", move_chat: "Move chat to another account", set_failover: "Update quota recovery",
   fork_chat: "Fork conversation", rename_chat: "Rename chat",
 }
-export function ActionGroup({ actions, shell, showAll = false }: { actions: AssistantAction[]; shell?: SessionShellState; showAll?: boolean }) {
+type OpenChat = (chatId: string) => void
+
+export function ActionGroup({ actions, shell, showAll = false, onOpenChat }: { actions: AssistantAction[]; shell?: SessionShellState; showAll?: boolean; onOpenChat?: OpenChat }) {
   const listed = showAll ? actions : actions.filter(isChatActionVisible)
-  return listed.length ? <ActionGroupContent actions={listed} shell={shell} /> : null
+  return listed.length ? <ActionGroupContent actions={listed} shell={shell} onOpenChat={onOpenChat} /> : null
 }
 
-function ActionGroupContent({ actions, shell }: { actions: AssistantAction[]; shell?: SessionShellState }) {
+function ActionGroupContent({ actions, shell, onOpenChat }: { actions: AssistantAction[]; shell?: SessionShellState; onOpenChat?: OpenChat }) {
   const [expanded, setExpanded] = useState(false)
   const [revealed, setRevealed] = useState(false)
   const panelId = useId()
@@ -40,7 +42,7 @@ function ActionGroupContent({ actions, shell }: { actions: AssistantAction[]; sh
       <div className="assistant-tool-reveal" data-expanded={expanded} id={panelId} aria-hidden={!expanded} inert={!expanded}>
         <div className="min-h-0 overflow-hidden">
           <div className="flex min-w-0 flex-col items-start gap-1 pt-1.5">
-            {revealed ? actions.map((action) => <ActionReceipt action={action} key={action.id} shell={shell} />) : null}
+            {revealed ? actions.map((action) => <ActionReceipt action={action} key={action.id} shell={shell} onOpenChat={onOpenChat} />) : null}
           </div>
         </div>
       </div>
@@ -48,7 +50,7 @@ function ActionGroupContent({ actions, shell }: { actions: AssistantAction[]; sh
   )
 }
 
-function ActionReceipt({ action, shell }: { action: AssistantAction; shell?: SessionShellState }) {
+function ActionReceipt({ action, shell, onOpenChat }: { action: AssistantAction; shell?: SessionShellState; onOpenChat?: OpenChat }) {
   const [open, setOpen] = useState(false)
   const chat = shell?.chats.find((item) => item.id === action.chatId)
   const directory = action.workingDirectory ?? chat?.workingDirectory
@@ -62,7 +64,7 @@ function ActionReceipt({ action, shell }: { action: AssistantAction; shell?: Ses
         <ChevronRight aria-hidden="true" className="size-3 shrink-0 text-muted-foreground transition-transform duration-200 group-open:rotate-90 motion-reduce:transition-none" />
       </summary>
       {open ? <div className="mt-1 rounded-2xl border border-border bg-card px-3 py-3">
-        {linkedChat ? <button type="button" className="mb-3 inline-block text-xs text-info underline underline-offset-4" onClick={() => shell ? void shell.openSidebarChat(linkedChat) : window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", { detail: { threadId: linkedChat.id } }))}>Open chat{workspace ? ` · ${workspace.name}` : ""}</button> : null}
+        {linkedChat ? <button type="button" className="mb-3 inline-block text-xs text-info underline underline-offset-4" onClick={() => onOpenChat ? onOpenChat(linkedChat.id) : shell ? void shell.openSidebarChat(linkedChat) : window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", { detail: { threadId: linkedChat.id } }))}>Open chat{workspace ? ` · ${workspace.name}` : ""}</button> : null}
         <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-[11px] leading-5 text-muted-foreground">{action.result ? prettyResult(action.result) : prettyResult(JSON.stringify(action.arguments))}</pre>
       </div> : null}
     </details>

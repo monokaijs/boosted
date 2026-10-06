@@ -5,6 +5,7 @@ import { enqueueWorkspaceOperation, waitForWorkspaceOperations, useWorkspaceStat
 import { LoaderCircle, MessageSquarePlus, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react"
 import type { AssistantAttachment, AssistantState } from "@/features/agents/types/assistant"
 import { apiClient } from "@/features/agents/lib/api-client"
+import { api } from "@/lib/api"
 import { MarkdownContent } from "@/features/agents/components/session/chat-markdown"
 import type { SessionShellState } from "@/features/agents/components/session/session-shell"
 import { cn } from "@/lib/utils"
@@ -187,7 +188,10 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
                 {item.type === "tools" ? <ActionGroup actions={item.actions} shell={shell} /> : <article aria-label={message.role === "user" ? "Your message" : `${message.assistantName ?? assistantName} reply`} className="group/message min-w-0 rounded-xl focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" tabIndex={showSentTime ? 0 : undefined}>
                   {message.attachments?.length ? <div className={cn("mb-2 flex max-w-[88%]", message.role === "user" && "ml-auto justify-end")}><AssistantAttachmentList attachments={message.attachments} /></div> : null}
                   {message.content ? <div className={cn("assistant-message-bubble w-fit min-w-0 max-w-[88%] rounded-[22px] px-4 py-2.5", message.role === "user" ? "assistant-message-user ml-auto text-white" : "assistant-message-reply text-foreground")}>
-                    <MarkdownContent content={message.content} />
+                    <MarkdownContent content={message.content} saveCheckbox={!running && !message.localDelivery ? async (edit) => {
+                      try { acceptState(await api.toggleMarkdownCheckbox<AssistantState>(`/agents/${encodeURIComponent(agentId)}`, "message", message.id, edit)) }
+                      finally { void queryClient.invalidateQueries({ queryKey: ["assistant-state", agentId] }) }
+                    } : undefined} />
                   </div> : null}
                   {message.actions?.length ? <div className={cn(message.content && "mt-2")}><ActionGroup actions={message.actions} shell={shell} /></div> : null}
                   {message.delivery === "cancelled" ? <p className="mt-1 pr-4 text-right text-[11px] text-muted-foreground">Cancelled</p> : null}
@@ -211,6 +215,7 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
           {error || state?.error ? <p className="mb-3 rounded-xl border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive" role="alert">{error ?? state?.error}</p> : null}
           {state && !accounts.length ? <div className="mb-3 flex items-center justify-between gap-3 text-xs text-muted-foreground"><span>Connect a Codex account to get started.</span><button className="text-foreground underline underline-offset-4" type="button" onClick={() => shell.selectManagementView("providers")}>Open Providers</button></div> : null}
           {state?.activeGroupId ? <button className="mb-2 text-xs text-muted-foreground underline" type="button" onClick={() => window.dispatchEvent(new CustomEvent("boosted:open-group", { detail: state.activeGroupId }))}>Working in a group. Open group</button> : null}
+          {state?.activeExternalSession ? <p className="mb-2 text-xs text-muted-foreground">Working in {state.activeExternalSession.provider === "slack" ? "Slack" : "Telegram"} · {state.activeExternalSession.chatName}</p> : null}
           <AssistantComposer
             key={agentId} ref={composerRef} agentId={agentId} assistantName={assistantName}
             canSend={Boolean(state && accounts.length)} stopping={stopping}

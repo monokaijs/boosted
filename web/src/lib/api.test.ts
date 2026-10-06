@@ -39,6 +39,26 @@ describe("Boosted API client", () => {
     ]);
   });
 
+  it("routes all Changes panel operations to the project repository", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = client();
+    await api.gitStatus("alpha");
+    await api.gitDiff("alpha", "src/file name.ts", true);
+    await api.gitStage("alpha", ["file.txt"]);
+    await api.gitUnstage("alpha", ["file.txt"]);
+    await api.gitDiscard("alpha", ["file.txt"]);
+    await api.gitCommit("alpha", "fix: update file");
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.method ?? "GET", init?.body])).toEqual([
+      ["http://machine.lan:4782/api/v1/projects/alpha/git/status", "GET", undefined],
+      ["http://machine.lan:4782/api/v1/projects/alpha/git/diff?staged=true&path=src%2Ffile%20name.ts", "GET", undefined],
+      ["http://machine.lan:4782/api/v1/projects/alpha/git/stage", "POST", JSON.stringify({ paths: ["file.txt"] })],
+      ["http://machine.lan:4782/api/v1/projects/alpha/git/unstage", "POST", JSON.stringify({ paths: ["file.txt"] })],
+      ["http://machine.lan:4782/api/v1/projects/alpha/git/discard", "POST", JSON.stringify({ paths: ["file.txt"] })],
+      ["http://machine.lan:4782/api/v1/projects/alpha/git/commit", "POST", JSON.stringify({ message: "fix: update file" })],
+    ]);
+  });
+
   it("classifies timeouts and network failures", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new DOMException("aborted", "AbortError"); }));
     await expect(client().health()).rejects.toMatchObject({ status: 408, message: "Connection timed out." });
@@ -97,14 +117,14 @@ describe("Boosted API client", () => {
     }
   });
 
-  it("posts draft integration credentials to the workspace discovery endpoint", async () => {
+  it("posts a saved connection and search query to the workspace discovery endpoint", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ targets: [] }), { status: 200, headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
     const api = client("https://boosted.example", { token: "machine-token" });
 
     await api.discoverIntegrationTargets("workspace-a", {
       provider: "gitlab",
-      config: { baseUrl: "https://gitlab.example", token: "gitlab-token" },
+      config: { connectionId: "connection-a", search: "Boosted" },
     });
 
     const [url, init] = fetchMock.mock.calls[0];
@@ -112,7 +132,7 @@ describe("Boosted API client", () => {
     expect(init?.method).toBe("POST");
     expect(JSON.parse(String(init?.body))).toEqual({
       provider: "gitlab",
-      config: { baseUrl: "https://gitlab.example", token: "gitlab-token" },
+      config: { connectionId: "connection-a", search: "Boosted" },
     });
   });
 
