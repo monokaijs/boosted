@@ -672,6 +672,15 @@ pub(crate) async fn send_message(
     AxumPath(id): AxumPath<String>,
     Json(input): Json<Value>,
 ) -> AppResult<Json<Value>> {
+    enqueue_message(&state, &id, input, None).await.map(Json)
+}
+
+pub(crate) async fn enqueue_message(
+    state: &AppState,
+    id: &str,
+    input: Value,
+    task_context: Option<Value>,
+) -> AppResult<Value> {
     let content = text(&input, "content", 32_000)?;
     validate_attachments(input.get("attachments"))?;
     if let Some(account_id) = input["accountId"].as_str() {
@@ -690,17 +699,18 @@ pub(crate) async fn send_message(
     let updated = change(&state,&id,|agent| {
         if agent["messages"].as_array().unwrap().iter().any(|m|m["id"] == message_id) { return Ok(()); }
         let mut message = json!({"id":message_id,"role":"user","content":content,"createdAt":Utc::now().to_rfc3339(),"delivery":"queued"});
+        if let Some(context) = &task_context { message["taskContext"] = context.clone(); }
         if let Some(attachments) = input.get("attachments") {message["attachments"] = attachments.clone();}
         if let Some(account) = input.get("accountId") {message["requestedAccountId"] = account.clone();}
         if let Some(zone) = input["timeZone"].as_str().filter(|s| s.len() <= 100) {agent["timeZone"] = json!(zone);}
         agent["messages"].as_array_mut().unwrap().push(message); agent["error"] = Value::Null; Ok(())
     }).await?;
-    start_worker(state.clone(), id.clone()).await?;
-    Ok(Json(if updated["status"] == "running" {
+    start_worker(state.clone(), id.to_owned()).await?;
+    Ok(if updated["status"] == "running" {
         updated
     } else {
         state.agents.get(&id).await?
-    }))
+    })
 }
 pub(crate) async fn stop_agent(
     State(state): State<AppState>,
@@ -864,6 +874,25 @@ async fn start_worker(state: AppState, id: String) -> AppResult<()> {
     drop(workers);
     tokio::spawn(async move {
         let result = run_queue(&state, &id, receiver).await;
+        if let Err(error) = &result {
+            if let Ok(agent) = state.agents.get(&id).await {
+                let messages: Vec<_> = agent["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|message| message["delivery"] == "processing")
+                    .cloned()
+                    .collect();
+                let _ = task_comments::reply(
+                    &state,
+                    &id,
+                    &messages,
+                    &format!("Agent could not complete this request: {error}"),
+                    None,
+                )
+                .await;
+            }
+        }
         let _ = change(&state, &id, |a| {
             a["status"] = json!("idle");
             a["activity"] = Value::Null;
@@ -895,23 +924,51 @@ async fn start_worker(state: AppState, id: String) -> AppResult<()> {
     });
     Ok(())
 }
+fn claim_next_requests(agent: &mut Value) {
+    let messages = agent["messages"].as_array_mut().unwrap();
+    let scope = messages
+        .iter()
+        .find(|message| message["delivery"] == "processing")
+        .or_else(|| {
+            messages
+                .iter()
+                .find(|message| message["delivery"] == "queued")
+        })
+        .map(|message| message["taskContext"]["taskId"].clone());
+    if let Some(scope) = scope {
+        for message in messages.iter_mut() {
+            if message["delivery"] == "queued" && message["taskContext"]["taskId"] == scope {
+                message["delivery"] = json!("processing");
+                message["readAt"] = json!(Utc::now().to_rfc3339());
+            }
+        }
+    }
+    // Keep background outcomes separate from new comments so replies retain their origin.
+    let user_work = messages
+        .iter()
+        .any(|message| message["delivery"] == "processing");
+    let followups = agent["followUps"].as_array_mut().unwrap();
+    if !user_work
+        && !followups
+            .iter()
+            .any(|followup| followup["status"] == "processing")
+    {
+        if let Some(followup) = followups
+            .iter_mut()
+            .find(|followup| followup["status"] == "ready")
+        {
+            followup["status"] = json!("processing");
+        }
+    }
+}
+
 async fn run_queue(state: &AppState, id: &str, mut cancel: watch::Receiver<bool>) -> AppResult<()> {
     loop {
         if *cancel.borrow() {
             return Ok(());
         }
         let snapshot = change(state, id, |a| {
-            for message in a["messages"].as_array_mut().unwrap() {
-                if message["delivery"] == "queued" {
-                    message["delivery"] = json!("processing");
-                    message["readAt"] = json!(Utc::now().to_rfc3339());
-                }
-            }
-            for f in a["followUps"].as_array_mut().unwrap() {
-                if f["status"] == "ready" {
-                    f["status"] = json!("processing");
-                }
-            }
+            claim_next_requests(a);
             if a["messages"]
                 .as_array()
                 .unwrap()
@@ -1121,7 +1178,7 @@ async fn run_turn_with_client(
                 .unwrap_or_default(),
         )
     } else {
-        "Manage project implementation through watched Boosted coding chats, and requested taskboard planning through the task planning tools. A planning-only request ends at reviewed plans; it does not authorize implementation. Native tools are only for read-only inspection and independent review; do not execute the project task yourself. Resolve project paths, dispatch concrete instructions, inspect results, and continue the same session until the requested outcome is verified or user input is required.".to_owned()
+        "Manage project work through watched Boosted chats. For taskContext messages, resolve the project and task from that context. When multiple agents are mentioned, act on the instructions addressed to you. Answer ordinary questions directly. For requests to plan or implement, create or reuse a watched chat in default collaboration mode. Express planning-only scope in its prompt and stop at the requested plan. For an implementation request, begin immediately. Keep the chat conversational so a later explicit implementation request can proceed in the same chat. Use taskContext.workingDirectory (the task worktree) for its chat, preserving the task branch and options. Include the task description, attachments, source reference and relevant conversation as evidence in the prompt. Reuse a relevant existing chat for subsequent feedback. Task comments require no separate plan approval ceremony. A planning-only request ends at reviewed plans; it does not authorize implementation. Native tools are only for read-only inspection and independent review; do not execute the project task yourself. Resolve project paths, dispatch concrete instructions, inspect results, and continue the same session until the requested outcome is verified or user input is required.".to_owned()
     };
     let agent_identity = json!({"agentId":id,"name":snapshot["profile"]["name"]});
     let thread = client.request("thread/start", json!({
@@ -1182,7 +1239,7 @@ async fn run_turn_with_client(
                     .is_some_and(|ids| ids.contains(&message["id"]))
             })
         })
-        .map(|message| json!({"id":message["id"],"content":message["content"]}))
+        .map(|message| json!({"id":message["id"],"content":message["content"],"taskContext":message["taskContext"]}))
         .collect();
     let prompt = json!({
         "agentRuntime":{"model":AgentModel::Normal.model(),"reasoningEffort":AgentModel::Normal.effort()},
@@ -1192,7 +1249,7 @@ async fn run_turn_with_client(
         "conversationHistory":history,"contextCompaction":background_compaction,
         "currentUserMessages":current.iter()
             .filter(|message| group_context.is_none() || message["senderType"] == "user")
-            .map(|message|json!({"id":message["id"],"content":message["content"],"senderId":message["senderId"],"senderName":message["senderName"]})).collect::<Vec<_>>(),
+            .map(|message|json!({"id":message["id"],"content":message["content"],"senderId":message["senderId"],"senderName":message["senderName"],"taskContext":message["taskContext"]})).collect::<Vec<_>>(),
         "currentGroupMessages":current.iter()
             .filter(|message| group_context.is_some() && message["senderType"].is_string())
             .map(|message|json!({"id":message["id"],"content":message["content"],
@@ -1605,6 +1662,7 @@ async fn send_agent_reply(
         agent["activity"]=Value::Null;Ok(())
     }).await?;
     state.emit("assistant.message",json!({"agentId":id,"messageId":message_id,"assistantName":agent["profile"]["name"],"content":content,"proactive":current.is_empty()}));
+    task_comments::reply(state, id, current, content, None).await?;
     Ok(json!({"messageId":message_id}))
 }
 async fn execute_tool(
@@ -1701,6 +1759,30 @@ async fn execute_tool(
                 Ok(())
             })
             .await?;
+        }
+    }
+    if matches!(name, "create_chat" | "send_message") {
+        match &result {
+            Ok(value) => {
+                if let Some(chat_id) = value["chatId"].as_str() {
+                    let text = if value["status"] == "IDLE" {
+                        "Opened a new chat"
+                    } else {
+                        "Started working in a chat"
+                    };
+                    task_comments::reply(state, id, current, text, Some(chat_id)).await?;
+                }
+            }
+            Err(error) => {
+                task_comments::reply(
+                    state,
+                    id,
+                    current,
+                    &format!("Could not start the chat: {error}"),
+                    None,
+                )
+                .await?;
+            }
         }
     }
     result
@@ -1965,15 +2047,26 @@ pub(crate) async fn tool_action(
                 }
                 None
             };
-            if !state
-                .db
-                .projects()
-                .await?
+            let task = if let Some(task_id) = current
                 .iter()
-                .any(|p| p.repo_path == directory)
+                .filter(|message| message["taskContext"]["workingDirectory"] == directory)
+                .find_map(|message| message["taskContext"]["taskId"].as_str())
+            {
+                let task = state.db.task(task_id).await?;
+                (task.worktree_path == directory).then_some(task)
+            } else {
+                None
+            };
+            if task.is_none()
+                && !state
+                    .db
+                    .projects()
+                    .await?
+                    .iter()
+                    .any(|project| project.repo_path == directory)
             {
                 return Err(AppError::BadRequest(
-                    "Open this project in Boosted before creating its chat".into(),
+                    "Use an open project or the originating task's worktree for this chat".into(),
                 ));
             }
             if !Path::new(&directory).is_dir() {
@@ -1989,14 +2082,35 @@ pub(crate) async fn tool_action(
             let account = document(&state.db, "accounts", &account_id).await?;
             let client = state.providers.client(&state.db, &account_id).await?;
             let mut defaults = providers::account_runtime_defaults(&state.db, &account).await?;
-            if args.get("model").is_some() {
+            let mut model_settings = args.clone();
+            if let Some(task) = &task {
+                if model_settings.get("model").is_none() {
+                    if let Some(model) = &task.model {
+                        model_settings["model"] = json!(model);
+                    }
+                    if let Some(effort) = &task.reasoning_effort {
+                        model_settings["reasoningEffort"] = json!(effort);
+                    }
+                }
+            }
+            if model_settings.get("model").is_some() {
                 defaults.as_object_mut().unwrap().remove("reasoningEffort");
             }
-            apply_model_settings(&client, &mut defaults, args).await?;
-            defaults["accessMode"] = json!("fullAccess");
-            defaults["permissionMode"] = json!("fullAccess");
+            apply_model_settings(&client, &mut defaults, &model_settings).await?;
+            defaults["collaborationMode"] = json!("default");
+            let access_mode = task
+                .as_ref()
+                .map(|task| task.access_mode.as_str())
+                .unwrap_or("fullAccess");
+            defaults["accessMode"] = json!(access_mode);
+            defaults["permissionMode"] = json!(access_mode);
             defaults["approvalPolicy"] = json!("never");
-            let response=client.request("thread/start",json!({"cwd":directory,"model":defaults["model"],"allowProviderModelFallback":false,"approvalPolicy":"never","sandbox":"danger-full-access","serviceTier":defaults["serviceTier"],"serviceName":"boosted","config":{"personality":account["settings"]["personality"].as_str().unwrap_or("pragmatic")}})).await?;
+            let sandbox = match access_mode {
+                "readOnly" => "read-only",
+                "workspaceWrite" => "workspace-write",
+                _ => "danger-full-access",
+            };
+            let response=client.request("thread/start",json!({"cwd":directory,"model":defaults["model"],"allowProviderModelFallback":false,"approvalPolicy":"never","sandbox":sandbox,"serviceTier":defaults["serviceTier"],"serviceName":"boosted","config":{"personality":account["settings"]["personality"].as_str().unwrap_or("pragmatic")}})).await?;
             let chat_id = response
                 .pointer("/thread/id")
                 .and_then(Value::as_str)
@@ -2004,6 +2118,7 @@ pub(crate) async fn tool_action(
                 .to_owned();
             let mut chat = json!({"id":chat_id,"title":title,"accountId":account_id,"workingDirectory":directory,"autoRotateAccount":args["autoRotateAccount"].as_bool().unwrap_or(true),"runtimeDefaults":defaults,"createdAt":Utc::now().to_rfc3339()});
             groups::attach_chat(state, &mut chat).await?;
+            task_comments::attach_chat(current, &mut chat);
             save_document(&state.db, "provider-chats", &chat).await?;
             state
                 .started_codex_threads
@@ -3243,6 +3358,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn task_comments_and_background_replies_keep_separate_queue_contexts() {
+        let mut agent = json!({"messages":[
+            {"id":"a","delivery":"queued","taskContext":{"taskId":"task-a"}},
+            {"id":"b","delivery":"queued","taskContext":{"taskId":"task-b"}},
+            {"id":"direct","delivery":"queued"}
+        ],"followUps":[{"id":"watch-a","status":"ready"},{"id":"watch-b","status":"ready"}]});
+        claim_next_requests(&mut agent);
+        assert_eq!(agent["messages"][0]["delivery"], "processing");
+        assert_eq!(agent["messages"][1]["delivery"], "queued");
+        assert_eq!(agent["followUps"][0]["status"], "ready");
+        agent["messages"][0]["delivery"] = json!("handled");
+        claim_next_requests(&mut agent);
+        assert_eq!(agent["messages"][1]["delivery"], "processing");
+        assert_eq!(agent["messages"][2]["delivery"], "queued");
+        agent["messages"][1]["delivery"] = json!("handled");
+        claim_next_requests(&mut agent);
+        agent["messages"][2]["delivery"] = json!("handled");
+        claim_next_requests(&mut agent);
+        assert_eq!(agent["followUps"][0]["status"], "processing");
+        assert_eq!(agent["followUps"][1]["status"], "ready");
+    }
+
+    #[test]
     fn background_history_compacts_before_the_transport_limit() {
         let messages: Vec<_> = (0..100)
             .map(|index| {
@@ -3368,6 +3506,232 @@ mod tests {
             .insert("pock".into(), sender);
         (root, state, home)
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn task_comments_route_to_agents_and_link_conversational_chats() {
+        let (root, state, _home) = coding_fixture().await;
+        let worktree = tempfile::tempdir().unwrap();
+        planning_task(
+            &state,
+            worktree.path(),
+            "mentioned-task",
+            "Build a project panel",
+        )
+        .await;
+        sqlx::query("UPDATE task_options SET model='exact-beta',reasoning_effort='low',access_mode='readOnly' WHERE task_id='mentioned-task'").execute(&state.db.pool).await.unwrap();
+        let user = AuthUser {
+            id: "admin".into(),
+            username: "Admin".into(),
+            role: "admin".into(),
+        };
+        task_comments::post(&state, &user, "mentioned-task", "An ordinary comment")
+            .await
+            .unwrap();
+        assert!(
+            state.agents.get("pock").await.unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            state.db.task("mentioned-task").await.unwrap().status,
+            "queued"
+        );
+
+        let agent = state.agents.get("pock").await.unwrap();
+        let name = agent["profile"]["name"].as_str().unwrap();
+        task_comments::post(
+            &state,
+            &user,
+            "mentioned-task",
+            &format!("@{name} please plan this task"),
+        )
+        .await
+        .unwrap();
+        let agent = state.agents.get("pock").await.unwrap();
+        let source = agent["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(source["delivery"], "queued");
+        assert_eq!(
+            source["taskContext"]["description"],
+            "Build a project panel"
+        );
+        assert_eq!(
+            source["taskContext"]["workingDirectory"],
+            worktree.path().to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            source["taskContext"]["conversation"][0]["payload"]["text"],
+            "An ordinary comment"
+        );
+        assert_eq!(
+            state.db.task("mentioned-task").await.unwrap().status,
+            "queued"
+        );
+
+        send_agent_reply(
+            &state,
+            "pock",
+            "A panel keeps the project context visible.",
+            &[source.clone()],
+        )
+        .await
+        .unwrap();
+        let answer = state
+            .db
+            .events("mentioned-task", 0)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            answer.payload["replyTo"],
+            source["taskContext"]["commentId"]
+        );
+        assert!(answer.payload["chatId"].is_null());
+        let run = execute_tool(&state, "pock", "create_chat", &json!({
+            "workingDirectory": worktree.path(), "title":"Plan the panel", "prompt":"COMPLETE", "watch":false
+        }), "task-chat", &[source.clone()]).await.unwrap();
+        wait_task_status(&state, "mentioned-task", "review").await;
+        let chat_id = run["chatId"].as_str().unwrap();
+        let chat = document(&state.db, "provider-chats", chat_id)
+            .await
+            .unwrap();
+        assert_eq!(chat["taskId"], "mentioned-task");
+        let Json(chats) = list_codex_chats(
+            State(state.clone()),
+            Query(CodexChatListQuery {
+                cwd: Some(root.path().to_string_lossy().into()),
+            }),
+        )
+        .await
+        .unwrap();
+        let listed = chats.iter().find(|chat| chat.id == chat_id).unwrap();
+        assert_eq!(listed.project_id.as_deref(), Some("project"));
+        assert_eq!(listed.task_id.as_deref(), Some("mentioned-task"));
+        let Json(thread) = read_codex_chat(State(state.clone()), AxumPath(chat_id.into()))
+            .await
+            .unwrap();
+        assert_eq!(thread.chat.project_id.as_deref(), Some("project"));
+        assert_eq!(thread.chat.task_id.as_deref(), Some("mentioned-task"));
+        assert_eq!(chat["runtimeDefaults"]["collaborationMode"], "default");
+        assert_eq!(chat["runtimeDefaults"]["model"], "exact-beta");
+        assert_eq!(chat["runtimeDefaults"]["reasoningEffort"], "low");
+        assert_eq!(chat["runtimeDefaults"]["accessMode"], "readOnly");
+        let link = state
+            .db
+            .events("mentioned-task", 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|event| event.payload["chatId"] == chat_id)
+            .unwrap();
+        assert_eq!(link.payload["replyTo"], source["taskContext"]["commentId"]);
+
+        // Direct follow-up messages continue in the same chat without a task-plan approval.
+        let (_, Json(next)) = send_codex_message(
+            State(state.clone()),
+            AxumPath(chat_id.into()),
+            Json(CodexMessageCreate {
+                message: "COMPLETE".into(),
+                client_message_id: None,
+                model: None,
+                reasoning_effort: None,
+                approval_policy: None,
+                service_tier: None,
+                access_mode: None,
+                collaboration_mode: None,
+                attachment_ids: vec![],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next.thread_id, chat_id);
+        wait_task_status(&state, "mentioned-task", "review").await;
+        assert!(
+            state
+                .db
+                .task("mentioned-task")
+                .await
+                .unwrap()
+                .plan
+                .is_none()
+        );
+
+        change(&state, "pock", |agent| {
+            agent["followUps"].as_array_mut().unwrap().push(
+                json!({"id":"watch-task","status":"processing","sourceMessageIds":[source["id"]]}),
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+        send_agent_reply(
+            &state,
+            "pock",
+            "The requested work is ready to review.",
+            &[],
+        )
+        .await
+        .unwrap();
+        let reply = state
+            .db
+            .events("mentioned-task", 0)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(reply.payload["replyTo"], source["taskContext"]["commentId"]);
+
+        // An old completion must not override the current task run.
+        task_comments::chat_started(&state, chat_id, "newer-turn")
+            .await
+            .unwrap();
+        task_comments::chat_event(
+            &state,
+            chat_id,
+            "older-turn",
+            "turn/completed",
+            &json!({"turn":{"status":"completed"}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state.db.task("mentioned-task").await.unwrap().status,
+            "running"
+        );
+        task_comments::chat_event(
+            &state,
+            chat_id,
+            "newer-turn",
+            "item/tool/requestUserInput",
+            &json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state.db.task("mentioned-task").await.unwrap().status,
+            "needs_input"
+        );
+        task_comments::chat_event(
+            &state,
+            chat_id,
+            "newer-turn",
+            "turn/completed",
+            &json!({"turn":{"status":"interrupted"}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state.db.task("mentioned-task").await.unwrap().status,
+            "queued"
+        );
+    }
+
     #[cfg(unix)]
     async fn coding_tool(state: &AppState, name: &str, args: Value) -> AppResult<Value> {
         execute_tool(state, "pock", name, &args, &Uuid::new_v4().to_string(), &[]).await

@@ -4,6 +4,7 @@ import { ChevronRight, FileCode2, LoaderCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
+import { useThemeStore } from "@/lib/theme";
 
 const Editor = lazy(() => import("@/lib/monaco"));
 
@@ -12,6 +13,7 @@ function pathParts(path: string) {
 }
 
 export function EditorPanel() {
+  const theme = useThemeStore((state) => state.resolvedTheme);
   const taskId = useAppStore((state) => state.selectedTaskId);
   const projectId = useAppStore((state) => state.selectedProjectId);
   const path = useAppStore((state) => state.openFilePath);
@@ -89,7 +91,7 @@ export function EditorPanel() {
                 value={content}
                 onChange={(value) => { if (editable) { setContent(value ?? ""); setDirty(true); } }}
                 onMount={(editor, monaco) => editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current())}
-                theme="boosted-dark"
+                theme={`boosted-${theme}`}
                 options={{
                   readOnly: !editable,
                   minimap: { enabled: false },

@@ -38,7 +38,7 @@ export function useNotificationNavigation() {
       if (data.kind === "codex") {
         const [thread, projects] = await Promise.all([api.codexChat(data.id), api.projects()]);
         useAppStore.getState().selectCodexChat(data.id);
-        useAppStore.getState().syncCodexChatProject(data.id, chatProject(projects, thread.chat.cwd));
+        useAppStore.getState().syncCodexChatProject(data.id, chatProject(projects, thread.chat.cwd, thread.chat.projectId));
         window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", { detail: { threadId: data.id, title: thread.chat.title } }));
       }
     }

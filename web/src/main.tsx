@@ -16,6 +16,7 @@ import { isMixedContentConnection, useMachineStore, type MachineProfile } from "
 import { isTauriRuntime } from "@/lib/runtime";
 import { trackVisibleViewport } from "@/lib/viewport";
 import { setupRetryDelay, shouldRetrySetup } from "@/lib/startup";
+import { initializeTheme } from "@/lib/theme";
 import { useAppStore } from "@/lib/store";
 import type { SetupState, User } from "@/lib/types";
 
@@ -108,5 +109,7 @@ function Bootstrap() {
 
 const stopViewportTracking = trackVisibleViewport();
 import.meta.hot?.dispose(stopViewportTracking);
+const stopThemeTracking = initializeTheme();
+import.meta.hot?.dispose(stopThemeTracking);
 
 createRoot(document.getElementById("root")!).render(<StrictMode><Bootstrap />{!isTauriRuntime() && <PwaLifecycle />}</StrictMode>);

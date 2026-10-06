@@ -4,7 +4,7 @@ import { backToSettings, navigateSettings, pageFromHash, settingsSectionFromHash
 afterEach(() => { window.history.replaceState(null, "", "/"); vi.restoreAllMocks(); });
 describe("settings routes", () => {
   it("recognizes subpages and legacy usage links", () => {
-    for (const [hash, section] of [["#settings", undefined], ["#settings/codex", undefined], ["#usage", "usage"], ["#settings/unknown", undefined]]) {
+    for (const [hash, section] of [["#settings", undefined], ["#settings/appearance", "appearance"], ["#settings/codex", undefined], ["#usage", "usage"], ["#settings/unknown", undefined]]) {
       window.history.replaceState(null, "", hash);
       expect(pageFromHash()).toBe("settings");
       expect(settingsSectionFromHash()).toBe(section);

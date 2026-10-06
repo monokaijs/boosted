@@ -100,3 +100,22 @@
 
 @keyframes task-source-scrim-in { from { opacity: 0; } }
 @keyframes task-source-panel-in { from { opacity: 0; transform: translateX(18px) scale(.985); } }
+
+.task-comment-composer { position: relative; max-width: 48rem; margin-inline: auto; }
+.task-comment-input { display: flex; align-items: flex-end; gap: 8px; padding: 8px; border: 1px solid var(--input); border-radius: 10px; background: var(--background); }
+.task-comment-input:focus-within { border-color: var(--primary); }
+.task-comment-hint { margin: 8px 2px 0; color: var(--muted-foreground); font-size: 10px; line-height: 1.5; }
+.task-agent-suggestions { position: absolute; bottom: calc(100% + 6px); left: 0; width: min(320px, 100%); max-height: 240px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; padding: 4px; background: var(--popover); box-shadow: 0 12px 32px #0003; z-index: 10; }
+.task-agent-suggestions > button { display: flex; width: 100%; gap: 8px; align-items: center; padding: 8px; border-radius: 6px; font-size: 12px; text-align: left; }
+.task-agent-suggestions > button[aria-selected="true"] { background: var(--accent); }
+.task-agent-suggestions small { margin-left: auto; color: var(--muted-foreground); font-size: 10px; }
+.task-comment-replies { margin: 0 0 8px 12px; padding-left: 16px; border-left: 2px solid var(--border); }
+.task-comment-replies:empty { display: none; }
+.task-agent-chat-link { display: flex; width: min(320px, 100%); align-items: center; gap: 10px; margin-top: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--primary) 5%, var(--background)); text-align: left; }
+.task-agent-chat-link:hover { background: var(--accent); border-color: var(--primary); }
+.task-agent-chat-link > span { flex: 1; min-width: 0; }
+.task-agent-chat-link strong, .task-agent-chat-link small { display: block; }
+.task-agent-chat-link strong { font-size: 12px; font-weight: 500; }
+.task-agent-chat-link small { margin-top: 3px; color: var(--muted-foreground); font-size: 10px; }
+.task-agent-reply { margin-top: 8px; color: var(--muted-foreground); font-size: 11px; }
+.task-agent-reply:hover { color: var(--primary); }

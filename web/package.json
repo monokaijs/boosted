@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
-    "test:browser": "node --test test/overscroll.browser.mjs test/mobile-ux.browser.mjs test/attachment-preview.browser.mjs test/task-overflow.browser.mjs"
+    "test:browser": "node --test test/overscroll.browser.mjs test/mobile-ux.browser.mjs test/attachment-preview.browser.mjs test/task-overflow.browser.mjs test/theme.browser.mjs test/project-tasks.browser.mjs"
   },
   "dependencies": {
     "@assistant-ui/react": "^0.15.17",

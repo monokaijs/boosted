@@ -57,7 +57,7 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
   const entries = useMemo(() => {
     const unique = new Map<string, ProjectChat>();
     for (const chat of chats.data ?? []) {
-      const project = chatProject(projects.data ?? [], chat.cwd);
+      const project = chatProject(projects.data ?? [], chat.cwd, chat.projectId);
       if (!needle || `${chat.title} ${chat.preview} ${project?.name ?? ""}`.toLowerCase().includes(needle)) unique.set(chat.id, { chat, project });
     }
     return [...unique.values()].sort((a, b) => Date.parse(b.chat.updatedAt) - Date.parse(a.chat.updatedAt));

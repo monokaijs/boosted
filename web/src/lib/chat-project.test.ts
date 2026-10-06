@@ -13,4 +13,9 @@ describe("chat project matching", () => {
     expect(chatProject(projects, "\\repos\\app\\src")?.id).toBe("parent");
     expect(chatProject(projects, "/repos/application")).toBeUndefined();
   });
+  it("keeps a task worktree chat associated with its registered project", () => {
+    expect(chatProject(projects, "/data/worktrees/task-a", "parent")?.id).toBe("parent");
+    expect(chatProject(projects, "/data/worktrees/task-a", "removed")).toBeUndefined();
+  });
+
 });

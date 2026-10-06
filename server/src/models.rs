@@ -121,6 +121,10 @@ pub struct FolderBrowseResponse {
 #[serde(rename_all = "camelCase")]
 pub struct CodexChat {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
     pub title: String,
     pub preview: String,
     pub cwd: String,

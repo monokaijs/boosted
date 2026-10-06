@@ -70,7 +70,7 @@ function TaskListRow({ task }: { task: Task }) {
 }
 
 export function TaskboardPanel({ detailOpen = false }: { detailOpen?: boolean }) {
-  const [view, setView] = useState<"board" | "list">(() => localStorage.getItem("boosted.taskboard.view") === "list" ? "list" : "board");
+  const [view, setView] = useState<"board" | "list">(() => localStorage.getItem("boosted.taskboard.view") === "board" ? "board" : "list");
   const projectId = useAppStore((state) => state.selectedProjectId);
   const queryClient = useQueryClient();
   const tasks = useQuery({ queryKey: ["tasks", projectId], queryFn: () => api.tasks(projectId!), enabled: Boolean(projectId) });
@@ -85,11 +85,11 @@ export function TaskboardPanel({ detailOpen = false }: { detailOpen?: boolean })
     setView(next);
     localStorage.setItem("boosted.taskboard.view", next);
   }
-  if (!projectId) return <div className="panel-root tool-panel"><div className="panel-header"><div className="panel-title"><KanbanSquare className="size-3.5" />Taskboard</div></div><div className="empty-state min-h-0 flex-1"><KanbanSquare className="size-8" /><p>Open a project folder to use its taskboard.</p></div></div>;
+  if (!projectId) return <div className="panel-root tool-panel"><div className="panel-header"><div className="panel-title"><KanbanSquare className="size-3.5" />Tasks</div></div><div className="empty-state min-h-0 flex-1"><KanbanSquare className="size-8" /><p>Open a project folder to use its taskboard.</p></div></div>;
   return (
     <div className="panel-root tool-panel">
       <div className="panel-header">
-        <div className="panel-title"><KanbanSquare className="size-3.5" />Taskboard</div>
+        <div className="panel-title"><KanbanSquare className="size-3.5" />Tasks</div>
         <div className="ml-auto flex items-center gap-1.5">
           {!detailOpen && <div className="flex items-center rounded-md bg-background/60 p-0.5" aria-label="Taskboard view">
             <Button size="icon-sm" variant="ghost" className={cn("size-6", view === "board" && "bg-accent text-foreground")} aria-label="Board view" aria-pressed={view === "board"} title="Board view" onClick={() => selectView("board")}><LayoutGrid /></Button>
@@ -100,8 +100,9 @@ export function TaskboardPanel({ detailOpen = false }: { detailOpen?: boolean })
       </div>
       <ScrollArea className="min-h-0 flex-1">
         {tasks.isLoading && <div className="px-3 py-10 text-center text-xs text-muted-foreground">Loading tasks…</div>}
-        {!tasks.isLoading && view === "board" && !detailOpen && <DndContext sensors={sensors} onDragEnd={dragEnd}><div className="taskboard-grid grid min-h-full grid-cols-[repeat(auto-fit,minmax(min(240px,100%),1fr))] content-start gap-2 p-3">{boardStatuses.map((status) => <BoardColumn key={status} status={status} tasks={(tasks.data ?? []).filter((task) => task.status === status)} />)}</div></DndContext>}
-        {!tasks.isLoading && (view === "list" || detailOpen) && <div className="taskboard-list min-h-full">{(tasks.data ?? []).map((task) => <TaskListRow key={task.id} task={task} />)}{tasks.data?.length === 0 && <div className="px-3 py-12 text-center text-xs text-muted-foreground">No tasks yet</div>}</div>}
+        {tasks.error && <div role="alert" className="px-3 py-8 text-center text-xs text-destructive">{tasks.error.message}<Button variant="ghost" size="sm" onClick={() => void tasks.refetch()}>Try again</Button></div>}
+        {!tasks.isLoading && !tasks.error && view === "board" && !detailOpen && <DndContext sensors={sensors} onDragEnd={dragEnd}><div className="taskboard-grid grid min-h-full grid-cols-[repeat(auto-fit,minmax(min(240px,100%),1fr))] content-start gap-2 p-3">{boardStatuses.map((status) => <BoardColumn key={status} status={status} tasks={(tasks.data ?? []).filter((task) => task.status === status)} />)}</div></DndContext>}
+        {!tasks.isLoading && !tasks.error && (view === "list" || detailOpen) && <div className="taskboard-list min-h-full">{(tasks.data ?? []).map((task) => <TaskListRow key={task.id} task={task} />)}{tasks.data?.length === 0 && <div className="px-3 py-12 text-center text-xs text-muted-foreground">No tasks yet</div>}</div>}
       </ScrollArea>
       {move.error && <div className="border-t border-border px-3 py-2 text-xs text-destructive">{move.error.message}</div>}
     </div>

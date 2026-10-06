@@ -1,11 +1,23 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="description" content="A local-first coding workspace for projects, tasks, planning, and Codex chats." />
-    <meta name="theme-color" content="#1b1b1c" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#edf0f3" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      // Apply before the first paint; runtime listeners keep the preference in sync.
+      (() => {
+        let preference = "system";
+        try { preference = localStorage.getItem("boosted.theme") || "system"; } catch {}
+        const dark = preference === "dark" || (preference !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.classList.toggle("dark", dark);
+        document.documentElement.style.colorScheme = dark ? "dark" : "light";
+        document.querySelector('meta[name="theme-color"]').content = dark ? "#08090b" : "#edf0f3";
+        document.querySelector('meta[name="color-scheme"]').content = dark ? "dark" : "light";
+      })();
+    </script>
     <meta name="application-name" content="Boosted" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />

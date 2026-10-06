@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn taskboard_runs_use_rotation_and_route_steering_and_stops_to_the_owner() {
+    async fn legacy_task_runs_keep_rotation_and_owner_stops_while_comments_do_not_steer() {
         let (root, state) = fixture().await;
         sqlx::query("INSERT INTO users(id,username,password_hash,role,created_at) VALUES('user','user','','admin','now')").execute(&state.db.pool).await.unwrap();
         sqlx::query("INSERT INTO projects(id,name,repo_path,default_branch,created_by,created_at) VALUES('project','Project',?,'main','user','now')").bind(root.path().to_string_lossy().to_string()).execute(&state.db.pool).await.unwrap();
@@ -469,7 +469,17 @@ mod tests {
             let log =
                 std::fs::read_to_string(state.providers.home.join(owner).join("rpc-log.jsonl"))
                     .unwrap();
-            assert!(log.contains("turn/steer"));
+            assert!(!log.contains("turn/steer"));
+            assert!(
+                state
+                    .db
+                    .events(id, 0)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|event| event.kind == "user_message"
+                        && event.payload["text"] == "Keep going")
+            );
             assert!(log.contains("turn/interrupt"));
         }
         let Json(chats) = list_codex_chats(

@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ChartNoAxesCombined, Bell, Code2, ExternalLink, GitBranch, Globe2, LoaderCircle, ChevronRight, Pencil, Plug, Plus, RefreshCw, Search, Server, Settings2, Shield, Trash2, UserPlus, Users, X } from "lucide-react";
+import { ArrowLeft, ChartNoAxesCombined, Bell, Code2, ExternalLink, GitBranch, Globe2, LoaderCircle, ChevronRight, Palette, Pencil, Plug, Plus, RefreshCw, Search, Server, Settings2, Shield, Trash2, UserPlus, Users, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ProjectIconEditor } from "@/components/project-icon-editor";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -11,6 +11,7 @@ import { api } from "@/lib/api";
 import { defaultNotificationSettings, notificationEventDefinitions, notificationPermission, readNotificationSettings, requestNotificationPermission, showTestNotification, writeNotificationSettings, type PwaNotificationSettings } from "@/lib/notifications";
 import { useMachineStore } from "@/lib/machines";
 import { useAppStore } from "@/lib/store";
+import { useThemeStore, type ThemePreference } from "@/lib/theme";
 import { isTauriRuntime } from "@/lib/runtime";
 import { refreshWebApp } from "@/lib/web-update";
 import type { Integration, IntegrationDiscoveryTarget } from "@/lib/types";
@@ -33,6 +34,7 @@ type Section = Exclude<SettingsSectionId, "workspace" | "codex">;
 const sectionGroups: { label: string; sections: { id: Section; label: string; icon: typeof Settings2 }[] }[] = [
   { label: "Device", sections: [
     { id: "connections", label: "Connections", icon: Server },
+    { id: "appearance", label: "Appearance", icon: Palette },
     { id: "notifications", label: "Notifications", icon: Bell },
   ] },
   { label: "Machine", sections: [
@@ -47,6 +49,19 @@ const sectionGroups: { label: string; sections: { id: Section; label: string; ic
 
 function ConnectionsSettings() {
   return <div className="settings-content"><SettingsSection title="Saved machines" description="Connect to a Boosted server and switch between your machines."><ConnectionsManager embedded /></SettingsSection><p className="settings-note">Each machine keeps its own accounts, repositories, and settings.</p></div>;
+}
+
+function AppearanceSettings() {
+  const preference = useThemeStore((state) => state.preference);
+  const setTheme = useThemeStore((state) => state.setTheme);
+  return <div className="settings-content">
+    <SettingsSection title="Color theme" description="Choose how Boosted looks on this device.">
+      <SettingsGroup><SettingsRow label="Theme" description="System follows your device’s light or dark appearance.">
+        <SettingsSelect value={preference} onValueChange={(value) => setTheme(value as ThemePreference)} options={[{ value: "system", label: "System" }, { value: "light", label: "Light" }, { value: "dark", label: "Dark" }]} />
+      </SettingsRow></SettingsGroup>
+    </SettingsSection>
+    <p className="settings-note">Changes apply immediately and are saved on this device.</p>
+  </div>;
 }
 
 function GlobalWebSettings() {
@@ -691,6 +706,7 @@ function TeamSettings() {
 const sectionDescriptions: Record<Section, string> = {
   providers: "Connect AI accounts and set their defaults.",
   connections: "Manage the Boosted machines available on this device.",
+  appearance: "Choose a light, dark, or system theme.",
   notifications: "Choose what you hear about and when.",
   web: "Configure browser access to this machine.",
   application: "Keep Boosted up to date.",
@@ -754,6 +770,7 @@ export function SettingsPage({ section: requestedSection, onSectionChange, onBac
         {section === "providers" && <ProvidersSettings />}
         {section === "usage" && <UsageSettings />}
         {section === "connections" && <ConnectionsSettings />}
+        {section === "appearance" && <AppearanceSettings />}
         {section === "notifications" && <NotificationSettings />}
         {section === "web" && <GlobalWebSettings />}
         {section === "application" && <ApplicationSettings />}

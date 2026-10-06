@@ -25,6 +25,7 @@ vi.mock("@/features/agents/lib/api-client", () => ({ apiClient: {
 import { SettingsPage, type SettingsSectionId } from "./settings-page";
 import { ProjectSettingsDialog } from "./project-settings-dialog";
 import { readNotificationSettings } from "@/lib/notifications";
+import { initializeTheme } from "@/lib/theme";
 
 const account = { id: "account-a", providerId: "codex", displayName: "Work account", status: "CONNECTED", settings: { codexHome: "/isolated/codex" }, runtimeDefaults: { permissionMode: "default", reasoningEffort: "medium" }, createdAt: "2026-10-01", updatedAt: "2026-10-01" };
 function renderPage(initial: SettingsSectionId | undefined = "connections") {
@@ -118,7 +119,7 @@ describe("settings page", () => {
   it("renders every section as a page with searchable navigation and a return action", async () => {
     renderPage();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    for (const [label, heading] of [["Usage", "Usage"], ["Providers", "Providers"], ["Connections", "Connections"], ["Notifications", "Notifications"], ["Web interface", "Web interface"], ["Application", "Application"], ["Team", "Team"], ["Integrations", "Integrations"]]) {
+    for (const [label, heading] of [["Usage", "Usage"], ["Providers", "Providers"], ["Connections", "Connections"], ["Appearance", "Appearance"], ["Notifications", "Notifications"], ["Web interface", "Web interface"], ["Application", "Application"], ["Team", "Team"], ["Integrations", "Integrations"]]) {
       selectSection(label);
       expect(screen.getByRole("heading", { level: 1, name: heading })).toBeInTheDocument();
       expect(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: label })).toHaveAttribute("aria-current", "page");
@@ -130,6 +131,28 @@ describe("settings page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Clear settings search" }));
     fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
     expect(mocks.close).toHaveBeenCalledOnce();
+  });
+
+  it("lets members change the device theme immediately from Appearance", async () => {
+    mocks.state.user.role = "member";
+    const stopThemeTracking = initializeTheme();
+    try {
+      renderPage("appearance");
+      const theme = screen.getByRole("combobox", { name: "Theme" });
+      expect(theme).toHaveTextContent("System");
+      fireEvent.keyDown(theme, { key: "ArrowDown" });
+      fireEvent.click(await screen.findByRole("option", { name: "Dark" }));
+      expect(document.documentElement).toHaveClass("dark");
+      expect(localStorage.getItem("boosted.theme")).toBe("dark");
+      fireEvent.keyDown(theme, { key: "ArrowDown" });
+      fireEvent.click(await screen.findByRole("option", { name: "Light" }));
+      expect(document.documentElement).not.toHaveClass("dark");
+      expect(localStorage.getItem("boosted.theme")).toBe("light");
+    } finally {
+      stopThemeTracking();
+      document.documentElement.classList.remove("dark");
+      document.documentElement.style.removeProperty("color-scheme");
+    }
   });
 
   it("edits provider defaults inline and saves the chosen permissions", async () => {

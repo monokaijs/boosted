@@ -23,6 +23,24 @@ record, so background turns retain the goal. The model receives durable managed
 chat references and saved follow-ups in addition to conversation history.
 Commands, file changes, web searches,
 image views and MCP calls are saved as action receipts, including failures.
+Task comments are ordinary discussion until the user mentions a saved agent with
+`@Name` or `@(Full Name)`. Mention matching ignores case and checks name boundaries;
+unknown or ambiguous mentions return a clear error. Each mentioned agent receives
+the comment through its durable queue, with the task description, source reference,
+recent discussion, worktree, and execution options. Agent answers are threaded under
+the initiating comment. When the agent starts a chat, the reply includes an Open
+chat action; the chat also offers Back to task. Watched-run replies retain the
+original comment reference after the browser closes.
+
+Planning requests use conversational chats with an explicit planning-only prompt.
+The first request stops at the plan; later instructions such as “Do it” can continue
+in that same chat without a task-plan approval step. Ordinary questions can be
+answered directly in the comment thread. Task chats retain the task's worktree and
+options, and their saved project association keeps them in the project's sidebar.
+Chat runs update task activity through running, needs input, review, and failure;
+a stopped run returns the task to the queue. Legacy plans remain readable, and
+previously scheduled task-plan watches retain their original scope.
+
 In group conversation, the leader can quietly forward a current human message
 to its intended participant with `forward_group_message`. The delivery preserves
 the original message, sender and attachments without posting a leader bubble.

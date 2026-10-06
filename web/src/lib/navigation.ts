@@ -9,7 +9,7 @@ export const destinations = [
 ] as const;
 export type AppPage = typeof destinations[number]["id"];
 
-export const settingsSections = ["providers", "connections", "notifications", "web", "application", "team", "usage", "integrations"] as const;
+export const settingsSections = ["providers", "connections", "appearance", "notifications", "web", "application", "team", "usage", "integrations"] as const;
 export type SettingsSectionId = typeof settingsSections[number] | "workspace" | "codex";
 
 export function settingsSectionFromHash(): SettingsSectionId | undefined {

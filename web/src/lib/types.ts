@@ -40,6 +40,8 @@ export interface CodexLogin {
 
 export interface CodexChat {
   id: string;
+  projectId?: string;
+  taskId?: string;
   title: string;
   preview: string;
   cwd: string;

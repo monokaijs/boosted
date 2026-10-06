@@ -19,6 +19,7 @@ mod markdown_checkboxes;
 mod models;
 mod process;
 mod providers;
+mod task_comments;
 mod task_planning;
 pub mod updater;
 
@@ -1328,6 +1329,8 @@ fn codex_chat(thread: &Value) -> CodexChat {
         .filter(|name| !name.trim().is_empty())
         .unwrap_or(preview);
     CodexChat {
+        project_id: None,
+        task_id: None,
         id: thread
             .get("id")
             .and_then(Value::as_str)
@@ -1453,18 +1456,26 @@ async fn list_codex_chats(
         !task_thread_ids.contains(&chat.id) && !deleted_thread_ids.contains(&chat.id)
     });
     for metadata in providers::documents(&state.db, "provider-chats").await? {
-        if metadata["archived"] == true || metadata["taskId"].is_string() {
+        if metadata["archived"] == true
+            || (metadata["taskId"].is_string() && !metadata["taskCommentId"].is_string())
+        {
             continue;
         }
         if query.cwd.as_deref().is_some_and(|cwd| {
-            !cwd.is_empty() && metadata["workingDirectory"].as_str() != Some(cwd)
+            !cwd.is_empty()
+                && metadata["workingDirectory"].as_str() != Some(cwd)
+                && metadata["projectWorkingDirectory"].as_str() != Some(cwd)
         }) {
             continue;
         }
         let Some(id) = metadata["id"].as_str() else {
             continue;
         };
-        if chats.iter().any(|chat| chat.id == id) {
+        if let Some(chat) = chats.iter_mut().find(|chat| chat.id == id) {
+            chat.project_id = metadata["projectId"].as_str().map(str::to_owned);
+            if metadata["taskCommentId"].is_string() {
+                chat.task_id = metadata["taskId"].as_str().map(str::to_owned);
+            }
             continue;
         }
         if let Ok(client) = providers::client_for_thread(&state, id).await {
@@ -1472,7 +1483,12 @@ async fn list_codex_chats(
                 .request("thread/read", json!({"threadId":id,"includeTurns":false}))
                 .await
             {
-                chats.push(codex_chat(&result["thread"]));
+                let mut chat = codex_chat(&result["thread"]);
+                chat.project_id = metadata["projectId"].as_str().map(str::to_owned);
+                if metadata["taskCommentId"].is_string() {
+                    chat.task_id = metadata["taskId"].as_str().map(str::to_owned);
+                }
+                chats.push(chat);
             }
         }
     }
@@ -1611,6 +1627,12 @@ async fn read_codex_chat(
         .ok_or_else(|| AppError::Internal("Codex returned no thread".into()))?;
     let runtime_defaults = providers::runtime_defaults(&state, &id).await?;
     let mut chat = codex_chat(thread);
+    if let Ok(metadata) = providers::document(&state.db, "provider-chats", &id).await {
+        chat.project_id = metadata["projectId"].as_str().map(str::to_owned);
+        if metadata["taskCommentId"].is_string() {
+            chat.task_id = metadata["taskId"].as_str().map(str::to_owned);
+        }
+    }
     refresh_codex_chat_activity(&state, std::slice::from_mut(&mut chat)).await?;
     Ok(Json(CodexChatThread {
         runtime_defaults,
@@ -1952,6 +1974,9 @@ async fn send_codex_message_locked(
         metadata["dispatchPaused"] = json!(false);
         providers::save_document(&state.db, "provider-chats", &metadata).await?;
     }
+    if let Err(error) = task_comments::chat_started(state, &thread_id, &turn_id).await {
+        tracing::warn!(%error, "Unable to update task activity");
+    }
     state.emit(
         "codex.event",
         json!({ "threadId": thread_id, "turnId": turn_id, "method": "turn/started" }),
@@ -1984,6 +2009,17 @@ async fn send_codex_message_locked(
             let Some(method) = event.get("method").and_then(Value::as_str) else {
                 continue;
             };
+            if let Err(error) = task_comments::chat_event(
+                &forward_state,
+                &forward_thread_id,
+                &forward_turn_id,
+                method,
+                params,
+            )
+            .await
+            {
+                tracing::warn!(%error, "Unable to update task activity");
+            }
             if let Err(error) = groups::record_child_event(
                 &forward_state,
                 &forward_thread_id,
@@ -2819,62 +2855,7 @@ async fn send_task_message(
     AxumPath(id): AxumPath<String>,
     Json(input): Json<MessageCreate>,
 ) -> AppResult<Json<Task>> {
-    let message = input.message.trim().to_string();
-    if message.is_empty() {
-        return Err(AppError::BadRequest("message is required".into()));
-    }
-    let task = state.db.task(&id).await?;
-    state
-        .event(&id, "user_message", Some(&user.id), json!({"text":message}))
-        .await?;
-    if let Some(pending) = state.pending_inputs.write().await.remove(&id) {
-        let answers = pending
-            .question_ids
-            .into_iter()
-            .map(|question| (question, json!({"answers":[message]})))
-            .collect::<serde_json::Map<_, _>>();
-        pending
-            .client
-            .respond(pending.request_id, json!({"answers":answers}))
-            .await?;
-        state
-            .set_task_state(&id, &pending.resume_status, None)
-            .await?;
-    } else if matches!(task.status.as_str(), "planning" | "running") {
-        let client = providers::client_for_thread(
-            &state,
-            task.provider_thread_id
-                .as_deref()
-                .ok_or_else(|| AppError::Conflict("task has no Codex thread".into()))?,
-        )
-        .await?;
-        client.request("turn/steer", json!({"threadId":task.provider_thread_id.ok_or_else(|| AppError::Conflict("task has no Codex thread".into()))?,"expectedTurnId":task.active_turn_id.ok_or_else(|| AppError::Conflict("task has no active turn".into()))?,"input":[{"type":"text","text":message}]})).await?;
-    } else {
-        sqlx::query("UPDATE plans SET approved_at=NULL,approved_by=NULL WHERE task_id=?")
-            .bind(&id)
-            .execute(&state.db.pool)
-            .await?;
-        state.set_task_state(&id, "planning", None).await?;
-        let runner_state = state.clone();
-        let task_id = id.clone();
-        let planning_prompt = if task.status == "queued" {
-            format!(
-                "{}\n\nAdditional instructions:\n{}",
-                task.description, message
-            )
-        } else {
-            message
-        };
-        tokio::spawn(async move {
-            if let Err(error) =
-                start_plan(runner_state.clone(), task_id.clone(), planning_prompt).await
-            {
-                let _ = runner_state
-                    .set_task_state(&task_id, "failed", Some(&error.to_string()))
-                    .await;
-            }
-        });
-    }
+    task_comments::post(&state, &user, &id, &input.message).await?;
     Ok(Json(state.db.task(&id).await?))
 }
 

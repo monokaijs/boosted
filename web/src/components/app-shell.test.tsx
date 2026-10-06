@@ -12,7 +12,7 @@ import type { SessionShellState } from "@/features/agents/components/session/ses
 const apiMock = vi.hoisted(() => {
   const values = new Map<string, string>();
   vi.stubGlobal("localStorage", { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key), clear: () => values.clear() });
-  return { projects: vi.fn(), codexChats: vi.fn(), codexChat: vi.fn(), logout: vi.fn(), agents: vi.fn(), usage: vi.fn(), featureRequest: vi.fn(), createAgent: vi.fn() };
+  return { projects: vi.fn(), codexChats: vi.fn(), codexChat: vi.fn(), logout: vi.fn(), agents: vi.fn(), usage: vi.fn(), featureRequest: vi.fn(), createAgent: vi.fn(), tasks: vi.fn() };
 });
 vi.mock("@/lib/api", () => ({ api: apiMock, setToken: vi.fn() }));
 vi.mock("@/lib/api-context", () => ({ useBoostedApiClient: () => ({ profileId: "test-machine", featureRequest: apiMock.featureRequest, projects: apiMock.projects }) }));
@@ -59,6 +59,7 @@ beforeEach(() => {
   useUnreadStore.setState({ profiles: {}, active: undefined });
   useAppStore.setState({ selectedProjectId: "alpha", selectedGroupId: undefined, selectedCodexChatId: undefined, selectedTaskId: undefined, openFilePath: undefined, taskDrawerOpen: false, activeMachineId: undefined });
   apiMock.projects.mockResolvedValue(projects);
+  apiMock.tasks.mockResolvedValue([]);
   apiMock.codexChats.mockResolvedValue([...chats, chats[0]]);
   apiMock.codexChat.mockImplementation(async (id: string) => ({ chat: chats.find((chat) => chat.id === id), messages: [] }));
   apiMock.featureRequest.mockResolvedValue([]);
@@ -264,7 +265,7 @@ describe("page navigation and conversations", () => {
     expect(sage.querySelector("img")).toHaveAttribute("src", "/sage.png");
     expect(within(agents).getByRole("button", { name: "Pock" })).toHaveTextContent("P");
     expect(screen.getByRole("separator")).toBeInTheDocument();
-    goTo("Projects");
+    goTo("Scheduled");
     fireEvent.click(sage);
     expect(await screen.findByText("Agent conversation sage")).toBeInTheDocument();
     expect(sage).toHaveAttribute("aria-current", "page");
@@ -302,7 +303,7 @@ describe("page navigation and conversations", () => {
     fireEvent.click(team);
     expect(await screen.findByText("Group conversation team")).toBeInTheDocument();
     expect(team).toHaveAttribute("aria-current", "true");
-    goTo("Projects");
+    goTo("Scheduled");
     expect(team).not.toHaveAttribute("aria-current");
     fireEvent.click(within(screen.getByRole("navigation", { name: "Agents" })).getByRole("button", { name: "Pock" }));
     expect(await screen.findByText("Agent conversation pock")).toBeInTheDocument();
@@ -321,7 +322,7 @@ describe("page navigation and conversations", () => {
     fireEvent.click(projectRow);
     expect(within(projectList).getByRole("button", { name: "Older alpha chat" })).toHaveAttribute("aria-current", "true");
     expect(within(recent).getByRole("button", { name: "Older alpha chat" })).not.toHaveAttribute("aria-current");
-    goTo("Projects");
+    goTo("Scheduled");
     expect(document.querySelectorAll(".chat-list-row[aria-current]")).toHaveLength(0);
     goTo("Home");
     expect(document.querySelectorAll(".chat-list-row[aria-current]")).toHaveLength(1);
@@ -350,7 +351,7 @@ describe("page navigation and conversations", () => {
     const recent = screen.getByRole("region", { name: "Recent" });
     await within(recent).findByRole("button", { name: "Latest beta chat" });
     expect(within(recent).getAllByRole("button").map((button) => button.textContent)).toEqual(["Latest beta chat", "Older alpha chat"]);
-    goTo("Projects");
+    goTo("Scheduled");
     fireEvent.click(within(recent).getByRole("button", { name: "Latest beta chat" }));
     expect(await screen.findByText("Conversation new")).toBeInTheDocument();
     expect(useAppStore.getState()).toMatchObject({ selectedProjectId: "beta", selectedCodexChatId: "new" });
@@ -370,6 +371,27 @@ describe("page navigation and conversations", () => {
     expect(screen.queryByRole("complementary", { name: "Navigation and chats" })).not.toBeInTheDocument();
     act(() => { window.history.replaceState(null, "", "/#projects"); window.dispatchEvent(new HashChangeEvent("hashchange")); });
     expect(screen.getByRole("region", { name: "Projects page" })).toBeInTheDocument();
+  });
+
+  it("keeps project tasks, tools and chats inside their dedicated workspace", async () => {
+    renderShell();
+    goTo("Projects");
+    const sidebar = await screen.findByRole("region", { name: "Project navigation" });
+    expect(within(sidebar).queryByRole("navigation", { name: "Agents" })).not.toBeInTheDocument();
+    fireEvent.click(await within(sidebar).findByRole("button", { name: "Beta" }));
+    expect(screen.getByRole("region", { name: "Projects page" })).toBeInTheDocument();
+    expect(screen.getByText("Task board content")).toBeInTheDocument();
+    const conversations = within(await screen.findByRole("region", { name: "Project conversations" }));
+    fireEvent.click(await conversations.findByRole("button", { name: "Latest beta chat" }));
+    expect(await screen.findByText("Conversation new")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Projects page" })).toBeInTheDocument();
+    act(() => window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: "files" })));
+    expect(screen.getByRole("region", { name: "Projects page" })).toBeInTheDocument();
+    expect(screen.getByText("Files content")).toBeInTheDocument();
+    expect(useAppStore.getState()).toMatchObject({ selectedProjectId: "beta", selectedTaskId: undefined });
+    fireEvent.click(within(sidebar).getByRole("button", { name: "Alpha" }));
+    expect(screen.getByText("Task board content")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Project conversations" })).queryByRole("button", { name: "Latest beta chat" })).not.toBeInTheDocument();
   });
 
   it("keeps the desktop task list visible beside the selected task", async () => {
