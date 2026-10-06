@@ -3,6 +3,6 @@ members = ["server", "desktop/src-tauri"]
 resolver = "2"
 
 [workspace.package]
-version = "1.4.2"
+version = "1.5.0"
 edition = "2024"
 license = "MIT"

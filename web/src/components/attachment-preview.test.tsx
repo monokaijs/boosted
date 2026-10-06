@@ -165,3 +165,15 @@ it("renders Markdown documents and saves through the supplied backing-file write
   await waitFor(() => expect(checkbox).toBeChecked());
   expect(save).toHaveBeenCalledWith({ expected: "\uFEFF- [ ] File task\r\n", offset: 4, checked: true });
 });
+
+it("renders Markdown documents and saves through the supplied backing-file writer", async () => {
+  const blob = new Blob([], { type: "application/octet-stream" });
+  blob.arrayBuffer = async () => new TextEncoder().encode("\uFEFF- [ ] File task\r\n").buffer;
+  const save = vi.fn(async () => {});
+  render(<AttachmentPreview name="tasks.md" load={async () => ({ blob })} saveCheckbox={save} />);
+  fireEvent.click(screen.getByRole("button", { name: "View tasks.md" }));
+  const checkbox = await screen.findByRole("checkbox", { name: "File task" });
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(checkbox).toBeChecked());
+  expect(save).toHaveBeenCalledWith({ expected: "\uFEFF- [ ] File task\r\n", offset: 4, checked: true });
+});
