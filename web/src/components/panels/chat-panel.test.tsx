@@ -9,8 +9,10 @@ import { applyCodexEvent } from "@/lib/codex-chat-state";
 import type { Task, TaskEvent } from "@/lib/types";
 
 const api = vi.hoisted(() => ({ toggleMarkdownCheckbox: vi.fn(), projects: vi.fn(), projectBranches: vi.fn(), projectBranch: vi.fn(), switchProjectBranch: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexApprovals: vi.fn(), codexAttachment: vi.fn(), uploadCodexAttachment: vi.fn(), workspaceFile: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn(), answerTaskQuestions: vi.fn() }));
+const openExternalUrl = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/api", () => ({ api }));
 vi.mock("@/lib/api-context", () => ({ useBoostedApiClient: () => api }));
+vi.mock("@/lib/runtime", () => ({ openExternalUrl }));
 import { NewChatPanel, TaskPanel } from "./chat-panel";
 import { CodexChatPanel } from "./codex-chat-panel";
 
@@ -62,6 +64,15 @@ it("keeps the Codex composer outside transcript scroll ownership", async () => {
   expect(container.querySelector(".codex-composer-footer")?.parentElement).toBe(transcript.parentElement);
   fireEvent.change(input, { target: { value: "Multiple\nlines\nremain editable" } });
   expect(input).toHaveValue("Multiple\nlines\nremain editable");
+});
+
+it("opens an imported task in the system browser", async () => {
+  api.task.mockResolvedValue({ ...task, source: { provider: "gitlab", externalId: "issue:42", externalUrl: "https://gitlab.example/group/project/-/work_items/42" } });
+  renderPanel(<TaskPanel />);
+  const link = await screen.findByRole("link", { name: /Imported from gitlab/ });
+  expect(link).toHaveAttribute("href", "https://gitlab.example/group/project/-/work_items/42");
+  fireEvent.click(link);
+  expect(openExternalUrl).toHaveBeenCalledWith("https://gitlab.example/group/project/-/work_items/42");
 });
 
 it("keeps a replacement coding thread in its embedded view", async () => {
