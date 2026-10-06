@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "boosted-desktop"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "boosted-server",
  "serde_json",
@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "boosted-server"
-version = "1.5.0"
+version = "1.5.1"
 dependencies = [
  "argon2",
  "axum",
