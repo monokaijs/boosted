@@ -235,8 +235,9 @@ export function GroupPanel({ groupId, headerTarget }: { groupId: string; headerT
         </div>)}
       </div>
     </div>
-    <div className="session-composer shrink-0"><div className="session-conversation-column mx-auto">
-      {!following && <div className="mb-2 text-center"><button type="button" className="group-latest-button" onClick={() => { if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; follow.current = true; setFollowing(true); }}><ArrowDown className="size-3" />Latest messages</button></div>}
+    <div className="session-composer relative shrink-0">
+      {!following && <Button type="button" className="absolute -top-9 right-0 z-20 shrink-0 rounded-full shadow-lg" variant="secondary" size="icon-sm" aria-label="Scroll to bottom" title="Scroll to bottom" onClick={() => { if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; follow.current = true; setFollowing(true); }}><ArrowDown /></Button>}
+      <div className="session-conversation-column mx-auto">
       {(group.stopped || limited) && <div className="group-chat-notice"><p>{limited ? 'Exchange limit reached. Continue when ready.' : group.stopReason === 'restart' ? 'Interrupted by a server restart. Review progress, then resume.' : 'Group stopped. Your messages and work are saved.'}</p><button type="button" disabled={busy || stopping} onClick={control}><Play className="size-3" />{limited ? 'Continue' : 'Resume'}</button></div>}
       {(error || state.error) && <p role="alert" className="mb-3 rounded-xl border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive">{error ?? state.error?.message}</p>}
       {attachments.length > 0 && <div className="mb-2"><AssistantAttachmentList attachments={attachments} onRemove={(id) => { const next = attachmentList.current.filter((file) => file.id !== id); attachmentList.current = next; setAttachments(next); }} /></div>}

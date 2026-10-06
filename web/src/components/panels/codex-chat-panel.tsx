@@ -340,7 +340,7 @@ function CodexTranscript({ thread }: { thread: CodexChatThread }) {
         <CodexDraftSync runtime={runtime} sessionKey={sessionKey} />
         <CodexAsyncQuestionProvider value={{ requestScope: `${api.profileId}:${thread.chat.id}`, answered: answeredQuestions, reply: replyToQuestions }}>
         <CodexThreadLayout footer={<>
-            <ThreadPrimitive.ScrollToBottom asChild behavior="smooth"><Button className="absolute -top-9 right-0 z-20 shrink-0 rounded-full shadow-lg" variant="secondary" size="icon-sm" title="Scroll to bottom"><ArrowDown /></Button></ThreadPrimitive.ScrollToBottom>
+            <ThreadPrimitive.ScrollToBottom asChild behavior="smooth"><Button className="absolute -top-9 right-0 z-20 shrink-0 rounded-full shadow-lg disabled:hidden" variant="secondary" size="icon-sm" aria-label="Scroll to bottom" title="Scroll to bottom"><ArrowDown /></Button></ThreadPrimitive.ScrollToBottom>
             <div className="mx-auto w-full max-w-3xl">
               <div className="codex-composer-requests">{approvals.data?.map((approval) => approval.method === "item/tool/requestUserInput"
                 ? <div key={approval.id} className="mb-2"><CodexQuestionForm requestId={`${api.profileId}:${thread.chat.id}:approval:${approval.id}`} questions={approval.params.questions ?? []} onSubmit={async (answers) => { await api.answerCodexQuestions(thread.chat.id, approval.id, answers); void approvals.refetch(); }} /></div>
