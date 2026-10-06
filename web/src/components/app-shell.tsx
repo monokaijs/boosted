@@ -83,6 +83,9 @@ export function AppShell() {
   const toolsOpen = page === "home" && Boolean(toolView);
   const mobileChatsPage = isMobile && page === "home" && !mobileChatOpen;
   const mobileChatDetail = isMobile && page === "home" && mobileChatOpen;
+  const contentLayoutKey = page === "tasks" && !isMobile
+    ? `${profileId}:tasks:${projectId ?? "empty"}`
+    : `${profileId}:${page}:${view}:${chatId}:${taskId}:${groupId}:${selectedAgentId}`;
   useConversationReadState(page === "home" && !mobileChatsPage
     ? view === "agents" && selectedAgent ? { kind: "agent", id: selectedAgent.id }
       : view === "group" && groupId ? { kind: "group", id: groupId }
@@ -264,14 +267,19 @@ export function AppShell() {
         </Suspense></div>
       </aside>}
       {toolsOpen && <button className="mobile-tools-scrim" aria-label="Dismiss project tools" onClick={() => setToolView(undefined)} />}
-      <div className="main-surface-content"><AttachmentPreviewLayout key={`${profileId}:${page}:${view}:${chatId}:${taskId}:${groupId}:${selectedAgentId}`} alreadySplit={toolsOpen}><Suspense fallback={<div className="empty-state">Loading…</div>}>
+      <div className="main-surface-content"><AttachmentPreviewLayout key={contentLayoutKey} alreadySplit={toolsOpen}><Suspense fallback={<div className="empty-state">Loading…</div>}>
         {page === "home" && !mobileChatsPage && (view === "editor" ? <div className="page-detail">
           <div className="page-detail-back"><Button variant="ghost" size="sm" onClick={() => setView("chat")}><ArrowLeft />Back to chat</Button></div>
           <EditorPanel />
         </div> : view === "group" && groupId ? <GroupPanel key={profileId + ":" + groupId} groupId={groupId} headerTarget={mobileChatDetail ? groupHeaderTarget : null} /> : view === "agents" ? <AgentsPanel selectedId={selectedAgentId} selectAgent={selectAgent} createAgentOpen={createAgentOpen} onCreateAgentOpenChange={setCreateAgentOpen} /> : chatId ? <CodexChatPanel key={chatId} threadId={chatId} /> : <NewChatPanel key={projectId ?? "empty"} />)}
         {page === "scheduled" && <ScheduledPage />}
         {page === "projects" && <ProjectsPage onOpenProject={() => setProjectDialogOpen(true)} onSelect={newChat} />}
-        {page === "tasks" && (view === "task" && taskId ? <div className="page-detail"><div className="page-detail-back"><Button variant="ghost" size="sm" onClick={() => setView("chat")}><ArrowLeft />All tasks</Button></div><TaskPanel key={taskId} /></div> : <TaskboardPanel />)}
+        {page === "tasks" && (isMobile && view === "task" && taskId
+          ? <div className="page-detail"><div className="page-detail-back"><Button variant="ghost" size="sm" onClick={() => setView("chat")}><ArrowLeft />All tasks</Button></div><TaskPanel key={taskId} /></div>
+          : <div className="task-work-items-layout" data-detail={view === "task" && Boolean(taskId)}>
+              <section className="task-work-items-list" aria-label="Task list"><TaskboardPanel detailOpen={view === "task" && Boolean(taskId)} /></section>
+              {view === "task" && taskId && <aside className="task-work-item-detail" aria-label="Task details"><TaskPanel key={taskId} onClose={() => setView("chat")} /></aside>}
+            </div>)}
         {page === "settings" && <SettingsPage section={settingsSection} onSectionChange={(section) => { setSettingsSection(section); navigateSettings(section); }} onBack={() => { setSettingsSection(undefined); backToSettings(); }} onClose={() => { if (isMobile && previousPage.current === "home" && !previousMobileChatOpen.current) openChats(); else goTo(previousPage.current); }} />}
       </Suspense></AttachmentPreviewLayout></div>
       </div>

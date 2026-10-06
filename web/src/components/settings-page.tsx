@@ -105,9 +105,13 @@ export function ProjectSettingsContent() {
       {projects.error && <p role="alert" className="settings-error">{projects.error.message}</p>}
     </SettingsSection>
     {project && <SettingsSection title="Project icon" description="Without an icon, the first letter of the project name appears over its gradient."><ProjectIconEditor key={project.id} project={project} /></SettingsSection>}
-    {project && <IntegrationsSettings key={project.id} embedded />}
     {project && <SettingsSection title="Task defaults"><SettingsGroup><SettingsRow label="Starting branch" description="Imported and manually created tasks start from the default branch."><code>{project.defaultBranch}</code></SettingsRow><SettingsRow label="Isolated worktrees" description="Each task gets its own boosted/* branch and execution directory."><span className="settings-value">Enabled</span></SettingsRow></SettingsGroup></SettingsSection>}
   </div>;
+}
+
+export function ProjectIntegrationsContent() {
+  const projectId = useAppStore((state) => state.selectedProjectId);
+  return projectId ? <div className="settings-content"><IntegrationsSettings key={projectId} embedded /></div> : <div className="settings-content"><p className="settings-empty">Open a project to manage its integrations.</p></div>;
 }
 
 function NotificationSettings() {

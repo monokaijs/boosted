@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, Check, CheckCircle2, ChevronDown, ChevronRight, CircleStop, ExternalLink, FileDiff, FolderOpen, GitBranch, ListChecks, ListTodo, LoaderCircle, Play, Plus, Send, Sparkles, TerminalSquare, UserRound } from "lucide-react";
+import { Bot, Check, CheckCircle2, ChevronDown, ChevronRight, CircleStop, ExternalLink, FileDiff, FolderOpen, GitBranch, ListChecks, ListTodo, LoaderCircle, Play, Plus, Send, Sparkles, TerminalSquare, UserRound, X } from "lucide-react";
 import { TaskMarkdown, type SaveCheckbox } from "@/components/assistant-ui/task-markdown";
+import { CodexQuestionForm } from "@/components/assistant-ui/codex-question-form";
 import { AttachmentPreview } from "@/components/attachment-preview";
 import { Badge } from "@/components/ui/badge";
 import { CodexModeSelect } from "@/components/assistant-ui/codex-mode-select";
@@ -15,7 +16,7 @@ import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import { useWorkspaceState } from "@/lib/workspace-state";
 import { conversationQueryOptions } from "@/lib/query-client";
 import { taskStatusMeta } from "@/lib/status";
-import type { CodexAccessOption, CodexCollaborationMode, TaskEvent } from "@/lib/types";
+import type { CodexAccessOption, CodexCollaborationMode, CodexQuestion, TaskEvent } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import "./chat-panel.css";
 
@@ -31,6 +32,21 @@ function taskDescriptionPreview(value: string) {
     .replace(/[`*_~]/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function questionsFromEvent(event: TaskEvent | undefined): CodexQuestion[] {
+  if (!Array.isArray(event?.payload.questions)) return [];
+  return event.payload.questions.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const question = value as Record<string, unknown>;
+    if (typeof question.id !== "string" || typeof question.question !== "string") return [];
+    const options = Array.isArray(question.options) ? question.options.flatMap((option) => {
+      if (!option || typeof option !== "object") return [];
+      const record = option as Record<string, unknown>;
+      return typeof record.label === "string" ? [{ label: record.label, description: typeof record.description === "string" ? record.description : "" }] : [];
+    }) : undefined;
+    return [{ id: question.id, header: typeof question.header === "string" ? question.header : "", question: question.question, options, isOther: question.isOther === true, isSecret: question.isSecret === true }];
+  });
 }
 
 function ToolEvent({ event }: { event: TaskEvent }) {
@@ -261,7 +277,7 @@ export function NewChatPanel() {
   );
 }
 
-export function TaskPanel() {
+export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
   const selectedTaskId = useAppStore((state) => state.selectedTaskId);
   const [message, setMessage] = useWorkspaceState(`task:${selectedTaskId ?? "none"}:draft`, "");
   const queryClient = useQueryClient();
@@ -270,6 +286,14 @@ export function TaskPanel() {
   const send = useMutation({
     mutationFn: () => api.sendMessage(selectedTaskId!, message.trim()),
     onSuccess: () => { setMessage(""); void queryClient.invalidateQueries({ queryKey: ["events", selectedTaskId] }); void queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] }); },
+  });
+  const answerQuestions = useMutation({
+    mutationFn: (answers: Record<string, { answers: string[] }>) => api.answerTaskQuestions(selectedTaskId!, answers),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["events", selectedTaskId] });
+      void queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] });
+      void queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
   });
   const startPlanning = useMutation({
     mutationFn: () => api.startTaskPlan(selectedTaskId!),
@@ -293,6 +317,8 @@ export function TaskPanel() {
   const meta = task.data ? taskStatusMeta[task.data.status] : undefined;
   const StatusIcon = meta?.icon;
   const active = task.data?.status === "planning" || task.data?.status === "running";
+  const questionEvent = task.data?.status === "needs_input" ? [...ordered].reverse().find((event) => questionsFromEvent(event).length > 0) : undefined;
+  const pendingQuestions = questionsFromEvent(questionEvent);
 
   async function saveCheckbox(target: string, recordId: string | undefined, edit: Parameters<SaveCheckbox>[0]) {
     try { await api.toggleMarkdownCheckbox(`/tasks/${encodeURIComponent(selectedTaskId!)}`, target, recordId, edit); }
@@ -328,6 +354,7 @@ export function TaskPanel() {
             </div>
             {task.data.status === "queued" && <Button size="sm" onClick={() => startPlanning.mutate()} disabled={startPlanning.isPending}>{startPlanning.isPending ? <LoaderCircle className="animate-spin" /> : <Sparkles />}Start planning</Button>}
             {active && <Button variant="ghost" size="icon-sm" onClick={() => stop.mutate()} title="Stop"><CircleStop /></Button>}
+            {onClose && <Button variant="ghost" size="icon-sm" aria-label="Close task details" onClick={onClose}><X /></Button>}
           </div>
           {startPlanning.error && <p className="mx-auto mt-2 max-w-3xl text-xs text-destructive">{startPlanning.error.message}</p>}
         </section>
@@ -353,11 +380,12 @@ export function TaskPanel() {
           <div className="mb-1 flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground"><span>Task chat</span><span className="h-px flex-1 bg-border" /></div>
           {ordered.length === 0 && events.isLoading && <div className="py-16 text-center text-xs text-muted-foreground">Loading conversation…</div>}
           {ordered.map((event) => <TimelineEvent key={event.id} event={event} saveCheckbox={!active && ["user_message", "agent_message", "assistant_message"].includes(event.kind) ? (edit) => saveCheckbox("event", String(event.id), edit) : undefined} />)}
+          {questionEvent && pendingQuestions.length > 0 && <div className="my-3"><CodexQuestionForm requestId={`${selectedTaskId}:${questionEvent.id}`} questions={pendingQuestions} onSubmit={async (answers) => { await answerQuestions.mutateAsync(answers); }} /></div>}
           {active && <div className="flex items-center gap-2 py-3 text-xs text-muted-foreground"><LoaderCircle className="size-3.5 animate-spin text-primary" />Codex is working…</div>}
           {task.data?.status === "review" && <div className="my-4 flex items-center gap-2 rounded-lg border border-success/25 bg-success/10 p-3 text-xs text-success"><CheckCircle2 className="size-4" />Execution finished. Review the Git changes before marking the task done.</div>}
         </div>
       </ScrollArea>
-      <form className="chat-composer-shell bg-background/25 p-3" onSubmit={submit}>
+      {pendingQuestions.length === 0 && <form className="chat-composer-shell bg-background/25 p-3" onSubmit={submit}>
         <div className="mx-auto flex max-w-3xl items-end gap-2 rounded-lg border border-input bg-background/60 p-2 focus-within:border-primary/70 focus-within:ring-2 focus-within:ring-primary/15">
           <Textarea
             className="min-h-10 flex-1 border-0 bg-transparent p-1.5 shadow-none focus-visible:border-0 focus-visible:ring-0"
@@ -369,7 +397,7 @@ export function TaskPanel() {
           <Button type="button" onClick={sendMessage} size="icon" aria-label="Send message" disabled={!message.trim() || send.isPending}><Send /></Button>
         </div>
         {send.error && <p className="mx-auto mt-1.5 max-w-3xl text-xs text-destructive">{send.error.message}</p>}
-      </form>
+      </form>}
       </div>
     </WorkspaceFileProvider>
   );

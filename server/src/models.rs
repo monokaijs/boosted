@@ -384,6 +384,10 @@ pub struct MessageCreate {
     pub message: String,
 }
 #[derive(Debug, Deserialize)]
+pub struct TaskAnswersCreate {
+    pub answers: Value,
+}
+#[derive(Debug, Deserialize)]
 pub struct PlanApprove {
     pub revision: i64,
 }

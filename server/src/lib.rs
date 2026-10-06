@@ -143,6 +143,7 @@ struct EmbeddedWeb;
 struct PendingInput {
     request_id: Value,
     question_ids: Vec<String>,
+    questions: Vec<Value>,
     client: CodexClient,
     resume_status: String,
 }
@@ -552,6 +553,7 @@ fn router(
             get(download_task_attachment),
         )
         .route("/tasks/{id}/messages", post(send_task_message))
+        .route("/tasks/{id}/answers", post(answer_task_questions))
         .route("/tasks/{id}/plan", post(start_task_plan))
         .route("/tasks/{id}/plan/approve", post(approve_plan))
         .route("/tasks/{id}/stop", post(stop_task))
@@ -2842,6 +2844,100 @@ async fn send_task_message(
     Ok(Json(state.db.task(&id).await?))
 }
 
+fn validated_task_answers(question_ids: &[String], input: &Value) -> AppResult<Value> {
+    let answers = input
+        .as_object()
+        .ok_or_else(|| AppError::BadRequest("Question answers are required".into()))?;
+    if answers.len() != question_ids.len()
+        || question_ids.iter().any(|id| {
+            answers
+                .get(id)
+                .and_then(|value| value["answers"].as_array())
+                .is_none_or(|values| {
+                    values.is_empty()
+                        || values.iter().any(|value| {
+                            !value
+                                .as_str()
+                                .is_some_and(|answer| !answer.trim().is_empty())
+                        })
+                })
+        })
+    {
+        return Err(AppError::BadRequest(
+            "Provide an answer for each question".into(),
+        ));
+    }
+    Ok(json!({"answers":answers}))
+}
+
+fn task_answer_summary(questions: &[Value], answers: &Value) -> String {
+    let values = answers.as_object();
+    questions
+        .iter()
+        .filter_map(|question| {
+            let id = question["id"].as_str()?;
+            let label = question["question"].as_str().unwrap_or("Codex question");
+            let answer = values?.get(id)?["answers"]
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(format!("**{label}**\n\n{answer}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+async fn answer_task_questions(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthUser>,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<TaskAnswersCreate>,
+) -> AppResult<Json<Task>> {
+    let pending = state
+        .pending_inputs
+        .write()
+        .await
+        .remove(&id)
+        .ok_or_else(|| AppError::Conflict("Codex is no longer waiting for input".into()))?;
+    let response = match validated_task_answers(&pending.question_ids, &input.answers) {
+        Ok(response) => response,
+        Err(error) => {
+            state
+                .pending_inputs
+                .write()
+                .await
+                .insert(id.clone(), pending);
+            return Err(error);
+        }
+    };
+    if let Err(error) = pending
+        .client
+        .respond(pending.request_id.clone(), response)
+        .await
+    {
+        state
+            .pending_inputs
+            .write()
+            .await
+            .insert(id.clone(), pending);
+        return Err(error);
+    }
+    state
+        .event(
+            &id,
+            "user_message",
+            Some(&user.id),
+            json!({"text":task_answer_summary(&pending.questions, &input.answers),"questions":pending.questions.clone(),"answers":input.answers}),
+        )
+        .await?;
+    state
+        .set_task_state(&id, &pending.resume_status, None)
+        .await?;
+    Ok(Json(state.db.task(&id).await?))
+}
+
 async fn start_task_plan(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
@@ -3598,21 +3694,21 @@ async fn consume_turn(
             }
             "item/tool/requestUserInput" => {
                 let request_id = message.get("id").cloned().unwrap_or_else(|| json!(0));
-                let question_ids = params
+                let questions = params
                     .get("questions")
                     .and_then(Value::as_array)
-                    .map(|questions| {
-                        questions
-                            .iter()
-                            .filter_map(|q| q.get("id").and_then(Value::as_str).map(str::to_string))
-                            .collect()
-                    })
+                    .cloned()
                     .unwrap_or_default();
+                let question_ids = questions
+                    .iter()
+                    .filter_map(|q| q.get("id").and_then(Value::as_str).map(str::to_string))
+                    .collect();
                 state.pending_inputs.write().await.insert(
                     task_id.into(),
                     PendingInput {
                         request_id,
                         question_ids,
+                        questions: questions.clone(),
                         client: client.clone(),
                         resume_status: if mode == "plan" {
                             "planning".into()
@@ -3627,7 +3723,12 @@ async fn consume_turn(
                     .and_then(Value::as_str)
                     .unwrap_or("Codex needs more information.");
                 let _ = state
-                    .event(task_id, "agent_message", None, json!({"text":question}))
+                    .event(
+                        task_id,
+                        "agent_message",
+                        None,
+                        json!({"text":question,"questions":questions}),
+                    )
                     .await;
             }
             "turn/completed" => {
@@ -3826,6 +3927,28 @@ mod tests {
         assert_eq!(
             normalize_steps(&json!([{"step":"Build","status":"inProgress"}]))[0]["status"],
             "in_progress"
+        );
+    }
+    #[test]
+    fn task_question_answers_keep_each_choice_scoped_to_its_question() {
+        let ids = vec!["privacy".into(), "analytics".into()];
+        let answers = json!({
+            "privacy":{"answers":["Keep required cookies only"]},
+            "analytics":{"answers":["Enable after opt-in"]}
+        });
+        assert_eq!(
+            validated_task_answers(&ids, &answers).unwrap(),
+            json!({"answers":answers})
+        );
+        let questions = vec![
+            json!({"id":"privacy","question":"Privacy behavior?"}),
+            json!({"id":"analytics","question":"Analytics behavior?"}),
+        ];
+        let summary = task_answer_summary(&questions, &answers);
+        assert!(summary.contains("**Privacy behavior?**\n\nKeep required cookies only"));
+        assert!(summary.contains("**Analytics behavior?**\n\nEnable after opt-in"));
+        assert!(
+            validated_task_answers(&ids, &json!({"privacy":{"answers":["Only one"]}})).is_err()
         );
     }
     #[test]

@@ -69,7 +69,7 @@ function TaskListRow({ task }: { task: Task }) {
   );
 }
 
-export function TaskboardPanel() {
+export function TaskboardPanel({ detailOpen = false }: { detailOpen?: boolean }) {
   const [view, setView] = useState<"board" | "list">(() => localStorage.getItem("boosted.taskboard.view") === "list" ? "list" : "board");
   const projectId = useAppStore((state) => state.selectedProjectId);
   const queryClient = useQueryClient();
@@ -91,17 +91,17 @@ export function TaskboardPanel() {
       <div className="panel-header">
         <div className="panel-title"><KanbanSquare className="size-3.5" />Taskboard</div>
         <div className="ml-auto flex items-center gap-1.5">
-          <div className="flex items-center rounded-md bg-background/60 p-0.5" aria-label="Taskboard view">
+          {!detailOpen && <div className="flex items-center rounded-md bg-background/60 p-0.5" aria-label="Taskboard view">
             <Button size="icon-sm" variant="ghost" className={cn("size-6", view === "board" && "bg-accent text-foreground")} aria-label="Board view" aria-pressed={view === "board"} title="Board view" onClick={() => selectView("board")}><LayoutGrid /></Button>
             <Button size="icon-sm" variant="ghost" className={cn("size-6", view === "list" && "bg-accent text-foreground")} aria-label="List view" aria-pressed={view === "list"} title="List view" onClick={() => selectView("list")}><List /></Button>
-          </div>
+          </div>}
           <Button size="sm" variant="ghost" onClick={() => window.dispatchEvent(new CustomEvent("boosted:new-task"))}><Plus />Task</Button>
         </div>
       </div>
       <ScrollArea className="min-h-0 flex-1">
         {tasks.isLoading && <div className="px-3 py-10 text-center text-xs text-muted-foreground">Loading tasks…</div>}
-        {!tasks.isLoading && view === "board" && <DndContext sensors={sensors} onDragEnd={dragEnd}><div className="taskboard-grid grid min-h-full grid-cols-[repeat(auto-fit,minmax(min(240px,100%),1fr))] content-start gap-2 p-3">{boardStatuses.map((status) => <BoardColumn key={status} status={status} tasks={(tasks.data ?? []).filter((task) => task.status === status)} />)}</div></DndContext>}
-        {!tasks.isLoading && view === "list" && <div className="taskboard-list min-h-full p-3"><div className="overflow-hidden rounded-lg border border-border bg-background/20">{(tasks.data ?? []).map((task) => <TaskListRow key={task.id} task={task} />)}{tasks.data?.length === 0 && <div className="px-3 py-12 text-center text-xs text-muted-foreground">No tasks yet</div>}</div></div>}
+        {!tasks.isLoading && view === "board" && !detailOpen && <DndContext sensors={sensors} onDragEnd={dragEnd}><div className="taskboard-grid grid min-h-full grid-cols-[repeat(auto-fit,minmax(min(240px,100%),1fr))] content-start gap-2 p-3">{boardStatuses.map((status) => <BoardColumn key={status} status={status} tasks={(tasks.data ?? []).filter((task) => task.status === status)} />)}</div></DndContext>}
+        {!tasks.isLoading && (view === "list" || detailOpen) && <div className="taskboard-list min-h-full p-3"><div className="overflow-hidden rounded-lg border border-border bg-background/20">{(tasks.data ?? []).map((task) => <TaskListRow key={task.id} task={task} />)}{tasks.data?.length === 0 && <div className="px-3 py-12 text-center text-xs text-muted-foreground">No tasks yet</div>}</div></div>}
       </ScrollArea>
       {move.error && <div className="border-t border-border px-3 py-2 text-xs text-destructive">{move.error.message}</div>}
     </div>

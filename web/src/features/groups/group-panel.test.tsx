@@ -41,6 +41,15 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('group conversations', () => {
+  it('uses the assigned project avatar for the group', async () => {
+    const icon = 'data:image/png;base64,iVBORw0KGgo=';
+    mocks.projects.mockResolvedValue([{ id: 'project', name: 'Project', icon }]);
+    mocks.featureRequest.mockResolvedValue({ ...base, projectId: 'project' });
+    const { container } = renderWithQuery(<GroupPanel groupId="g" />);
+    await screen.findByRole('heading', { name: 'Team' });
+    await waitFor(() => expect(container.querySelector('[data-slot="project-avatar"] img')).toHaveAttribute('src', icon));
+    expect(container.querySelector('[data-slot="group-avatar"]')).toBeNull();
+  });
   it('opens and switches coding chats beside the group without losing its draft or navigation', async () => {
     useAppStore.setState({ selectedGroupId: 'g', selectedCodexChatId: 'previous-chat' });
     mocks.featureRequest.mockResolvedValue({ ...base, executions: [

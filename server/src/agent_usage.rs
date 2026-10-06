@@ -80,12 +80,34 @@ pub(crate) async fn record_scoped(
     // `last` is new activity; do not charge their entire old history to today.
     let last = &params["tokenUsage"]["last"];
     let baseline = if !include_agent {
-        match (last["totalTokens"].as_i64(), last["inputTokens"].as_i64(), last["cachedInputTokens"].as_i64(), last["outputTokens"].as_i64(), input, cached, output) {
-            (Some(t),Some(i),Some(c),Some(o),Some(ti),Some(tc),Some(to))
-                if t >= 0 && i >= 0 && c >= 0 && o >= 0 && c <= i && i.checked_add(o) == Some(t) && t <= total && i <= ti && c <= tc && o <= to => (total-t,Some(ti-i),Some(tc-c),Some(to-o)),
-            _ => (0,None,None,None),
+        match (
+            last["totalTokens"].as_i64(),
+            last["inputTokens"].as_i64(),
+            last["cachedInputTokens"].as_i64(),
+            last["outputTokens"].as_i64(),
+            input,
+            cached,
+            output,
+        ) {
+            (Some(t), Some(i), Some(c), Some(o), Some(ti), Some(tc), Some(to))
+                if t >= 0
+                    && i >= 0
+                    && c >= 0
+                    && o >= 0
+                    && c <= i
+                    && i.checked_add(o) == Some(t)
+                    && t <= total
+                    && i <= ti
+                    && c <= tc
+                    && o <= to =>
+            {
+                (total - t, Some(ti - i), Some(tc - c), Some(to - o))
+            }
+            _ => (0, None, None, None),
         }
-    } else { (0,None,None,None) };
+    } else {
+        (0, None, None, None)
+    };
     // Take the SQLite write lock before reading the watermark.
     sqlx::query("INSERT OR IGNORE INTO agent_usage_threads(thread_id,total_tokens,input_tokens,cached_tokens,output_tokens) VALUES(?,?,?,?,?)")
         .bind(thread)
@@ -210,65 +232,130 @@ mod tests {
     #[tokio::test]
     async fn detailed_usage_attributes_increments_and_child_runs_without_duplicates() {
         let root = tempfile::tempdir().unwrap();
-        let db = Database::connect(&root.path().join("usage.db")).await.unwrap();
+        let db = Database::connect(&root.path().join("usage.db"))
+            .await
+            .unwrap();
         for group in ["a", "b"] {
-            sqlx::query("INSERT INTO groups(id,group_id,data) VALUES(?,?,?)").bind(group).bind(group).bind("{}").execute(&db.pool).await.unwrap();
+            sqlx::query("INSERT INTO groups(id,group_id,data) VALUES(?,?,?)")
+                .bind(group)
+                .bind(group)
+                .bind("{}")
+                .execute(&db.pool)
+                .await
+                .unwrap();
         }
         let usage = |input, cached, output| json!({"tokenUsage":{"total":{"totalTokens":input+output,"inputTokens":input,"cachedInputTokens":cached,"outputTokens":output}}});
         for _ in 0..2 {
-            record_scoped(&db,"pock","shared",&usage(80,50,20),Some("a"),true).await.unwrap();
+            record_scoped(&db, "pock", "shared", &usage(80, 50, 20), Some("a"), true)
+                .await
+                .unwrap();
         }
-        record_scoped(&db,"pock","shared",&usage(120,70,40),Some("b"),true).await.unwrap();
-        record_scoped(&db,"pock","child",&usage(200,150,50),Some("a"),false).await.unwrap();
-        let rows = sqlx::query("SELECT * FROM group_usage_buckets ORDER BY group_id").fetch_all(&db.pool).await.unwrap();
-        assert_eq!(rows.len(),2);
-        for (row, expected) in rows.iter().zip([[350,280,200,70],[60,40,20,20]]) {
-            for (field, expected) in ["tokens","input_tokens","cached_tokens","output_tokens"].iter().zip(expected) {
-                assert_eq!(row.get::<i64,_>(*field),expected);
+        record_scoped(&db, "pock", "shared", &usage(120, 70, 40), Some("b"), true)
+            .await
+            .unwrap();
+        record_scoped(&db, "pock", "child", &usage(200, 150, 50), Some("a"), false)
+            .await
+            .unwrap();
+        let rows = sqlx::query("SELECT * FROM group_usage_buckets ORDER BY group_id")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        for (row, expected) in rows.iter().zip([[350, 280, 200, 70], [60, 40, 20, 20]]) {
+            for (field, expected) in ["tokens", "input_tokens", "cached_tokens", "output_tokens"]
+                .iter()
+                .zip(expected)
+            {
+                assert_eq!(row.get::<i64, _>(*field), expected);
             }
-            assert_eq!(row.get::<i64,_>("detailed_tokens"),row.get::<i64,_>("tokens"));
+            assert_eq!(
+                row.get::<i64, _>("detailed_tokens"),
+                row.get::<i64, _>("tokens")
+            );
         }
-        let total: i64 = sqlx::query_scalar("SELECT SUM(tokens) FROM agent_usage_buckets").fetch_one(&db.pool).await.unwrap();
-        assert_eq!(total,160);
-        sqlx::query("DELETE FROM groups WHERE id='a'").execute(&db.pool).await.unwrap();
-        record_scoped(&db,"pock","late",&usage(100,80,30),Some("a"),false).await.unwrap();
-        let count: i64 = sqlx::query_scalar("SELECT SUM(tokens) FROM group_usage_buckets WHERE group_id='a'").fetch_one(&db.pool).await.unwrap();
-        assert_eq!(count,350);
+        let total: i64 = sqlx::query_scalar("SELECT SUM(tokens) FROM agent_usage_buckets")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(total, 160);
+        sqlx::query("DELETE FROM groups WHERE id='a'")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        record_scoped(&db, "pock", "late", &usage(100, 80, 30), Some("a"), false)
+            .await
+            .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT SUM(tokens) FROM group_usage_buckets WHERE group_id='a'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 350);
     }
 
     #[tokio::test]
     async fn legacy_totals_do_not_invent_a_breakdown_and_migration_is_repeatable() {
         let root = tempfile::tempdir().unwrap();
-        let db = Database::connect(&root.path().join("usage.db")).await.unwrap();
+        let db = Database::connect(&root.path().join("usage.db"))
+            .await
+            .unwrap();
         migrate(&db).await.unwrap();
-        record(&db,"pock","legacy",&json!({"tokenUsage":{"total":{"totalTokens":100}}})).await.unwrap();
-        let usage = |input,cached,output| json!({"tokenUsage":{"total":{"totalTokens":input+output,"inputTokens":input,"cachedInputTokens":cached,"outputTokens":output}}});
-        record(&db,"pock","legacy",&usage(120,80,40)).await.unwrap();
-        record(&db,"pock","legacy",&usage(150,100,50)).await.unwrap();
+        record(
+            &db,
+            "pock",
+            "legacy",
+            &json!({"tokenUsage":{"total":{"totalTokens":100}}}),
+        )
+        .await
+        .unwrap();
+        let usage = |input, cached, output| json!({"tokenUsage":{"total":{"totalTokens":input+output,"inputTokens":input,"cachedInputTokens":cached,"outputTokens":output}}});
+        record(&db, "pock", "legacy", &usage(120, 80, 40))
+            .await
+            .unwrap();
+        record(&db, "pock", "legacy", &usage(150, 100, 50))
+            .await
+            .unwrap();
         // A regressing notification must not lower any counter.
-        record(&db,"pock","legacy",&usage(120,80,40)).await.unwrap();
-        let row = sqlx::query("SELECT * FROM agent_usage_buckets").fetch_one(&db.pool).await.unwrap();
-        assert_eq!(row.get::<i64,_>("tokens"),200);
-        assert_eq!(row.get::<i64,_>("detailed_tokens"),40);
-        assert_eq!(row.get::<i64,_>("input_tokens"),30);
-        assert_eq!(row.get::<i64,_>("cached_tokens"),20);
-        assert_eq!(row.get::<i64,_>("output_tokens"),10);
+        record(&db, "pock", "legacy", &usage(120, 80, 40))
+            .await
+            .unwrap();
+        let row = sqlx::query("SELECT * FROM agent_usage_buckets")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<i64, _>("tokens"), 200);
+        assert_eq!(row.get::<i64, _>("detailed_tokens"), 40);
+        assert_eq!(row.get::<i64, _>("input_tokens"), 30);
+        assert_eq!(row.get::<i64, _>("cached_tokens"), 20);
+        assert_eq!(row.get::<i64, _>("output_tokens"), 10);
     }
 
     #[tokio::test]
     async fn an_existing_child_chat_counts_new_activity_instead_of_its_old_history() {
         let root = tempfile::tempdir().unwrap();
-        let db = Database::connect(&root.path().join("usage.db")).await.unwrap();
-        sqlx::query("INSERT INTO groups VALUES('g','g','{}')").execute(&db.pool).await.unwrap();
+        let db = Database::connect(&root.path().join("usage.db"))
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO groups VALUES('g','g','{}')")
+            .execute(&db.pool)
+            .await
+            .unwrap();
         let usage = json!({"tokenUsage":{
             "total":{"totalTokens":1250,"inputTokens":1000,"cachedInputTokens":750,"outputTokens":250},
             "last":{"totalTokens":250,"inputTokens":200,"cachedInputTokens":150,"outputTokens":50}
         }});
-        for _ in 0..2 { record_scoped(&db,"pock","old-chat",&usage,Some("g"),false).await.unwrap(); }
-        let row = sqlx::query("SELECT * FROM group_usage_buckets").fetch_one(&db.pool).await.unwrap();
-        assert_eq!(row.get::<i64,_>("tokens"),250);
-        assert_eq!(row.get::<i64,_>("cached_tokens"),150);
-        assert_eq!(row.get::<i64,_>("detailed_tokens"),250);
+        for _ in 0..2 {
+            record_scoped(&db, "pock", "old-chat", &usage, Some("g"), false)
+                .await
+                .unwrap();
+        }
+        let row = sqlx::query("SELECT * FROM group_usage_buckets")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<i64, _>("tokens"), 250);
+        assert_eq!(row.get::<i64, _>("cached_tokens"), 150);
+        assert_eq!(row.get::<i64, _>("detailed_tokens"), 250);
     }
 
     #[tokio::test]

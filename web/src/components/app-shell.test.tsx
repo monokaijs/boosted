@@ -26,7 +26,7 @@ vi.mock("@/components/settings-page", () => ({ SettingsPage: ({ section, onClose
 vi.mock("@/components/project-settings-dialog", () => ({ ProjectSettingsDialog: ({ project, open }: { project?: Project; open: boolean }) => open ? <div role="dialog">Project settings for {project?.name}</div> : null }));
 vi.mock("@/components/create-dialogs", () => ({ ForcePasswordDialog: () => null, NewTaskDialog: () => null, OpenProjectDialog: () => null }));
 vi.mock("@/components/machine-manager", () => ({ MachineSwitcher: () => <span>Test machine</span> }));
-vi.mock("@/components/panels/chat-panel", () => ({ NewChatPanel: () => <h1>Start a conversation</h1>, TaskPanel: () => <p>Task detail content</p> }));
+vi.mock("@/components/panels/chat-panel", () => ({ NewChatPanel: () => <h1>Start a conversation</h1>, TaskPanel: ({ onClose }: { onClose?: () => void }) => <><p>Task detail content</p>{onClose && <button onClick={onClose}>Close task details</button>}</> }));
 vi.mock("@/components/panels/codex-chat-panel", () => ({ CodexChatPanel: ({ threadId }: { threadId: string }) => <p>Conversation {threadId}</p> }));
 vi.mock("@/components/panels/editor-panel", () => ({ EditorPanel: () => <p>Editor content</p> }));
 vi.mock("@/components/panels/files-panel", () => ({ FilesPanel: () => <p>Files content</p> }));
@@ -370,6 +370,20 @@ describe("page navigation and conversations", () => {
     expect(screen.queryByRole("complementary", { name: "Navigation and chats" })).not.toBeInTheDocument();
     act(() => { window.history.replaceState(null, "", "/#projects"); window.dispatchEvent(new HashChangeEvent("hashchange")); });
     expect(screen.getByRole("region", { name: "Projects page" })).toBeInTheDocument();
+  });
+
+  it("keeps the desktop task list visible beside the selected task", async () => {
+    renderShell();
+    goTo("Tasks");
+    act(() => {
+      useAppStore.setState({ selectedTaskId: "task-a" });
+      window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: "task" }));
+    });
+    expect(screen.getByText("Task board content")).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "Task details" })).toHaveTextContent("Task detail content");
+    fireEvent.click(screen.getByRole("button", { name: "Close task details" }));
+    expect(screen.getByText("Task board content")).toBeInTheDocument();
+    expect(screen.queryByText("Task detail content")).not.toBeInTheDocument();
   });
 
   it("opens tools on the left while keeping the conversation and file preview in the main pane", async () => {

@@ -22,7 +22,7 @@ vi.mock("@/features/agents/lib/api-client", () => ({ apiClient: {
   providerAccounts: { list: mocks.accounts, limits: mocks.limits, models: mocks.models, update: mocks.updateAccount },
 } }));
 
-import { ProjectSettingsContent, SettingsPage, type SettingsSectionId } from "./settings-page";
+import { SettingsPage, type SettingsSectionId } from "./settings-page";
 import { ProjectSettingsDialog } from "./project-settings-dialog";
 import { readNotificationSettings } from "@/lib/notifications";
 
@@ -35,10 +35,10 @@ function renderPage(initial: SettingsSectionId | undefined = "connections") {
   }
   return render(<QueryClientProvider client={client}><Harness /></QueryClientProvider>);
 }
-function renderProjectSettings(contentOnly = false) {
+function renderProjectSettings() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const project = { id: "project-a", name: "Example", repoPath: "/repo/example", defaultBranch: "main", createdAt: "2026-10-01" };
-  return render(<QueryClientProvider client={client}>{contentOnly ? <ProjectSettingsContent /> : <ProjectSettingsDialog project={project} open onOpenChange={() => {}} />}</QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><ProjectSettingsDialog project={project} open onOpenChange={() => {}} /></QueryClientProvider>);
 }
 function selectSection(name: string) { fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name })); }
 afterEach(cleanup);
@@ -74,11 +74,14 @@ describe("settings page", () => {
     expect(screen.getByText("Machine settings")).toBeInTheDocument();
     expect(mocks.integrations).not.toHaveBeenCalled();
     page.unmount();
-    renderProjectSettings(true);
+    renderProjectSettings();
+    expect(await screen.findByRole("heading", { name: "Project details" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Installed integrations" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Integrations" }));
     expect(await screen.findByRole("heading", { name: "Installed integrations" })).toBeInTheDocument();
     expect(mocks.integrations).toHaveBeenCalledWith("project-a");
     expect(screen.queryByRole("heading", { name: "GitLab connections" })).not.toBeInTheDocument();
-    expect(screen.getAllByText(/Add a GitLab connection in Settings/)).toHaveLength(1);
+    expect(await screen.findAllByText(/Add a GitLab connection in Settings/)).toHaveLength(1);
   });
 
   it("places analytics under Settings and mounts only the selected usage scope", async () => {

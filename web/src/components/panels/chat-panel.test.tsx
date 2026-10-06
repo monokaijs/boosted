@@ -8,7 +8,7 @@ import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import { applyCodexEvent } from "@/lib/codex-chat-state";
 import type { Task, TaskEvent } from "@/lib/types";
 
-const api = vi.hoisted(() => ({ toggleMarkdownCheckbox: vi.fn(), projects: vi.fn(), projectBranches: vi.fn(), projectBranch: vi.fn(), switchProjectBranch: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexApprovals: vi.fn(), codexAttachment: vi.fn(), uploadCodexAttachment: vi.fn(), workspaceFile: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn() }));
+const api = vi.hoisted(() => ({ toggleMarkdownCheckbox: vi.fn(), projects: vi.fn(), projectBranches: vi.fn(), projectBranch: vi.fn(), switchProjectBranch: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexApprovals: vi.fn(), codexAttachment: vi.fn(), uploadCodexAttachment: vi.fn(), workspaceFile: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn(), answerTaskQuestions: vi.fn() }));
 vi.mock("@/lib/api", () => ({ api }));
 vi.mock("@/lib/api-context", () => ({ useBoostedApiClient: () => api }));
 import { NewChatPanel, TaskPanel } from "./chat-panel";
@@ -44,6 +44,7 @@ beforeEach(() => {
   api.startTaskPlan.mockResolvedValue(task);
   api.approvePlan.mockResolvedValue(task);
   api.sendMessage.mockResolvedValue(task);
+  api.answerTaskQuestions.mockResolvedValue(task);
   api.threadCodexOptions.mockImplementation(api.codexOptions);
   api.codexApprovals.mockResolvedValue([]);
   api.codexChat.mockResolvedValue({
@@ -373,6 +374,24 @@ describe("planning in chats", () => {
     renderPanel(<TaskPanel />);
     expect(await screen.findByText("Plan approved")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve and run" })).not.toBeInTheDocument();
+  });
+
+  it("shows Codex choices with the normal question flow instead of a direct reply box", async () => {
+    api.task.mockResolvedValue({ ...task, status: "needs_input" });
+    api.taskEvents.mockResolvedValue([{ id: 7, taskId: "task-a", kind: "agent_message", createdAt: "now", payload: {
+      text: "Should skipping the banner enable analytics cookies?",
+      questions: [{ id: "analytics", header: "Analytics", question: "What should happen when no choice is saved?", options: [
+        { label: "Keep disabled", description: "Wait for explicit opt-in." },
+        { label: "Enable analytics", description: "Treat dismissal as consent." },
+      ] }],
+    } } satisfies TaskEvent]);
+    renderPanel(<TaskPanel />);
+    expect(await screen.findByText("Should skipping the banner enable analytics cookies?")).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Reply to Codex…")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Answer question" }));
+    fireEvent.click(await screen.findByRole("radio", { name: "Keep disabled" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send answers" }));
+    await waitFor(() => expect(api.answerTaskQuestions).toHaveBeenCalledWith("task-a", { analytics: { answers: ["Keep disabled"] } }));
   });
 });
 

@@ -223,6 +223,7 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   taskEvents: (id: string, after = 0) => request<TaskEvent[]>(`/tasks/${id}/events?after=${after}`),
   startTaskPlan: (id: string) => request<Task>(`/tasks/${id}/plan`, json("POST")),
   sendMessage: (id: string, message: string) => request<Task>(`/tasks/${id}/messages`, json("POST", { message })),
+  answerTaskQuestions: (id: string, answers: Record<string, { answers: string[] }>) => request<Task>(`/tasks/${id}/answers`, json("POST", { answers })),
   approvePlan: (id: string, revision: number) => request<Task>(`/tasks/${id}/plan/approve`, json("POST", { revision })),
   stopTask: (id: string) => request<Task>(`/tasks/${id}/stop`, json("POST")),
   setTaskStatus: (id: string, status: TaskStatus) => request<Task>(`/tasks/${id}/status`, json("PUT", { status })),
