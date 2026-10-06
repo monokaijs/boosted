@@ -1,0 +1,65 @@
+.codex-message-column {
+  width: 100%;
+  max-width: 736px;
+  min-width: 0;
+  margin-inline: auto;
+}
+
+.codex-thread-root .aui-markdown {
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.codex-message-composer .codex-composer-controls {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 28px auto minmax(0, 1fr) auto 32px;
+  align-items: center;
+  gap: 4px;
+}
+
+.codex-composer-controls .new-task-option {
+  min-height: 28px;
+  border-radius: 8px;
+}
+
+.codex-composer-controls .codex-model-option {
+  max-width: 100%;
+  justify-self: start;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.codex-model-option > span:first-of-type {
+  min-width: 0;
+}
+
+.codex-composer-controls .codex-mode-option,
+.codex-composer-controls .codex-access-option {
+  white-space: nowrap;
+}
+
+.codex-composer-controls .codex-send-button {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--chat-accent);
+  color: white;
+}
+
+.codex-send-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--chat-accent) 85%, white);
+}
+
+/* Split panes can be narrow even on a wide desktop window. */
+@container codex-thread (max-width: 520px) {
+  .codex-composer-controls .codex-effort-label {
+    display: none;
+  }
+}
+
+@container codex-thread (max-width: 360px) {
+  .codex-composer-controls .codex-mode-option > svg:first-child {
+    display: none;
+  }
+}

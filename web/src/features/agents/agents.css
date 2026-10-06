@@ -45,7 +45,7 @@
 
 .assistant-message-user,
 .assistant-message-send {
-  background-color: #7193bc;
+  background-color: var(--chat-accent);
 }
 
 .assistant-message-bubble .chat-markdown {

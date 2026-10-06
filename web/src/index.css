@@ -25,6 +25,7 @@
   --muted-foreground: #a0a0a0;
   --accent: #272727;
   --accent-foreground: #ededed;
+  --chat-accent: #7193bc;
   --destructive: #e16d75;
   --border: #2b2b2b;
   --input: var(--border-strong);
@@ -882,7 +883,7 @@ select {
     display: grid;
     min-width: 0;
     height: auto;
-    grid-template-columns: 28px auto minmax(0, 1fr) auto 1px 32px;
+    grid-template-columns: 28px auto minmax(0, 1fr) auto 32px;
     gap: 3px;
   }
 

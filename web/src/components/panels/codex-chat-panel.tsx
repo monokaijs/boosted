@@ -12,7 +12,7 @@ import {
   useAuiState,
   useExternalStoreRuntime,
 } from "@assistant-ui/react";
-import { ArrowDown, Bot, ChevronDown, ChevronRight, LoaderCircle, MessageSquareText, Plus, Send, Square, UserRound, Wrench, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Bot, ChevronDown, ChevronRight, LoaderCircle, MessageSquareText, Plus, Square, Wrench, X } from "lucide-react";
 import { CodexThreadLayout } from "./codex-thread-layout";
 import { CodexMessageText } from "@/components/assistant-ui/codex-message-content";
 import { CodexQuestionForm } from "@/components/assistant-ui/codex-question-form";
@@ -30,22 +30,22 @@ import { chatActivity, setCachedChatStatus } from "@/lib/codex-chat-status";
 import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import type { CodexAccessOption, CodexAttachment, CodexChatMessage, CodexChatThread, CodexCollaborationMode } from "@/lib/types";
 import "./chat-panel.css";
+import "./codex-chat-panel.css";
 
 function CodexSendButton({ disabled, hasAttachments, onSendAttachments }: { disabled: boolean; hasAttachments: boolean; onSendAttachments: () => void }) {
   const empty = useAuiState((state) => state.composer.isEmpty);
   return empty && hasAttachments
-    ? <Button type="button" size="icon-sm" title="Send message" disabled={disabled} onClick={onSendAttachments}><Send /></Button>
-    : <Button asChild size="icon-sm" disabled={disabled} title="Send message"><ComposerPrimitive.Send><Send /></ComposerPrimitive.Send></Button>;
+    ? <Button type="button" className="codex-send-button" size="icon-sm" title="Send message" disabled={disabled} onClick={onSendAttachments}><ArrowUp /></Button>
+    : <Button asChild className="codex-send-button" size="icon-sm" disabled={disabled} title="Send message"><ComposerPrimitive.Send><ArrowUp /></ComposerPrimitive.Send></Button>;
 }
 
 function UserMessage() {
   return (
-    <MessagePrimitive.Root className="chat-message-enter mx-auto flex w-full max-w-3xl justify-end gap-3 py-3">
-      <div className="min-w-0 max-w-[84%]">
-        <div className="mb-1 text-right text-[10px] text-muted-foreground">You</div>
-        <div className="selectable-text rounded-lg bg-primary/10 px-3 py-2 text-left text-[13px] leading-5"><CodexMessageText /></div>
+    <MessagePrimitive.Root className="chat-message-enter codex-message-column flex justify-end py-3">
+      <div className="min-w-0 max-w-[88%]">
+        <div className="mb-1 pr-4 text-right text-xs text-muted-foreground">You</div>
+        <div className="selectable-text rounded-[22px] bg-secondary px-4 py-2.5 text-left"><CodexMessageText /></div>
       </div>
-      <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border border-primary/20 bg-primary/10 text-primary"><UserRound className="size-3.5" /></div>
     </MessagePrimitive.Root>
   );
 }
@@ -55,16 +55,16 @@ function AssistantMessage() {
   const label = useAuiState((state) => String(state.message.metadata.custom.label ?? "Tool call"));
 
   if (kind === "system") {
-    return <MessagePrimitive.Root className="mx-auto w-full max-w-3xl py-2 pl-9 text-xs text-muted-foreground"><CodexMessageText /></MessagePrimitive.Root>;
+    return <MessagePrimitive.Root className="codex-message-column py-2 text-xs text-muted-foreground"><CodexMessageText /></MessagePrimitive.Root>;
   }
   if (kind === "tool" || kind === "reasoning") {
     return (
-      <MessagePrimitive.Root className="mx-auto w-full max-w-3xl py-0.5 pl-9">
-        <details className="group rounded-md border border-border/70 bg-secondary/20 text-xs">
-          <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-muted-foreground marker:hidden hover:text-foreground [&::-webkit-details-marker]:hidden">
+      <MessagePrimitive.Root className="codex-message-column py-0.5">
+        <details className="group rounded-xl bg-secondary/50 text-xs">
+          <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-muted-foreground marker:hidden hover:text-foreground [&::-webkit-details-marker]:hidden">
             <ChevronRight className="size-3 shrink-0 transition-transform group-open:rotate-90" />
             <Wrench className="size-3 shrink-0" />
-            <span className="truncate font-mono text-[10px]">{kind === "reasoning" ? "Reasoning summary" : label}</span>
+            <span className="min-w-0 truncate font-mono text-[11px]">{kind === "reasoning" ? "Reasoning summary" : label}</span>
           </summary>
           <div className="max-h-72 overflow-auto border-t border-border/50 px-3 py-2 text-xs"><CodexMessageText /></div>
         </details>
@@ -73,10 +73,12 @@ function AssistantMessage() {
   }
 
   return (
-    <MessagePrimitive.Root className="chat-message-enter mx-auto flex w-full max-w-3xl gap-3 py-3">
-      <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border border-border bg-secondary text-muted-foreground"><Bot className="size-3.5" /></div>
-      <div className="min-w-0 max-w-[calc(100%-2.25rem)] flex-1">
-        <div className="mb-1 text-[10px] text-muted-foreground">Codex</div>
+    <MessagePrimitive.Root className="chat-message-enter codex-message-column py-3">
+      <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
+        <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-secondary"><Bot className="size-3.5" /></span>
+        <span>Codex</span>
+      </div>
+      <div className="min-w-0">
         <CodexMessageText />
         <CodexAsyncQuestions />
       </div>
@@ -345,7 +347,7 @@ function CodexTranscript({ thread, onThreadChange }: { thread: CodexChatThread; 
         <CodexAsyncQuestionProvider value={{ requestScope: `${api.profileId}:${thread.chat.id}`, answered: answeredQuestions, reply: replyToQuestions }}>
         <CodexThreadLayout footer={<>
             <ThreadPrimitive.ScrollToBottom asChild behavior="smooth"><Button className="absolute -top-9 right-0 z-20 shrink-0 rounded-full shadow-lg disabled:hidden" variant="secondary" size="icon-sm" aria-label="Scroll to bottom" title="Scroll to bottom"><ArrowDown /></Button></ThreadPrimitive.ScrollToBottom>
-            <div className="mx-auto w-full max-w-3xl">
+            <div className="codex-message-column">
               <div className="codex-composer-requests">{approvals.data?.map((approval) => approval.method === "item/tool/requestUserInput"
                 ? <div key={approval.id} className="mb-2"><CodexQuestionForm requestId={`${api.profileId}:${thread.chat.id}:approval:${approval.id}`} questions={approval.params.questions ?? []} onSubmit={async (answers) => { await api.answerCodexQuestions(thread.chat.id, approval.id, answers); void approvals.refetch(); }} /></div>
                 : <div className="mb-2 rounded-md border border-border bg-secondary px-3 py-2 text-xs" key={approval.id}>
@@ -355,16 +357,16 @@ function CodexTranscript({ thread, onThreadChange }: { thread: CodexChatThread; 
               </div>)}
               {error && <div className="mb-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-[11px] text-destructive">{error}</div>}
               </div>
-              <ComposerPrimitive.Root className="rounded-lg border border-border p-2 focus-within:border-ring/60" onSubmit={(event) => {
+              <ComposerPrimitive.Root className="codex-message-composer rounded-[24px] border border-border/40 bg-secondary px-3 py-2 focus-within:border-ring" onSubmit={(event) => {
                 if (attachments.length > 0 && runtime.thread.composer.getState().isEmpty) { event.preventDefault(); sendAttachmentMessage(); }
               }}>
                 {attachments.length > 0 && <div className="mb-1.5 flex flex-wrap gap-1.5">{attachments.map((attachment) => <span key={attachment.id} className="relative inline-block"><WorkspaceAttachment attachment={{ name: attachment.name, mimeType: attachment.mimeType, uploadId: attachment.id }} compact /><button type="button" className="absolute right-1 top-1 rounded-full bg-background p-0.5 text-muted-foreground hover:text-foreground" aria-label={`Remove ${attachment.name}`} onClick={() => removeAttachment(attachment)}><X className="size-3" /></button></span>)}</div>}
-                <ComposerPrimitive.Input className="max-h-40 min-h-14 w-full resize-none bg-transparent px-1 py-1 text-[13px] leading-5 outline-none placeholder:text-muted-foreground" placeholder="Message Codex..." onPaste={pasteImages} onKeyDown={(event) => {
+                <ComposerPrimitive.Input className="block max-h-40 min-h-14 w-full resize-none bg-transparent px-1 py-1.5 text-sm leading-5 outline-none placeholder:text-muted-foreground" placeholder="Message Codex..." aria-label="Message Codex" onPaste={pasteImages} onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && attachments.length > 0 && runtime.thread.composer.getState().isEmpty) { event.preventDefault(); sendAttachmentMessage(); }
                 }} autoFocus />
-                <div className="codex-composer-controls mt-1 flex h-7 items-center gap-1 text-[10px] text-muted-foreground">
+                <div className="codex-composer-controls mt-1 text-xs text-muted-foreground">
                   <input ref={fileInputRef} className="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={uploadImages} />
-                  <Button type="button" variant="ghost" size="icon-sm" className="size-6" title={supportsImages ? "Attach images" : "Selected model does not support images"} disabled={!supportsImages || attachments.length >= 4 || isRunning || isUploading} onClick={() => fileInputRef.current?.click()}>{isUploading ? <LoaderCircle className="animate-spin" /> : <Plus />}</Button>
+                  <Button type="button" variant="ghost" size="icon-sm" className="size-7 rounded-full" title={supportsImages ? "Attach images" : "Selected model does not support images"} disabled={!supportsImages || attachments.length >= 4 || isRunning || isUploading} onClick={() => fileInputRef.current?.click()}>{isUploading ? <LoaderCircle className="animate-spin" /> : <Plus />}</Button>
                   <CodexModeSelect value={collaborationMode} onChange={setCollaborationMode} disabled={isRunning} />
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild><button type="button" className="new-task-option codex-model-option" aria-label="Codex model and reasoning"><Bot className="size-3.5" /><span className="max-w-40 truncate">{selectedModel?.displayName ?? (codexOptions.isLoading ? "Loading Codex…" : "Codex")}</span>{reasoningEffort && <span className="codex-effort-label capitalize text-muted-foreground">· {reasoningEffort}</span>}<ChevronDown /></button></DropdownMenuTrigger>
@@ -378,9 +380,8 @@ function CodexTranscript({ thread, onThreadChange }: { thread: CodexChatThread; 
                     <DropdownMenuTrigger asChild><button type="button" className="new-task-option codex-access-option ml-auto" aria-label="Codex access"><span>{selectedAccess?.label ?? "Full access"}</span><ChevronDown /></button></DropdownMenuTrigger>
                     <DropdownMenuContent align="end" side="top" className="w-72 max-w-[calc(100vw-1rem)]"><DropdownMenuLabel>Codex access</DropdownMenuLabel><DropdownMenuRadioGroup value={accessMode} onValueChange={selectAccess}>{codexOptions.data?.accessModes.map((entry) => <DropdownMenuRadioItem key={entry.id} value={entry.id}><span><span className="block font-medium text-foreground">{entry.label}</span><span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">{entry.description}</span></span></DropdownMenuRadioItem>)}</DropdownMenuRadioGroup></DropdownMenuContent>
                   </DropdownMenu>
-                  <span className="mx-1 h-4 w-px bg-border" />
                   <AuiIf condition={(state) => !state.thread.isRunning}><CodexSendButton disabled={!model || !reasoningEffort || isUploading} hasAttachments={attachments.length > 0} onSendAttachments={sendAttachmentMessage} /></AuiIf>
-                  <AuiIf condition={(state) => state.thread.isRunning}><Button asChild variant="secondary" size="icon-sm" title="Stop Codex"><ComposerPrimitive.Cancel><Square /></ComposerPrimitive.Cancel></Button></AuiIf>
+                  <AuiIf condition={(state) => state.thread.isRunning}><Button asChild variant="ghost" className="size-8 rounded-full" size="icon-sm" title="Stop Codex"><ComposerPrimitive.Cancel><Square className="size-3 fill-current" /></ComposerPrimitive.Cancel></Button></AuiIf>
                 </div>
               </ComposerPrimitive.Root>
             </div>
