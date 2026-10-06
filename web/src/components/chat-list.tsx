@@ -132,7 +132,7 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
             <button className={cn("chat-project-row", projectId === project.id && "is-current-project")} aria-label={`${expanded.has(project.id) ? "Collapse" : "Expand"} ${project.name}`} aria-expanded={expanded.has(project.id)} onClick={() => toggleProject(project.id)} title={project.repoPath}>
               {expanded.has(project.id) ? <ChevronDown className="project-chevron" /> : <ChevronRight className="project-chevron" />}<ProjectAvatar project={project} /><span>{project.name}</span>
             </button>
-            <Button variant="ghost" size="icon-sm" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} onClick={() => { useAppStore.getState().selectProject(project); onNewChat(); onClose(); }}><Plus /></Button>
+            <Button variant="ghost" size="icon-sm" className="chat-project-add" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} onClick={() => { useAppStore.getState().selectProject(project); onNewChat(); onClose(); }}><Plus /></Button>
           </div>
           {expanded.has(project.id) && <div>{entries.slice(0, visibleCounts[project.id] ?? 4).map((entry) => chatRow(entry, true))}{entries.length > (visibleCounts[project.id] ?? 4) && <button className="chat-list-row chat-list-child chat-show-all" onClick={() => setVisibleCounts((counts) => ({ ...counts, [project.id]: (counts[project.id] ?? 4) + 4 }))}><span>Load more</span></button>}</div>}
 

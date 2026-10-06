@@ -81,6 +81,9 @@
 .chat-project-heading { display: flex; align-items: center; gap: 2px; }
 .chat-project-heading > .chat-project-row { flex: 1; min-width: 0; }
 .chat-project-heading > button:last-child { flex: none; }
+.chat-project-heading > .chat-project-add { display: none; }
+.chat-project-heading:hover > .chat-project-add, .chat-project-heading:focus-within > .chat-project-add { display: inline-flex; }
+@media (max-width: 900px), (hover: none) { .chat-project-heading > .chat-project-add { display: inline-flex; } }
 .chat-list-row > .chat-unread-marker { width: 6px; height: 6px; min-width: 6px; flex: none; border-radius: 50%; background: var(--primary); }
 .chat-list-row.chat-list-child { padding-left: 31px; }
 .chat-new { margin-top: 0; }
