@@ -282,7 +282,14 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
   const selectedTaskId = useAppStore((state) => state.selectedTaskId);
   const [message, setMessage] = useWorkspaceState(`task:${selectedTaskId ?? "none"}:draft`, "");
   const queryClient = useQueryClient();
-  const task = useQuery({ ...conversationQueryOptions, queryKey: ["task", selectedTaskId], queryFn: () => api.task(selectedTaskId!), enabled: Boolean(selectedTaskId) });
+  const planRef = useRef<HTMLElement>(null);
+  const task = useQuery({
+    ...conversationQueryOptions,
+    queryKey: ["task", selectedTaskId],
+    queryFn: () => api.task(selectedTaskId!),
+    enabled: Boolean(selectedTaskId),
+    refetchInterval: (query) => query.state.data?.status === "planning" || query.state.data?.status === "running" ? 1_000 : false,
+  });
   const events = useQuery({ ...conversationQueryOptions, queryKey: ["events", selectedTaskId], queryFn: () => api.taskEvents(selectedTaskId!), enabled: Boolean(selectedTaskId), refetchInterval: task.data?.status === "running" || task.data?.status === "planning" ? 1_000 : false });
   const send = useMutation({
     mutationFn: () => api.sendMessage(selectedTaskId!, message.trim()),
@@ -320,6 +327,10 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
   const active = task.data?.status === "planning" || task.data?.status === "running";
   const questionEvent = task.data?.status === "needs_input" ? [...ordered].reverse().find((event) => questionsFromEvent(event).length > 0) : undefined;
   const pendingQuestions = questionsFromEvent(questionEvent);
+
+  useEffect(() => {
+    if (task.data?.status === "ready" && task.data.plan) planRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [task.data?.plan?.revision, task.data?.status]);
 
   async function saveCheckbox(target: string, recordId: string | undefined, edit: Parameters<SaveCheckbox>[0]) {
     try { await api.toggleMarkdownCheckbox(`/tasks/${encodeURIComponent(selectedTaskId!)}`, target, recordId, edit); }
@@ -364,7 +375,7 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
         <div className="mx-auto max-w-3xl py-3">
           {task.data && <section className="mb-4 rounded-lg border border-border bg-background/25 p-4"><div className="aui-markdown text-xs"><TaskMarkdown key={`${selectedTaskId}:description`} content={task.data.description} saveCheckbox={active ? undefined : (edit) => saveCheckbox("description", undefined, edit)} components={workspaceFileMarkdownComponents} urlTransform={workspaceMarkdownUrlTransform} /></div>{task.data.source && (task.data.source.externalUrl ? <a className="mt-3 inline-flex items-center gap-1.5 text-[11px] capitalize text-primary hover:underline" href={task.data.source.externalUrl} target="_blank" rel="noreferrer" onClick={(event) => { event.preventDefault(); void openExternalUrl(task.data!.source!.externalUrl!); }}>Imported from {task.data.source.provider} · {task.data.source.externalId}<ExternalLink className="size-3" /></a> : <span className="mt-3 inline-flex text-[11px] capitalize text-muted-foreground">Imported from {task.data.source.provider} · {task.data.source.externalId}</span>)}{task.data.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{task.data.attachments.map((attachment) => <AttachmentPreview key={attachment.id} name={attachment.name} mimeType={attachment.mimeType} sourceKey={`${task.data!.id}:${attachment.id}`} load={() => api.taskAttachment(task.data!.id, attachment.id)} />)}</div>}</section>}
           {task.data?.status === "queued" && <div className="mb-4 grid gap-2 rounded-lg border border-border bg-background/25 p-4"><div className="flex items-center gap-2 text-xs font-medium"><Sparkles className="size-4 text-primary" />Ready to plan</div><p className="text-xs leading-5 text-muted-foreground">Start planning to let Codex inspect the repository and turn this task into concrete steps. You can answer any follow-up questions here.</p></div>}
-          {task.data?.plan && <section className="mb-4 rounded-lg border border-border bg-background/25 p-3" aria-label="Task plan">
+          {task.data?.plan && <section ref={planRef} className="mb-4 rounded-lg border border-border bg-background/25 p-3" aria-label="Task plan">
             <div className="mb-2 flex items-center gap-2">
               <ListChecks className="size-4 text-muted-foreground" /><h2 className="text-xs font-medium">Plan · revision {task.data.plan.revision}</h2>
               {task.data.status === "ready" && <Button className="ml-auto" size="sm" onClick={() => approve.mutate()} disabled={approve.isPending}>{approve.isPending ? <LoaderCircle className="animate-spin" /> : <Play />}Approve and run</Button>}

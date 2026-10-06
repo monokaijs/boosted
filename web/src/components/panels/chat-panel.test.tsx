@@ -75,6 +75,19 @@ it("opens an imported task in the system browser", async () => {
   expect(openExternalUrl).toHaveBeenCalledWith("https://gitlab.example/group/project/-/work_items/42");
 });
 
+it("refreshes an active planning task and brings its completed plan into view", async () => {
+  const scrollIntoView = vi.fn();
+  HTMLElement.prototype.scrollIntoView = scrollIntoView;
+  api.task
+    .mockResolvedValueOnce({ ...task, status: "planning", plan: undefined })
+    .mockResolvedValue(task);
+  renderPanel(<TaskPanel />);
+  expect(await screen.findByText("Planning")).toBeInTheDocument();
+  expect(await screen.findByRole("region", { name: "Task plan" }, { timeout: 2_500 })).toBeInTheDocument();
+  expect(api.task).toHaveBeenCalledTimes(2);
+  expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+});
+
 it("keeps a replacement coding thread in its embedded view", async () => {
   useAppStore.setState({ selectedGroupId: "group-a", selectedCodexChatId: "chat-a" });
   api.sendCodexMessage.mockResolvedValueOnce({ threadId: "replacement-chat", turnId: "turn-b" });
