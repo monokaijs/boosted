@@ -8,8 +8,11 @@ type ScrollAreaProps = React.ComponentProps<typeof ScrollAreaPrimitive.Root> & {
 
 function ScrollArea({ className, children, scrollbars = "vertical", ...props }: ScrollAreaProps) {
   return (
-    <ScrollAreaPrimitive.Root className={cn("relative overflow-hidden", className)} {...props}>
-      <ScrollAreaPrimitive.Viewport className="size-full rounded-[inherit]">{children}</ScrollAreaPrimitive.Viewport>
+    <ScrollAreaPrimitive.Root className={cn("relative min-w-0 overflow-hidden", className)} {...props}>
+      {/* Radix's table wrapper can grow to its content's intrinsic width. A
+          vertical-only area must constrain content so text wraps and nested
+          code/table scrollers stay inside the viewport. */}
+      <ScrollAreaPrimitive.Viewport className={cn("size-full rounded-[inherit]", scrollbars === "vertical" && "[&>div]:block!")}>{children}</ScrollAreaPrimitive.Viewport>
       {(scrollbars === "vertical" || scrollbars === "both") && <ScrollBar />}
       {(scrollbars === "horizontal" || scrollbars === "both") && <ScrollBar orientation="horizontal" />}
       <ScrollAreaPrimitive.Corner />

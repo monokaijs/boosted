@@ -23,14 +23,17 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Match the compiler used by the last successful release; upgrade deliberately.
+  CI_RUST_TOOLCHAIN: 1.99.0
 
 jobs:
   prepare:
     name: Prepare release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.release-source.outputs.sha }}
     steps:
       - name: Require release signing secrets
         env:
@@ -98,6 +101,9 @@ jobs:
           git diff --check
           cargo metadata --locked --format-version 1 --no-deps > /dev/null
 
+      - name: Validate release publisher
+        run: node --test test/release-publish.test.mjs
+
       - name: Ensure the tag is unused
         env:
           TAG: ${{ steps.version.outputs.tag }}
@@ -106,6 +112,36 @@ jobs:
             echo "Tag $TAG already exists." >&2
             exit 1
           fi
+
+      - name: Commit and tag the release source
+        id: release-source
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_SHA: ${{ github.sha }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git fetch origin "$DEFAULT_BRANCH" --tags
+          if [[ "$(git rev-parse "origin/$DEFAULT_BRANCH")" != "$EXPECTED_SHA" ]]; then
+            echo "$DEFAULT_BRANCH changed during release preparation. Run the workflow again." >&2
+            exit 1
+          fi
+
+          cargo metadata --locked --format-version 1 --no-deps > /dev/null
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock package.json desktop/package.json web/package.json desktop/src-tauri/tauri.conf.json
+          git commit -m "chore(release): $TAG"
+          git tag -a "$TAG" -m "Boosted $TAG"
+          git push --atomic origin "HEAD:refs/heads/$DEFAULT_BRANCH" "refs/tags/$TAG"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: gh release create "$TAG" --draft --title "Boosted $VERSION" --generate-notes --verify-tag
 
   build:
     name: Build ${{ matrix.name }}
@@ -118,22 +154,17 @@ jobs:
             # xcap's libspa bindings require newer PipeWire headers than 22.04 provides.
             os: ubuntu-24.04
             args: --bundles deb,appimage
-            rust_targets: ""
             cache_key: desktop-linux-x86_64-ubuntu-24.04
           - name: Windows x86_64
-            os: windows-latest
+            os: windows-2025-vs2026
             args: --bundles nsis,msi
-            rust_targets: ""
             cache_key: desktop-windows-x86_64
-          - name: macOS universal
-            os: macos-latest
-            args: --target universal-apple-darwin --bundles app,dmg
-            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
-            cache_key: desktop-macos-universal
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -144,7 +175,13 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
-          targets: ${{ matrix.rust_targets }}
+          toolchain: ${{ env.CI_RUST_TOOLCHAIN }}
+
+      # rust-cache hashes every installed toolchain, including the runner's
+      # floating stable compiler. Keep only the selected release compiler.
+      - name: Remove unused runner Rust toolchain
+        shell: bash
+        run: rustup toolchain uninstall stable
 
       - name: Cache Rust dependencies and build outputs
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -167,21 +204,167 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Apply release version
-        shell: bash
+      - name: Build desktop bundles
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
-          VERSIONING: ${{ inputs.versioning }}
-          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: desktop
+          args: --ci ${{ matrix.args }} -- --locked --timings
+
+      - name: Upload installers
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ runner.os }}
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            target/**/release/bundle/**/*.AppImage
+            target/**/release/bundle/**/*.AppImage.sig
+            target/**/release/bundle/**/*.app.tar.gz
+            target/**/release/bundle/**/*.app.tar.gz.sig
+            target/**/release/bundle/**/*.deb
+            target/**/release/bundle/**/*.deb.sig
+            target/**/release/bundle/**/*.dmg
+            target/**/release/bundle/**/*.exe
+            target/**/release/bundle/**/*.exe.sig
+            target/**/release/bundle/**/*.msi
+            target/**/release/bundle/**/*.msi.sig
+
+      - name: Upload Cargo timings
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cargo-timings-desktop-${{ runner.os }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: target/cargo-timings/*.html
+
+  build-macos:
+    name: Compile macOS ${{ matrix.target }}
+    needs: prepare
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ env.CI_RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      # rust-cache hashes every installed toolchain, including the runner's
+      # floating stable compiler. Keep only the selected release compiler.
+      - name: Remove unused runner Rust toolchain
+        shell: bash
+        run: rustup toolchain uninstall stable
+
+      - name: Cache Rust dependencies and build outputs
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: desktop-macos-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 10.34.5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Compile desktop without bundling
+        env:
+          TARGET: ${{ matrix.target }}
+        run: pnpm --filter @boosted/desktop tauri build --ci --target "$TARGET" --no-bundle -- --locked --timings
+
+      - name: Upload architecture binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-binary-${{ matrix.target }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+          path: target/${{ matrix.target }}/release/boosted-desktop
+
+      - name: Upload Cargo timings
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cargo-timings-desktop-${{ matrix.target }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: target/cargo-timings/*.html
+
+  bundle-macos:
+    name: Sign and package macOS universal
+    needs:
+      - prepare
+      - build-macos
+    runs-on: macos-26
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ env.CI_RUST_TOOLCHAIN }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 10.34.5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install packaging dependencies
+        run: pnpm --filter @boosted/desktop install --frozen-lockfile
+
+      - name: Download architecture binaries
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: macos-binary-*
+          path: macos-binaries
+
+      - name: Assemble and verify universal binary
         run: |
-          version="$(node .github/scripts/bump-version.mjs "$VERSIONING")"
-          if [[ "$version" != "$EXPECTED_VERSION" ]]; then
-            echo "Expected version $EXPECTED_VERSION, got $version." >&2
-            exit 1
-          fi
-          cargo metadata --locked --format-version 1 --no-deps > /dev/null
+          binary="target/universal-apple-darwin/release/boosted-desktop"
+          mkdir -p "$(dirname "$binary")"
+          lipo -create \
+            macos-binaries/macos-binary-aarch64-apple-darwin/boosted-desktop \
+            macos-binaries/macos-binary-x86_64-apple-darwin/boosted-desktop \
+            -output "$binary"
+          # Artifact downloads do not preserve executable permissions.
+          chmod +x "$binary"
+          lipo "$binary" -verify_arch arm64
+          lipo "$binary" -verify_arch x86_64
 
       - name: Import Developer ID certificate
-        if: runner.os == 'macOS'
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -222,31 +405,17 @@ jobs:
           rm -f "$certificate_path"
           echo "APPLE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
 
-      - name: Build desktop bundles
-        if: runner.os != 'macOS'
-        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          projectPath: desktop
-          args: --ci ${{ matrix.args }}
-
-      - name: Build, sign, and notarize macOS bundle
-        if: runner.os == 'macOS'
-        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+      - name: Sign and notarize macOS bundles without recompiling
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          projectPath: desktop
-          args: --ci ${{ matrix.args }}
+        run: pnpm --filter @boosted/desktop tauri bundle --ci --target universal-apple-darwin --bundles app,dmg
 
       - name: Remove temporary signing keychain
-        if: runner.os == 'macOS' && always()
+        if: always()
         shell: bash
         run: |
           if [[ -n "${BUILD_CERTIFICATE_PATH:-}" ]]; then
@@ -256,24 +425,16 @@ jobs:
             security delete-keychain "$BUILD_KEYCHAIN_PATH" || true
           fi
 
-      - name: Upload installers
+      - name: Upload macOS installers
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-${{ runner.os }}
+          name: release-macOS
           if-no-files-found: error
           compression-level: 0
           path: |
-            target/**/release/bundle/**/*.AppImage
-            target/**/release/bundle/**/*.AppImage.sig
-            target/**/release/bundle/**/*.app.tar.gz
-            target/**/release/bundle/**/*.app.tar.gz.sig
-            target/**/release/bundle/**/*.deb
-            target/**/release/bundle/**/*.deb.sig
-            target/**/release/bundle/**/*.dmg
-            target/**/release/bundle/**/*.exe
-            target/**/release/bundle/**/*.exe.sig
-            target/**/release/bundle/**/*.msi
-            target/**/release/bundle/**/*.msi.sig
+            target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+            target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+            target/universal-apple-darwin/release/bundle/dmg/*.dmg
 
   build-headless:
     name: Build ${{ matrix.name }} headless CLI
@@ -290,7 +451,7 @@ jobs:
             asset: linux-x86_64
             cache_key: headless-linux-x86_64-ubuntu-24.04
           - name: Windows x86_64
-            os: windows-latest
+            os: windows-2025-vs2026
             target: x86_64-pc-windows-msvc
             executable: target/x86_64-pc-windows-msvc/release/boosted-server.exe
             asset: windows-x86_64.exe
@@ -311,10 +472,13 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
+          toolchain: ${{ env.CI_RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
       - name: Install Linux computer-control dependencies
@@ -322,6 +486,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libclang-dev libxcb1-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev libgbm-dev libxkbcommon-dev
+
+      # rust-cache hashes every installed toolchain, including the runner's
+      # floating stable compiler. Keep only the selected release compiler.
+      - name: Remove unused runner Rust toolchain
+        shell: bash
+        run: rustup toolchain uninstall stable
 
       - name: Cache Rust dependencies and build outputs
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -344,26 +514,13 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Apply release version
-        shell: bash
-        env:
-          VERSIONING: ${{ inputs.versioning }}
-          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          version="$(node .github/scripts/bump-version.mjs "$VERSIONING")"
-          if [[ "$version" != "$EXPECTED_VERSION" ]]; then
-            echo "Expected version $EXPECTED_VERSION, got $version." >&2
-            exit 1
-          fi
-          cargo metadata --locked --format-version 1 --no-deps > /dev/null
-
       - name: Build embedded web app and server
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: |
           pnpm build
-          cargo build --locked --release --target "$TARGET" -p boosted-server --features embedded-web
+          cargo build --locked --release --timings --target "$TARGET" -p boosted-server --features embedded-web
 
       - name: Package headless CLI
         shell: bash
@@ -384,18 +541,29 @@ jobs:
           compression-level: 0
           path: release-artifacts/boosted-*
 
+      - name: Upload Cargo timings
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cargo-timings-headless-${{ matrix.target }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: target/cargo-timings/*.html
+
   publish:
-    name: Publish ${{ needs.prepare.outputs.tag }}
-    needs:
-      - prepare
-      - build
-      - build-headless
-    runs-on: ubuntu-latest
+    name: Publish available release artifacts
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
     steps:
-      - name: Check out source
+      - name: Check out release source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -406,75 +574,20 @@ jobs:
       - name: Set up npm Trusted Publishing support
         run: npm install --global npm@^11.5.1
 
-      - name: Download release artifacts
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          pattern: release-*
-          path: release-artifacts
-          merge-multiple: true
-
-      - name: Generate desktop update manifest
-        env:
-          REPOSITORY: ${{ github.repository }}
-          TAG: ${{ needs.prepare.outputs.tag }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: node .github/scripts/generate-update-manifest.mjs release-artifacts "$VERSION" "$TAG" "$REPOSITORY" release-artifacts/latest.json
-
-      - name: Commit and tag the release
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          EXPECTED_SHA: ${{ github.sha }}
-          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
-          TAG: ${{ needs.prepare.outputs.tag }}
-          VERSIONING: ${{ inputs.versioning }}
-        run: |
-          git fetch origin "$DEFAULT_BRANCH" --tags
-          if [[ "$(git rev-parse "origin/$DEFAULT_BRANCH")" != "$EXPECTED_SHA" ]]; then
-            echo "$DEFAULT_BRANCH changed while release builds were running. Run the workflow again." >&2
-            exit 1
-          fi
-
-          version="$(node .github/scripts/bump-version.mjs "$VERSIONING")"
-          if [[ "$version" != "$EXPECTED_VERSION" ]]; then
-            echo "Expected version $EXPECTED_VERSION, got $version." >&2
-            exit 1
-          fi
-
-          cargo metadata --locked --format-version 1 --no-deps > /dev/null
-          git diff --check
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock package.json desktop/package.json web/package.json desktop/src-tauri/tauri.conf.json
-          git commit -m "chore(release): $TAG"
-          git tag -a "$TAG" -m "Boosted $TAG"
-          git push --atomic origin "HEAD:refs/heads/$DEFAULT_BRANCH" "refs/tags/$TAG"
-
-      - name: Generate checksums
-        run: |
-          checksum_file="$RUNNER_TEMP/SHA256SUMS.txt"
-          while IFS= read -r -d '' file; do
-            checksum="$(sha256sum "$file" | cut -d ' ' -f 1)"
-            printf '%s  %s\n' "$checksum" "$(basename "$file")"
-          done < <(find release-artifacts -type f -print0 | sort -z) > "$checksum_file"
-          mv "$checksum_file" release-artifacts/SHA256SUMS.txt
-
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.prepare.outputs.tag }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          mapfile -d '' files < <(find release-artifacts -type f -print0 | sort -z)
-          gh release create "$TAG" "${files[@]}" \
-            --title "Boosted $VERSION" \
-            --generate-notes \
-            --latest \
-            --verify-tag
-
       - name: Validate npm package
         run: |
           npm run test:cli
           npm pack --dry-run
+
+      - name: Publish artifacts as each platform becomes available
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          EXPECTED_BUILD_JOBS: 9
+        run: node .github/scripts/publish-release.mjs
 
       - name: Check npm package bootstrap status
         id: npm-package

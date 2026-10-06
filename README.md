@@ -152,7 +152,11 @@ GitHub Releases also provide the standalone native CLI executables used by the n
 
 ## Releases
 
-Run the **Release Boosted** workflow from the repository's Actions tab and choose a `patch`, `minor`, or `major` version increment. The workflow builds standalone CLIs for Linux x64, Windows x64, and macOS Intel/Apple Silicon, plus Linux (`.deb` and `.AppImage`), Windows (`.exe` and `.msi`), and universal macOS (`.dmg`) installers. Once every build succeeds, it commits the synchronized version bump, creates the version tag, publishes a GitHub Release with SHA-256 checksums, and publishes `boosted-cli` to npm through Trusted Publishing.
+Run the **Release Boosted** workflow from the repository's Actions tab and choose a `patch`, `minor`, or `major` version increment. It commits and tags the synchronized version bump first, and every build checks out that exact release commit. The workflow builds standalone CLIs for Linux x64, Windows x64, and macOS Intel/Apple Silicon, plus Linux (`.deb` and `.AppImage`), Windows (`.exe` and `.msi`), and universal macOS (`.dmg`) installers.
+
+A single publisher checks for completed artifact uploads every ten seconds and adds them to the GitHub Release with SHA-256 checksums. The release becomes public with its first ready artifact. Desktop updater entries are added as each platform's signed installers become available, so Windows updates do not wait for macOS. A platform that is still building has no updater entry yet. If a build fails, available platforms remain published and the workflow reports the missing artifacts. The version and tag remain reserved; rerun the failed jobs for that release or start a new version. The npm package publishes after all release artifacts are available.
+
+The macOS desktop architectures compile in parallel, then a separate job combines them into a verified universal binary and signs, notarizes, and packages it without recompiling. CI pins its Rust compiler and runner OS versions in `.github/workflows/release.yml`; update those pins deliberately. Each compilation uploads a `cargo-timings-*` HTML report, retained for seven days, to help identify build bottlenecks.
 
 Trusted Publishing requires an existing npm package. Bootstrap `boosted-cli` with one authenticated manual publish, then configure its npm package settings with GitHub organization/user `monokaijs`, repository `boosted`, and workflow filename `release.yml`. No npm token is needed for later releases.
 

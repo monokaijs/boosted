@@ -75,4 +75,4 @@ spctl --assess --type execute --verbose=2 /Applications/Boosted.app
 xcrun stapler validate /Applications/Boosted.app
 ```
 
-The release job publishes only after the Linux, Windows, and signed macOS builds all succeed.
+The macOS architectures compile in parallel, then a separate job combines them and performs signing and notarization. The publisher adds macOS installers and updater entries as soon as this job uploads its artifacts. Linux and Windows can become available earlier while macOS is still building. A failed macOS build leaves already-published platforms available and marks the workflow as failed.

@@ -3,10 +3,10 @@
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
-const [artifactsArg, version, tag, repository, outputArg] = process.argv.slice(2);
+const [artifactsArg, version, tag, repository, outputArg, mode] = process.argv.slice(2);
 
-if (!artifactsArg || !version || !tag || !repository || !outputArg) {
-  console.error("Usage: node generate-update-manifest.mjs <artifacts-dir> <version> <tag> <owner/repo> <output>");
+if (!artifactsArg || !version || !tag || !repository || !outputArg || (mode && mode !== "--partial")) {
+  console.error("Usage: node generate-update-manifest.mjs <artifacts-dir> <version> <tag> <owner/repo> <output> [--partial]");
   process.exit(1);
 }
 
@@ -43,11 +43,16 @@ function updaterArtifact(label, patterns) {
   };
 }
 
-const linuxAppImage = updaterArtifact("Linux AppImage", [/\.AppImage\.sig$/i]);
-const linuxDeb = updaterArtifact("Linux deb", [/\.deb\.sig$/i]);
-const windowsNsis = updaterArtifact("Windows NSIS", [/-setup\.exe\.sig$/i]);
-const windowsMsi = updaterArtifact("Windows MSI", [/\.msi\.sig$/i]);
-const macos = updaterArtifact("universal macOS", [/\.app\.tar\.gz\.sig$/i]);
+// A platform is included only once its installer group is present. Once any
+// installer appears, still require every updater signature for that platform.
+const includeLinux = !mode || files.some((file) => /\.(AppImage|deb)(\.sig)?$/i.test(file));
+const includeWindows = !mode || files.some((file) => /(-setup\.exe|\.msi)(\.sig)?$/i.test(file));
+const includeMacos = !mode || files.some((file) => /\.app\.tar\.gz(\.sig)?$/i.test(file));
+const linuxAppImage = includeLinux ? updaterArtifact("Linux AppImage", [/\.AppImage\.sig$/i]) : undefined;
+const linuxDeb = includeLinux ? updaterArtifact("Linux deb", [/\.deb\.sig$/i]) : undefined;
+const windowsNsis = includeWindows ? updaterArtifact("Windows NSIS", [/-setup\.exe\.sig$/i]) : undefined;
+const windowsMsi = includeWindows ? updaterArtifact("Windows MSI", [/\.msi\.sig$/i]) : undefined;
+const macos = includeMacos ? updaterArtifact("universal macOS", [/\.app\.tar\.gz\.sig$/i]) : undefined;
 
 const manifest = {
   version,
