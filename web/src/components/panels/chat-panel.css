@@ -23,61 +23,51 @@
   background: color-mix(in oklch, var(--surface) 92%, var(--background));
 }
 
-.task-source-activity-layer {
-  position: absolute;
-  inset: 0;
-  z-index: 40;
-}
-
-.task-source-activity-scrim {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  background: rgb(0 0 0 / 28%);
-  backdrop-filter: blur(1px);
-}
-
-.task-source-activity-panel {
-  position: absolute;
-  inset-block: 8px;
-  right: 8px;
-  display: flex;
-  width: min(420px, calc(100% - 16px));
-  min-width: 0;
-  flex-direction: column;
+.gitlab-discussion {
+  margin: 4px 0 20px;
   overflow: hidden;
-  border-radius: 14px;
-  background: var(--surface-raised);
-  box-shadow: 0 24px 70px rgb(0 0 0 / 42%);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--card) 65%, transparent);
 }
 
-.task-source-activity-header {
+.gitlab-discussion-header {
   display: flex;
-  min-height: 58px;
-  flex: none;
   align-items: center;
-  gap: 6px;
-  padding: 10px 10px 10px 14px;
-  box-shadow: 0 1px 0 var(--border);
+  gap: 10px;
+  padding: 11px 10px 10px 13px;
+  border-bottom: 1px solid var(--border);
 }
 
-.task-source-activity-header > div:first-child {
+.gitlab-discussion-header > div:first-child {
   flex: 1;
 }
 
-.task-source-activity-content {
-  padding: 12px 14px 24px;
+.gitlab-discussion-header p {
+  margin-top: 2px;
+  color: var(--muted-foreground);
+  font-size: 10px;
 }
 
-.task-source-activity-item {
+.gitlab-discussion-item {
   display: flex;
   gap: 10px;
-  padding-block: 14px;
+  margin-inline: 12px;
+  padding-block: 13px;
 }
 
-.task-source-activity-item + .task-source-activity-item {
+.gitlab-discussion-item + .gitlab-discussion-item {
   border-top: 1px solid var(--border);
+}
+
+.gitlab-discussion-item.is-reply {
+  margin-left: 42px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+
+.gitlab-discussion-item.is-system {
+  color: var(--muted-foreground);
 }
 
 .task-source-activity-avatar {
@@ -93,13 +83,16 @@
   font-weight: 600;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .task-source-activity-scrim { animation: task-source-scrim-in 180ms ease-out; }
-  .task-source-activity-panel { animation: task-source-panel-in 220ms cubic-bezier(.16, 1, .3, 1); }
+.task-source-activity-avatar img {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
 }
 
-@keyframes task-source-scrim-in { from { opacity: 0; } }
-@keyframes task-source-panel-in { from { opacity: 0; transform: translateX(18px) scale(.985); } }
+.gitlab-attachment { margin: 4px 2px 4px 0; vertical-align: middle; }
+.gitlab-attachment-image { display: block; width: fit-content; max-width: 100%; }
+.gitlab-discussion .aui-markdown img { max-height: 28rem; border-radius: 8px; object-fit: contain; }
 
 .task-comment-composer { position: relative; max-width: 48rem; margin-inline: auto; }
 .task-comment-input { display: flex; align-items: flex-end; gap: 8px; padding: 8px; border: 1px solid var(--input); border-radius: 10px; background: var(--background); }

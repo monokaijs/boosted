@@ -11,9 +11,6 @@
 .usage-grid { stroke: var(--border); stroke-width: 1; }
 .usage-axis { fill: var(--muted-foreground); font-size: 11px; }
 .usage-cursor { stroke: var(--muted-foreground); stroke-width: 1; stroke-dasharray: 3 4; opacity: .5; }
-.usage-inspector { display: flex; align-items: center; gap: 16px; padding: 8px 12px 16px; color: var(--muted-foreground); font-size: 11px; }
-.usage-inspector label { flex: none; }
-.usage-inspector input { width: 100%; accent-color: var(--foreground); }
 .usage-day-details { border-top: 1px solid var(--border); padding: 16px 12px 6px; font-size: 12px; }
 .usage-day-details > strong { font-weight: 500; }
 .usage-day-details > div { display: flex; flex-wrap: wrap; gap: 12px 24px; margin-top: 12px; }

@@ -46,14 +46,14 @@ describe('usage page', () => {
   it('fetches only the selected group and range with the scoped client', async () => {
     mock.featureRequest.mockResolvedValue(data);
     renderPage({ embedded: true, groupId: 'group/a' });
-    await screen.findByRole('slider', { name: 'Inspect day' });
+    await screen.findByRole('img', { name: /Daily token usage by agent/ });
     expect(mock.featureRequest).toHaveBeenCalledWith('/groups/group%2Fa/usage?days=30');
     expect(mock.usage).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '7 days' }));
     await waitFor(() => expect(mock.featureRequest).toHaveBeenCalledWith('/groups/group%2Fa/usage?days=7'));
   });
 
-  it('renders one series per agent, toggles visibility, and exposes daily values to keyboard users', async () => {
+  it('renders one series per agent, toggles visibility, and shows the latest daily values', async () => {
     renderPage();
     const chart = await screen.findByRole('img', { name: /Daily token usage by agent/ });
     expect(chart.querySelectorAll('polyline')).toHaveLength(2);
@@ -62,21 +62,18 @@ describe('usage page', () => {
     fireEvent.click(within(legend).getByRole('button', { name: /Pock/ }));
     expect(chart.querySelectorAll('polyline')).toHaveLength(1);
     expect(within(legend).getByRole('button', { name: /Pock/ })).toHaveAttribute('aria-pressed', 'false');
-    const slider = screen.getByRole('slider', { name: 'Inspect day' });
-    fireEvent.change(slider, { target: { value: '28' } });
-    expect(slider).toHaveValue('28');
-    expect(slider).toHaveAttribute('aria-valuetext');
-    expect(screen.getByText('0', { selector: 'b' })).toBeInTheDocument();
+    expect(screen.queryByRole('slider', { name: 'Inspect day' })).not.toBeInTheDocument();
+    expect(screen.getAllByText('80', { selector: 'b' })).toHaveLength(2);
     fireEvent.click(within(legend).getByRole('button', { name: /Pock/ }));
     expect(chart.querySelectorAll('polyline')).toHaveLength(2);
   });
 
-  it('fetches the chosen date range and resets day inspection', async () => {
+  it('fetches the chosen date range without rendering a day slider', async () => {
     renderPage();
-    await screen.findByRole('slider', { name: 'Inspect day' });
+    await screen.findByRole('img', { name: /Daily token usage by agent/ });
     fireEvent.click(screen.getByRole('button', { name: '7 days' }));
     await waitFor(() => expect(mock.usage).toHaveBeenCalledWith(7));
-    expect(await screen.findByRole('slider', { name: 'Inspect day' })).toHaveValue('6');
+    expect(screen.queryByRole('slider', { name: 'Inspect day' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '7 days' })).toHaveAttribute('aria-pressed', 'true');
   });
 

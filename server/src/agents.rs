@@ -16,7 +16,7 @@ const BACKGROUND_COMPACTION_TRIGGER_CHARS: usize = 520_000;
 const BACKGROUND_COMPACTION_TARGET_CHARS: usize = 360_000;
 const PREPARED_CONTEXTS: &str = "agent-prepared-contexts";
 
-fn compact_text_middle(value: &str, limit: usize) -> String {
+pub(crate) fn compact_text_middle(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
         return value.to_owned();
     }
@@ -1088,7 +1088,18 @@ pub(crate) async fn choose_account(
     requested: Option<&str>,
     excluded: &HashSet<String>,
 ) -> AppResult<String> {
-    providers::choose_account(state, requested, excluded).await
+    if let Some(id) = requested {
+        let account = document(&state.db, "accounts", id).await?;
+        if account["providerId"] != "codex" {
+            return Err(AppError::BadRequest(
+                "Boosted agents require an OpenAI Codex account".into(),
+            ));
+        }
+        if !excluded.contains(id) && providers::account_available(state, id).await? {
+            return Ok(id.to_string());
+        }
+    }
+    providers::choose_account_for_provider(state, "codex", excluded).await
 }
 pub(crate) async fn run_turn(
     state: &AppState,
@@ -1099,9 +1110,7 @@ pub(crate) async fn run_turn(
     account_id: &str,
     cancel: &mut watch::Receiver<bool>,
 ) -> AppResult<()> {
-    let account = document(&state.db, "accounts", account_id).await?;
-    let home = providers::account_home(&state.providers, &account)?;
-    let client = state.providers.agent_client(&home).await?;
+    let client = state.providers.agent_client(&state.db, account_id).await?;
     let result =
         run_turn_with_client(state, id, snapshot, current, background, &client, cancel).await;
     client.shutdown().await;
@@ -2905,14 +2914,32 @@ async fn move_chat_locked(
     }
     let mut chat = chat_metadata(state, chat_id).await?;
     let source_id = chat["accountId"].as_str().unwrap_or_default();
+    let source_provider = if source_id.is_empty() {
+        "codex".to_string()
+    } else {
+        document(&state.db, "accounts", source_id).await?["providerId"]
+            .as_str()
+            .unwrap_or("codex")
+            .to_string()
+    };
     let target_id = if let Some(id) = requested {
         let account = document(&state.db, "accounts", id).await?;
         if account["status"] != "CONNECTED" {
             return Err(AppError::Conflict("Target account is not connected".into()));
         }
+        if account["providerId"].as_str() != Some(&source_provider) {
+            return Err(AppError::Conflict(
+                "Move chats between accounts of the same provider".into(),
+            ));
+        }
         id.into()
     } else {
-        choose_account(state, None, &HashSet::from([source_id.to_owned()])).await?
+        providers::choose_account_for_provider(
+            state,
+            &source_provider,
+            &HashSet::from([source_id.to_owned()]),
+        )
+        .await?
     };
     if source_id == target_id {
         return Ok(target_id);

@@ -1,13 +1,13 @@
 // Keep these editor and browser chrome colors aligned with index.css.
 export const palette = {
-  canvas: "#08090b",
-  surface: "#0e1013",
-  foreground: "#e7e9ed",
-  muted: "#959da9",
-  primary: "#c6cbd3",
-  success: "#72ce9d",
-  warning: "#ddb66f",
-  danger: "#ee7d86",
+  canvas: "#101010",
+  surface: "#181818",
+  foreground: "#f2f2f2",
+  muted: "#b4b4b4",
+  primary: "#f9f9f9",
+  success: "#40c977",
+  warning: "#ffd240",
+  danger: "#ff6764",
 } as const;
 
 export const lightPalette = {

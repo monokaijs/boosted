@@ -44,6 +44,7 @@ describe("Boosted API client", () => {
     vi.stubGlobal("fetch", fetchMock);
     const api = client();
     await api.gitStatus("alpha");
+    await api.gitHistory("alpha");
     await api.gitDiff("alpha", "src/file name.ts", true);
     await api.gitStage("alpha", ["file.txt"]);
     await api.gitUnstage("alpha", ["file.txt"]);
@@ -51,6 +52,7 @@ describe("Boosted API client", () => {
     await api.gitCommit("alpha", "fix: update file");
     expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.method ?? "GET", init?.body])).toEqual([
       ["http://machine.lan:4782/api/v1/projects/alpha/git/status", "GET", undefined],
+      ["http://machine.lan:4782/api/v1/projects/alpha/git/history", "GET", undefined],
       ["http://machine.lan:4782/api/v1/projects/alpha/git/diff?staged=true&path=src%2Ffile%20name.ts", "GET", undefined],
       ["http://machine.lan:4782/api/v1/projects/alpha/git/stage", "POST", JSON.stringify({ paths: ["file.txt"] })],
       ["http://machine.lan:4782/api/v1/projects/alpha/git/unstage", "POST", JSON.stringify({ paths: ["file.txt"] })],

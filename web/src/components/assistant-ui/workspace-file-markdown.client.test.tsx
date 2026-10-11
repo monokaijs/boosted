@@ -8,6 +8,18 @@ import { WorkspaceAttachment, WorkspaceFileProvider, workspaceFileMarkdownCompon
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); useMachineStore.setState({ profiles: [], activeId: undefined, tokens: {} }); });
 
+it("renders source references as compact inline preview links with line labels", () => {
+  const client = createBoostedApiClient({ profile: { id: "test", baseUrl: "http://localhost:4782" }, getToken: () => undefined });
+  const { container } = render(<ApiClientProvider client={client}><WorkspaceFileProvider scope={{ kind: "codex", id: "chat" }}>
+    <ReactMarkdown components={workspaceFileMarkdownComponents} urlTransform={workspaceMarkdownUrlTransform}>{"[codex-chat-panel.tsx](/repo/web/src/codex-chat-panel.tsx:122), [store write](/repo/web/src/workspace-state.ts:39)."}</ReactMarkdown>
+  </WorkspaceFileProvider></ApiClientProvider>);
+
+  const source = screen.getByRole("button", { name: "View codex-chat-panel.tsx" });
+  expect(source).toHaveClass("workspace-file-link");
+  expect(source.querySelector("svg")).toBeInTheDocument();
+  expect(container.querySelector("p")).toHaveTextContent("codex-chat-panel.tsx (line 122), store write (line 39).");
+});
+
 it.each([false, true])("fetches preview files with the conversation machine's URL and token (upload: %s)", async (upload) => {
   // A global machine selection must not redirect this mounted conversation's files.
   useMachineStore.setState({ profiles: [{ id: "other", name: "Other", baseUrl: "http://localhost:4782", createdAt: "now" }], activeId: "other", tokens: { other: "other-token" } });

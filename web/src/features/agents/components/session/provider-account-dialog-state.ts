@@ -23,10 +23,12 @@ import {
   readRecord,
   readRecordString,
   readSharedCodexHomeValue,
+  providerHomeKey,
   withoutRecordKeys,
 } from "@/features/agents/lib/session"
 import { useProviderModels } from "./use-provider-models"
 import type { ChatComposerAccessMode, ChatComposerReasoningEffort, ChatComposerServiceTier } from "@/features/agents/types/session"
+import type { AccountAuthMode } from "@/features/agents/types/providers"
 
 type ProviderAccountNotice = { details?: Record<string, unknown> | null; kind: "error" | "info"; text: string }
 
@@ -43,6 +45,8 @@ export function useProviderAccountDialogState(
     return () => { authAttemptRef.current += 1 }
   }, [account?.id])
   const [authenticating, setAuthenticating] = useState(false)
+  const [apiKey, setApiKey] = useState("")
+  const [authMode, setAuthMode] = useState<AccountAuthMode>("device")
   const [codexHome, setCodexHome] = useState("")
   const [defaultModel, setDefaultModel] = useState("")
   const [defaultPermissionMode, setDefaultPermissionMode] = useState<ChatComposerAccessMode>("askForApproval")
@@ -74,6 +78,8 @@ export function useProviderAccountDialogState(
       return
     }
     setCodexHome(readCodexHomeValue(account, provider))
+    setApiKey("")
+    setAuthMode(provider.id === "claude" ? (account.lastAuthMode === "apiKey" ? "apiKey" : "web") : "device")
     setDefaultModel(readRecordString(account.runtimeDefaults, "model") || defaultRuntimeDefaultValue(provider.id, "model"))
     setDefaultPermissionMode(readComposerAccessMode(readRecordString(account.runtimeDefaults, "permissionMode") || defaultRuntimeDefaultValue(provider.id, "permissionMode")))
     const savedEffort = readRecordString(account.runtimeDefaults, "reasoningEffort")
@@ -82,7 +88,7 @@ export function useProviderAccountDialogState(
     setDisplayName(account.displayName)
     setPersonality(readCodexPersonalityValue(account.settings))
     setRuntimeDefaultsJson(formatJson(withoutRecordKeys(account.runtimeDefaults, runtimeDefaultStructuredKeys)))
-    setSettingsJson(formatJson(withoutRecordKeys(account.settings, ["codexHome", "personality"])))
+    setSettingsJson(formatJson(withoutRecordKeys(account.settings, ["codexHome", "claudeHome", "personality"])))
     setNotice(readAccountErrorNotice(account))
   }, [account, provider, runtimeDefaultStructuredKeys])
 
@@ -98,13 +104,14 @@ export function useProviderAccountDialogState(
     const settings = parseJsonRecord(settingsJson, "Settings") as ProviderAccountResponse["settings"]
     const runtimeDefaults = parseJsonRecord(runtimeDefaultsJson, "Runtime defaults") as ProviderAccountResponse["runtimeDefaults"]
     const codexHomePath = codexHome.trim()
-    if (codexHomePath === "~/.codex" || codexHomePath === sharedCodexHome) {
-      throw new Error(`Choose a separate Codex home for this account.`)
+    if (codexHomePath === sharedCodexHome) {
+      throw new Error(`Choose a separate provider home for this account.`)
     }
+    const homeKey = providerHomeKey(provider.id)
     if (codexHomePath && codexHomePath !== defaultCodexHome) {
-      settings.codexHome = codexHomePath
+      settings[homeKey] = codexHomePath
     } else {
-      delete settings.codexHome
+      delete settings[homeKey]
     }
     if (provider.id === "codex") {
       settings.personality = personality
@@ -141,7 +148,7 @@ export function useProviderAccountDialogState(
     setNotice(null)
     try {
       const updated = await saveDraftConfig()
-      const response = await apiClient.providerAccounts.authenticate(updated.id)
+      const response = await apiClient.providerAccounts.authenticate(updated.id, provider?.id === "claude" ? { mode: authMode, ...(authMode === "apiKey" ? { apiKey } : {}) } : undefined)
       if (authAttemptRef.current !== attempt) return
       onAccountChange(accountFromAuthResponse(updated, response))
       if (response.authUrl) {
@@ -229,11 +236,13 @@ export function useProviderAccountDialogState(
   }
 
   const connected = account?.status === "CONNECTED"
-  const hasCodexHomeField = Boolean(provider?.accountFields.some((field) => field.key === "codexHome"))
+  const hasCodexHomeField = Boolean(provider?.accountFields.some((field) => field.key === "codexHome" || field.key === "claudeHome"))
   const visibleModelOptions = modelOptions.filter((option) => !option.hidden)
   const selectedDefaultModelOption = visibleModelOptions.find((option) => option.model === defaultModel || option.id === defaultModel) ?? defaultProviderModelOption(visibleModelOptions)
 
   return {
+    apiKey,
+    authMode,
     deviceLogin: account?.status === "AUTHENTICATING" && account.lastAuthMode === "device" && account.lastAuthUrl && account.lastAuthUserCode
       ? { verificationUrl: account.lastAuthUrl, userCode: account.lastAuthUserCode }
       : null,
@@ -261,6 +270,8 @@ export function useProviderAccountDialogState(
     saveConfig,
     saving,
     setCodexHome,
+    setApiKey,
+    setAuthMode,
     setDefaultModel,
     setDefaultPermissionMode,
     setDefaultReasoningEffort,

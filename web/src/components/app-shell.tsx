@@ -13,20 +13,20 @@ import type { SettingsSectionId } from "@/components/settings-page";
 import { MachineSwitcher } from "@/components/machine-manager";
 import { AttachmentPreviewLayout } from "@/components/attachment-preview-layout";
 import { ProjectSettingsDialog } from "@/components/project-settings-dialog";
-import { ProjectNavigation, type ProjectView } from "@/components/project-navigation";
+import { ProjectNavigation, type ProjectPanelView, type ProjectView } from "@/components/project-navigation";
 import { ChatList } from "@/components/chat-list";
 import { ProjectsPage, ScheduledPage } from "@/components/app-pages";
 import { FilesPanel } from "@/components/panels/files-panel";
 import { GitPanel } from "@/components/panels/git-panel";
 import { NewChatPanel, TaskPanel } from "@/components/panels/chat-panel";
-import { TaskboardPanel } from "@/components/panels/taskboard-panel";
+import { BoardsPanel, TasksPanel } from "@/components/panels/taskboard-panel";
 import { EditorPanel } from "@/components/panels/editor-panel";
 import { api, setToken } from "@/lib/api";
 import { useBoostedApiClient } from "@/lib/api-context";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import { useNotificationNavigation } from "@/hooks/use-notification-navigation";
 import { useConversationReadState } from "@/hooks/use-conversation-read-state";
-import { useCompactLayout, useMobileLayout } from "@/hooks/use-mobile-layout";
+import { useMobileLayout } from "@/hooks/use-mobile-layout";
 import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import { chatProject } from "@/lib/chat-project";
 import { conversationQueryOptions } from "@/lib/query-client";
@@ -104,7 +104,7 @@ function TaskWorkspace({ taskId, detailOpen, onClose }: { taskId?: string; detai
 
   const style = { "--task-list-width": `${listWidth}%` } as CSSProperties;
   return <div ref={layout} className="task-work-items-layout" data-detail={detailOpen} style={style}>
-    <section className="task-work-items-list" aria-label="Task list"><TaskboardPanel detailOpen={detailOpen} /></section>
+    <section className="task-work-items-list" aria-label="Task list"><TasksPanel detailOpen={detailOpen} /></section>
     {detailOpen && <div className="task-work-item-resizer" role="separator" aria-label="Resize task list" aria-orientation="vertical" aria-valuemin={24} aria-valuemax={60} aria-valuenow={Math.round(listWidth)} tabIndex={0} onPointerDown={startResize} onKeyDown={(event) => {
       if (event.key === "ArrowLeft") { event.preventDefault(); resizeWithKeyboard(listWidthRef.current - 2); }
       if (event.key === "ArrowRight") { event.preventDefault(); resizeWithKeyboard(listWidthRef.current + 2); }
@@ -124,14 +124,14 @@ export function AppShell() {
   const hasNativeBranding = isTauriRuntime() && /Windows/i.test(navigator.userAgent);
   const [page, setPage] = useState(pageFromHash);
   const isMobile = useMobileLayout();
-  const isCompact = useCompactLayout();
   const [mobileChatOpen, setMobileChatOpen] = useState(() => window.location.hash === "#home");
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | undefined>(settingsSectionFromHash);
   const previousPage = useRef<AppPage>("home");
   const previousMobileChatOpen = useRef(false);
   const [view, setView] = useState<ContentView>(() => useAppStore.getState().selectedGroupId ? "group" : "chat");
   const [groupHeaderTarget, setGroupHeaderTarget] = useState<HTMLDivElement | null>(null);
-  const [projectView, setProjectView] = useState<ProjectView>("all");
+  const [projectView, setProjectView] = useState<ProjectView>(() => window.location.hash === "#tasks" ? "tasks" : "all");
+  const [projectPanel, setProjectPanel] = useState<ProjectPanelView>("chats");
   const [toolView, setToolView] = useState<ToolView>();
   const [selectedAgentId, setSelectedAgentId] = useState(() => localStorage.getItem(`boosted.selected-agent.${profileId}`) ?? "pock");
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
@@ -156,8 +156,8 @@ export function AppShell() {
   const toolsOpen = page === "home" && Boolean(toolView);
   const mobileChatsPage = isMobile && page === "home" && !mobileChatOpen;
   const mobileChatDetail = isMobile && page === "home" && mobileChatOpen;
-  const chatSidebarVisible = page !== "settings" && !(page === "tasks" && isCompact);
-  const contentLayoutKey = (page === "tasks" || (page === "projects" && projectView === "tasks")) && !isMobile
+  const chatSidebarVisible = page !== "settings" && page !== "boards";
+  const contentLayoutKey = page === "projects" && projectView === "tasks" && !isMobile
     ? `${profileId}:tasks:${projectId ?? "empty"}`
     : `${profileId}:${page}:${view}:${chatId}:${taskId}:${groupId}:${selectedAgentId}`;
   useConversationReadState((page === "home" && !mobileChatsPage) || (page === "projects" && projectView === "chat")
@@ -210,7 +210,8 @@ export function AppShell() {
 
   useEffect(() => {
     setView(useAppStore.getState().selectedGroupId ? "group" : "chat");
-    setProjectView("all");
+    setProjectView(window.location.hash === "#tasks" ? "tasks" : "all");
+    setProjectPanel("chats");
   }, [profileId]);
   useEffect(() => {
     const open = (event: Event) => {
@@ -258,7 +259,15 @@ export function AppShell() {
   }, [chatId, activeThread.data, projects.data]);
 
   useEffect(() => {
-    const hashChange = () => { setSettingsSection(settingsSectionFromHash()); setPage(pageFromHash()); setMobileChatOpen(window.location.hash === "#home"); setMobileChatsOpen(false); };
+    const hashChange = () => {
+      if (window.location.hash === "#tasks") {
+        setProjectView("tasks");
+        setView(useAppStore.getState().selectedTaskId ? "task" : "chat");
+        window.history.replaceState(window.history.state, "", "#projects");
+      }
+      setSettingsSection(settingsSectionFromHash()); setPage(pageFromHash()); setMobileChatOpen(window.location.hash === "#home"); setMobileChatsOpen(false);
+    };
+    if (window.location.hash === "#tasks") window.history.replaceState(window.history.state, "", "#projects");
     window.addEventListener("hashchange", hashChange);
     return () => window.removeEventListener("hashchange", hashChange);
   }, [setMobileChatsOpen]);
@@ -268,15 +277,15 @@ export function AppShell() {
       const tool = tools.find((entry) => entry.id === id);
       if (tool) {
         if (page === "projects") {
-          useAppStore.getState().selectTask(undefined); setView("chat");
-          setProjectView((active) => toggle && active === tool.id ? "tasks" : tool.id);
+          setProjectPanel(tool.id);
         } else { setToolView((active) => toggle && active === tool.id ? undefined : tool.id); goTo("home"); }
         return;
       }
-      if (id === "taskboard") { setView("chat"); if (page === "projects") setProjectView("tasks"); else goTo("tasks"); }
-      else if (id === "task") { setView("task"); if (page === "projects") setProjectView("tasks"); else goTo("tasks"); }
+      if (id === "taskboard") { setView("chat"); goTo("boards"); }
+      else if (id === "task") { setView("task"); setProjectView("tasks"); goTo("projects"); }
+      else if (id === "tasks") { useAppStore.getState().selectTask(undefined); setView("chat"); setProjectView("tasks"); goTo("projects"); }
       else if (id === "chat") {
-        if (page === "projects") { useAppStore.getState().selectCodexChat(undefined); useAppStore.getState().selectTask(undefined); setView("chat"); setProjectView("chat"); }
+        if (page === "projects") { setProjectPanel("chats"); newProjectChat(); }
         else newChat();
       }
       else if (id === "agents") { setView("agents"); goTo("home"); }
@@ -287,13 +296,13 @@ export function AppShell() {
       const detail = (event as CustomEvent<{ threadId: string }>).detail;
       if (!detail?.threadId) return;
       useAppStore.getState().selectCodexChat(detail.threadId);
-      setView("chat"); if (page === "projects") setProjectView("chat"); else goTo("home");
+      setView("chat"); if (page === "projects") { setProjectPanel("chats"); setProjectView("chat"); } else goTo("home");
     };
     const openFile = () => { if (page === "projects") setProjectView("editor"); else { setView("editor"); goTo("home"); } };
     const openTask = () => setNewTaskDialogOpen(true);
     const openProject = () => setProjectDialogOpen(true);
     const showDrawer = (event: Event) => {
-      if ((event as CustomEvent<string>).detail === "tasks") { setView("task"); goTo("tasks"); }
+      if ((event as CustomEvent<string>).detail === "tasks") { setView("task"); setProjectView("tasks"); goTo("projects"); }
       else openChats();
     };
     const keyboard = (event: KeyboardEvent) => {
@@ -320,14 +329,10 @@ export function AppShell() {
     setProjectView(next);
     setView("chat");
   }
-  function openProjectWorkspace(entry: NonNullable<typeof project>) {
-    useAppStore.getState().selectProject(entry);
-    selectProjectView("tasks");
-  }
   function newProjectChat() {
     useAppStore.getState().selectCodexChat(undefined);
     useAppStore.getState().selectTask(undefined);
-    setView("chat"); setProjectView("chat");
+    setProjectPanel("chats"); setView("chat"); setProjectView("chat");
   }
 
   const returnToTask = useMutation({
@@ -335,7 +340,7 @@ export function AppShell() {
     onSuccess: (task) => { useAppStore.getState().selectTask(task); setProjectView("tasks"); setView("task"); goTo("projects"); },
   });
 
-  const navigation = destinations.map(({ id, label, icon: Icon }) => <Tooltip key={id}><TooltipTrigger asChild><button className="destination" aria-label={label} aria-current={page === id && !(id === "home" && view === "agents") ? "page" : undefined} onClick={() => { if (id === "home") setView(groupId ? "group" : "chat"); if (id === "tasks") setView("chat"); goTo(id); }}><Icon /><span>{label}</span></button></TooltipTrigger><TooltipContent side="left">{label}</TooltipContent></Tooltip>);
+  const navigation = destinations.map(({ id, label, icon: Icon }) => <Tooltip key={id}><TooltipTrigger asChild><button className="destination" aria-label={label} aria-current={page === id && !(id === "home" && view === "agents") ? "page" : undefined} onClick={() => { if (id === "home") setView(groupId ? "group" : "chat"); if (id === "boards") setView("chat"); goTo(id); }}><Icon /><span>{label}</span></button></TooltipTrigger><TooltipContent side="left">{label}</TooltipContent></Tooltip>);
 
   return <main className="app-frame" data-page={page} data-mobile-chat-open={mobileChatDetail}>
     <header className="shell-titlebar" hidden={mobileChatDetail}>
@@ -360,7 +365,7 @@ export function AppShell() {
         {page === "home" && view !== "group" && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Project tools"><Ellipsis /></Button></DropdownMenuTrigger><DropdownMenuContent align="start"><DropdownMenuLabel>Project tools</DropdownMenuLabel>{tools.map(({ id, label, icon: Icon }) => <DropdownMenuItem key={id} onClick={() => { setToolView(id); }}><Icon />{label}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>}
         <div className="main-header-actions">
           {view === "chat" && activeThread.data?.chat.taskId && (page === "home" || (page === "projects" && projectView === "chat")) && <Button variant="ghost" size="sm" onClick={() => returnToTask.mutate(activeThread.data!.chat.taskId!)} disabled={returnToTask.isPending}><ArrowLeft />Back to task</Button>}
-          {project && !(page === "home" && (view === "agents" || view === "group")) && <><DropdownMenu><DropdownMenuTrigger asChild><button className="project-context"><ProjectAvatar project={project} /><span>{project.name}</span><ChevronDown /></button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Project</DropdownMenuLabel>{projects.data?.map((entry) => <DropdownMenuItem key={entry.id} onClick={() => { useAppStore.getState().selectProject(entry); setView("chat"); if (page === "projects") setProjectView("tasks"); }}><ProjectAvatar project={entry} />{entry.name}</DropdownMenuItem>)}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => setProjectDialogOpen(true)}><Plus />Open project</DropdownMenuItem></DropdownMenuContent></DropdownMenu><Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Project settings" onClick={() => setProjectSettingsOpen(true)}><Settings2 /></Button></TooltipTrigger><TooltipContent>Project settings</TooltipContent></Tooltip></>}
+        {project && !(page === "home" && (view === "agents" || view === "group")) && <><DropdownMenu><DropdownMenuTrigger asChild><button className="project-context"><ProjectAvatar project={project} /><span>{project.name}</span><ChevronDown /></button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Project</DropdownMenuLabel>{projects.data?.map((entry) => <DropdownMenuItem key={entry.id} onClick={() => { useAppStore.getState().selectProject(entry); setView("chat"); if (page === "projects") { setProjectPanel("chats"); setProjectView("tasks"); } }}><ProjectAvatar project={entry} />{entry.name}</DropdownMenuItem>)}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => setProjectDialogOpen(true)}><Plus />Open project</DropdownMenuItem></DropdownMenuContent></DropdownMenu><Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Project settings" onClick={() => setProjectSettingsOpen(true)}><Settings2 /></Button></TooltipTrigger><TooltipContent>Project settings</TooltipContent></Tooltip></>}
         </div>
       </header>
       {returnToTask.error && <p role="alert" className="px-4 py-2 text-xs text-destructive">{returnToTask.error.message}</p>}
@@ -380,28 +385,20 @@ export function AppShell() {
         </div> : view === "group" && groupId ? <GroupPanel key={profileId + ":" + groupId} groupId={groupId} headerTarget={mobileChatDetail ? groupHeaderTarget : null} /> : view === "agents" ? <AgentsPanel selectedId={selectedAgentId} selectAgent={selectAgent} createAgentOpen={createAgentOpen} onCreateAgentOpenChange={setCreateAgentOpen} /> : chatId ? <CodexChatPanel key={chatId} threadId={chatId} /> : <NewChatPanel key={projectId ?? "empty"} />)}
         {page === "scheduled" && <ScheduledPage />}
         {page === "projects" && (projectView === "all" || !project ? <ProjectsPage onOpenProject={() => setProjectDialogOpen(true)} onSelect={() => selectProjectView("tasks")} /> : <div className="project-workspace">
-          <nav className="project-workspace-tabs" aria-label="Project workspace"><Button variant="ghost" size="sm" onClick={() => selectProjectView("all")}><ArrowLeft />All projects</Button>
-            {(["tasks", "files", "git"] as const).map((section) => <Button key={section} variant="ghost" size="sm" aria-pressed={projectView === section} onClick={() => selectProjectView(section)}>{section === "git" ? "Changes" : section === "tasks" ? "Tasks" : "Files"}</Button>)}
-            <Button variant="ghost" size="sm" aria-pressed={projectView === "chat"} onClick={newProjectChat}><Plus />Chat</Button>
-          </nav>
           <div className="project-workspace-content">
             {projectView === "tasks" && (isMobile && view === "task" && taskId ? <TaskPanel key={taskId} onClose={() => setView("chat")} /> : <TaskWorkspace taskId={taskId} detailOpen={view === "task" && Boolean(taskId)} onClose={() => setView("chat")} />)}
             {projectView === "chat" && (chatId ? <CodexChatPanel key={chatId} threadId={chatId} /> : <NewChatPanel key={projectId} />)}
-            {projectView === "files" && <FilesPanel key={projectId} />}
-            {projectView === "git" && <GitPanel key={projectId} />}
-            {projectView === "editor" && <div className="page-detail"><div className="page-detail-back"><Button variant="ghost" size="sm" onClick={() => setProjectView("files")}><ArrowLeft />Back to files</Button></div><EditorPanel /></div>}
+            {projectView === "editor" && <EditorPanel />}
           </div>
         </div>)}
-        {page === "tasks" && (isMobile && view === "task" && taskId
-          ? <div className="page-detail"><div className="page-detail-back"><Button variant="ghost" size="sm" onClick={() => setView("chat")}><ArrowLeft />All tasks</Button></div><TaskPanel key={taskId} /></div>
-          : <TaskWorkspace taskId={taskId} detailOpen={view === "task" && Boolean(taskId)} onClose={() => setView("chat")} />)}
+        {page === "boards" && <BoardsPanel />}
         {page === "settings" && <SettingsPage section={settingsSection} onSectionChange={(section) => { setSettingsSection(section); navigateSettings(section); }} onBack={() => { setSettingsSection(undefined); backToSettings(); }} onClose={() => { if (isMobile && previousPage.current === "home" && !previousMobileChatOpen.current) openChats(); else goTo(previousPage.current); }} />}
       </Suspense></AttachmentPreviewLayout></div>
       </div>
     </section>
     {page !== "settings" && <aside className="right-navigation" hidden={!chatSidebarVisible || (isMobile && !mobileChatsPage)} aria-label="Navigation and chats">
       <h1 className="mobile-chats-heading">Chats</h1>
-      {page === "projects" ? <ProjectNavigation view={projectView} onView={selectProjectView} onSelect={openProjectWorkspace} onOpenProject={() => setProjectDialogOpen(true)} onNewChat={newProjectChat} /> : <ChatList agents={agents.data ?? []} activeAgentId={page === "home" && view === "agents" ? selectedAgent?.id : undefined} activeGroupId={page === "home" && view === "group" ? groupId : undefined} activeChatId={page === "home" && view === "chat" ? chatId : undefined} onSelectAgent={openAgent} onCreateAgent={createAgent} onNewChat={newChat} onOpenProject={() => setProjectDialogOpen(true)} onClose={() => setMobileChatsOpen(false)} />}
+      {page === "projects" ? <ProjectNavigation view={projectView} panel={projectPanel} onPanel={setProjectPanel} onNewChat={newProjectChat} /> : <ChatList agents={agents.data ?? []} activeAgentId={page === "home" && view === "agents" ? selectedAgent?.id : undefined} activeGroupId={page === "home" && view === "group" ? groupId : undefined} activeChatId={page === "home" && view === "chat" ? chatId : undefined} onSelectAgent={openAgent} onCreateAgent={createAgent} onNewChat={newChat} onOpenProject={() => setProjectDialogOpen(true)} onClose={() => setMobileChatsOpen(false)} />}
 
     </aside>}
     </section>
@@ -413,7 +410,7 @@ export function AppShell() {
       {destinations.map(({ id, label, icon }) => {
         const Icon = id === "home" ? MessagesSquare : icon;
         const mobileLabel = id === "home" ? "Chats" : label;
-        return <button key={id} className="destination" aria-label={mobileLabel} aria-current={page === id ? "page" : undefined} onClick={() => { if (id === "home") openChats(); else { if (id === "tasks") setView("chat"); goTo(id); } }}><Icon /><span>{mobileLabel}</span></button>;
+        return <button key={id} className="destination" aria-label={mobileLabel} aria-current={page === id ? "page" : undefined} onClick={() => { if (id === "home") openChats(); else { if (id === "boards") setView("chat"); goTo(id); } }}><Icon /><span>{mobileLabel}</span></button>;
       })}
     </nav>
     <OpenProjectDialog open={projectDialogOpen} onOpenChange={setProjectDialogOpen} />

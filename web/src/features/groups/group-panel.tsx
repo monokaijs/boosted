@@ -158,6 +158,7 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
   const [attachments, setAttachments] = useState<AssistantAttachment[]>([]);
   const [outbox, setOutbox] = useState<GroupPendingMessage[]>(() => persisted<GroupPendingMessage[]>(outboxKey, []).map((m) => ({ ...m, status: 'failed', error: 'Message was not confirmed. Retry to check delivery.' })));
   const [older, setOlder] = useState<GroupMessage[]>([]);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [drawer, setDrawer] = useState(false);
   const [detailTab, setDetailTab] = useState<GroupDetailTab>('participants');
   const opener = useRef<HTMLElement | null>(null);
@@ -174,6 +175,8 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
   const fileInput = useRef<HTMLInputElement>(null);
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
+  const historyRequest = useRef<number | undefined>(undefined);
+  const exhaustedHistory = useRef<number | undefined>(undefined);
   const mounted = useRef(true);
   const sendQueue = useRef(Promise.resolve());
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -199,6 +202,32 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
     observer.observe(node);
     observer.observe(content); return () => observer.disconnect();
   }, [group?.id]);
+  async function loadOlderMessages() {
+    const node = scroll.current;
+    const before = messages[0]?.sequence;
+    if (!node || !before || before <= 1 || historyRequest.current !== undefined || exhaustedHistory.current === before) return;
+    const height = node.scrollHeight;
+    const top = node.scrollTop;
+    historyRequest.current = before;
+    follow.current = false;
+    setFollowing(false);
+    setLoadingOlder(true);
+    try {
+      const loaded = await groups.messages(groupId, before);
+      if (!mounted.current) return;
+      if (!loaded.some((message) => message.sequence < before)) exhaustedHistory.current = before;
+      setOlder((old) => mergeGroupMessages(loaded, old));
+      requestAnimationFrame(() => {
+        const current = scroll.current;
+        if (current) current.scrollTop = top + current.scrollHeight - height;
+        historyRequest.current = undefined;
+        if (mounted.current) setLoadingOlder(false);
+      });
+    } catch (cause) {
+      historyRequest.current = undefined;
+      if (mounted.current) { setLoadingOlder(false); setError(errorText(cause)); }
+    }
+  }
   async function action(operation: () => Promise<unknown>) {
     setBusy(true); setError(undefined);
     try { await operation(); await queryClient.invalidateQueries({ queryKey: ['groups'] }); }
@@ -260,18 +289,21 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
     ...messages.map((message) => ({ ...message, inReplyTo: message.inReplyTo ? [message.inReplyTo] : undefined, role: message.senderType === 'user' && message.senderId === user?.id ? 'user' as const : 'assistant' as const, attachments: message.attachments ?? undefined, pending: undefined as GroupPendingMessage | undefined })),
     ...outbox.map((pending) => ({ id: pending.id, rootId: pending.id, senderId: user?.id ?? '', senderType: 'user' as const, senderName: user?.username ?? 'You', role: 'user' as const, content: pending.request.content, createdAt: pending.createdAt, recipientIds: pending.request.recipientIds, attachments: pending.request.attachments, kind: 'message' as const, pending })),
   ];
-  function workSummary(rootId: string) {
-    const tasks = group!.tasks.filter((task) => task.rootId === rootId);
-    const executions = group!.executions.filter((execution) => execution.rootId === rootId);
-    const receipts = group!.receipts.filter((receipt) => isChatActionVisible(receipt) && executions.some((execution) => execution.id === receipt.executionId));
+  const visibleReceipts = group.receipts.filter((receipt) => isChatActionVisible(receipt) && group.executions.some((execution) => execution.id === receipt.executionId));
+  const hasAgentMessage = (rootId: string, agentId: string) => chatMessages.some((message) => message.rootId === rootId && message.senderType === 'agent' && message.senderId === agentId);
+  function workSummary(rootId: string, agentId?: string) {
+    const tasks = group!.tasks.filter((task) => task.rootId === rootId && (agentId ? task.ownerId === agentId : !task.ownerId || !hasAgentMessage(rootId, task.ownerId)));
+    const executions = group!.executions.filter((execution) => execution.rootId === rootId && (agentId ? execution.agentId === agentId : !hasAgentMessage(rootId, execution.agentId)));
+    const executionIds = new Set(executions.map((execution) => execution.id));
+    const receipts = visibleReceipts.filter((receipt) => executionIds.has(receipt.executionId));
     if (!tasks.length && !receipts.length && !executions.some((execution) => execution.error || execution.chatId)) return null;
-    return <div className="group-work-summary">
+    return <div className={cn('group-work-summary', agentId && 'group-message-work-summary')}>
       {tasks.map((task) => <button type="button" className="group-task-update" key={task.id} onClick={(event) => openDetails('tasks', event.currentTarget)}>
         {task.status === 'completed' ? <Check className="size-3.5 shrink-0" /> : ['running', 'awaiting_review'].includes(task.status) ? <LoaderCircle className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none" /> : <ListTodo className="size-3.5 shrink-0" />}
         <span><strong>{task.title}</strong><small>{agentName(task.ownerId)} · {taskLabels[task.status]}</small></span>
       </button>)}
       {executions.filter((execution, index) => execution.chatId && executions.findIndex((other) => other.chatId === execution.chatId) === index).map((execution) => <button type="button" className="group-task-update" key={execution.id} onClick={() => onOpenChat(execution.chatId!)}><MessageSquare className="size-3.5 shrink-0" /><span>Open {agentName(execution.agentId)}’s chat</span></button>)}
-      {group!.members.filter((member) => receipts.some((receipt) => receipt.agentId === member.id)).map((member) => <div key={member.id} className="group-work-tools"><span>{member.profile.name}</span><ActionGroup actions={receipts.filter((receipt) => receipt.agentId === member.id)} onOpenChat={onOpenChat} /></div>)}
+      {group!.members.filter((member) => receipts.some((receipt) => receipt.agentId === member.id)).map((member) => <div key={member.id} className="group-work-tools">{!agentId && <span>{member.profile.name}</span>}<ActionGroup actions={receipts.filter((receipt) => receipt.agentId === member.id)} onOpenChat={onOpenChat} /></div>)}
       {executions.filter((execution) => execution.error && (!execution.taskId || group!.tasks.some((task) => task.id === execution.taskId && ['failed', 'blocked', 'interrupted'].includes(task.status)))).map((execution) => <p className="px-2 text-xs text-destructive" key={execution.id}>{agentName(execution.agentId)}: {execution.error}</p>)}
     </div>;
   }
@@ -288,22 +320,23 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
   </header>;
   return <section className="assistant-conversation group-conversation relative flex h-full min-h-0 flex-col overflow-hidden" aria-label={'Group ' + group.name}>
     {headerTarget ? createPortal(header, headerTarget) : header}
-    <div className="assistant-conversation-scroll group-chat-scroll min-h-0 flex-1 overflow-y-auto px-5 pb-4 pt-6 md:px-8" ref={scroll} onScroll={() => {
-      const node = scroll.current; if (node) { follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 100; setFollowing(follow.current); }
+    <div className="assistant-conversation-scroll group-chat-scroll relative min-h-0 flex-1 overflow-y-auto px-5 pb-4 pt-6 md:px-8" ref={scroll} onScroll={() => {
+      const node = scroll.current; if (node) {
+        follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 100;
+        setFollowing(follow.current);
+        if (node.scrollTop <= 32) void loadOlderMessages();
+      }
     }}>
+      {loadingOlder && <div className="pointer-events-none absolute left-1/2 top-2 z-10 flex h-7 -translate-x-1/2 items-center gap-2 rounded-full bg-background/90 px-3 text-[11px] text-muted-foreground shadow-sm backdrop-blur" role="status" aria-live="polite"><LoaderCircle className="size-3 animate-spin motion-reduce:animate-none" />Loading earlier messages…</div>}
       <div className="session-conversation-column mx-auto">
-        {messages.length > 0 && messages[0].sequence > 1 && <Button variant="ghost" size="sm" disabled={busy} onClick={() => void action(async () => {
-          const node = scroll.current; const height = node?.scrollHeight ?? 0; const top = node?.scrollTop ?? 0;
-          follow.current = false; setFollowing(false);
-          const loaded = await groups.messages(groupId, messages[0].sequence); setOlder((old) => mergeGroupMessages(loaded, old));
-          requestAnimationFrame(() => { if (node) node.scrollTop = top + node.scrollHeight - height; });
-        })}>Load older messages</Button>}
         {!chatMessages.length && <div className="group-chat-empty"><h2>What should we work on?</h2><p>Talk to {leader.profile.name}, your group leader. They’ll delegate work and report results. You can also ask to assign a project, change roles, or add and remove agents here.</p>
           <div className="group-chat-suggestions">{['Plan a project together', 'Split up an implementation', 'Declare the team’s roles'].map((prompt) => <button key={prompt} type="button" onClick={() => { setDraft(prompt); textarea.current?.focus(); }}>{prompt}</button>)}</div>
         </div>}
         {assistantMessageLayout(chatMessages).map(({ message, showTimestamp, startGroup, showSentTime, showDeliveryStatus }, index) => {
           const boundary = startGroup || chatMessages[index - 1]?.senderId !== message.senderId;
           const member = group.members.find((peer) => peer.id === message.senderId);
+          const lastAgentMessage = message.senderType === 'agent' && !chatMessages.slice(index + 1).some((candidate) => candidate.rootId === message.rootId && candidate.senderType === 'agent' && candidate.senderId === message.senderId);
+          const lastRootMessage = !chatMessages.slice(index + 1).some((candidate) => candidate.rootId === message.rootId);
           return <div className={cn('min-w-0', boundary ? 'mt-4 first:mt-0' : 'mt-1')} key={message.id}>
             {showTimestamp && <time className="mb-3 mt-6 block text-center text-[12px] text-muted-foreground" dateTime={message.createdAt}>{new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(message.createdAt))}</time>}
             <article className="group/message min-w-0" aria-label={message.role === 'user' ? 'Your message' : message.senderName + ' reply'} tabIndex={showSentTime ? 0 : undefined}>
@@ -317,11 +350,12 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
               {message.pending ? <div role="status" className="mt-1 flex items-center justify-end gap-1 pr-4 text-[11px] text-muted-foreground">
                 {message.pending.status === 'sending' ? <><LoaderCircle className="size-3 animate-spin" />Sending…</> : <><TriangleAlert className="size-3 text-destructive" /><span title={message.pending.error}>Not sent</span><button type="button" className="underline underline-offset-2" aria-label="Retry message" onClick={() => dispatch(message.pending!)}>Retry</button></>}
               </div> : showSentTime && <p aria-live={showDeliveryStatus ? 'polite' : undefined} className={cn('mt-1 pr-4 text-right text-[11px] text-muted-foreground', !showDeliveryStatus && 'opacity-0 group-hover/message:opacity-100 group-focus-within/message:opacity-100')}>Delivered</p>}
+              {lastAgentMessage && workSummary(message.rootId, message.senderId)}
             </article>
-            {message.senderType === 'user' && !message.pending && workSummary(message.rootId)}
+            {lastRootMessage && !message.pending && workSummary(message.rootId)}
           </div>;
         })}
-        {Array.from(new Set([...group.tasks, ...group.executions].map((item) => item.rootId))).filter((rootId) => !messages.some((message) => message.senderType === 'user' && message.rootId === rootId)).map((rootId) => <div key={rootId}>{workSummary(rootId)}</div>)}
+        {Array.from(new Set([...group.tasks, ...group.executions].map((item) => item.rootId))).filter((rootId) => !messages.some((message) => message.rootId === rootId)).map((rootId) => <div key={rootId}>{workSummary(rootId)}</div>)}
         {!group.stopped && running.filter((execution) => execution.status === 'running' && execution.activity).map((execution) => <div key={execution.id} className="mt-3" role="status" aria-label={agentName(execution.agentId) + ' is typing'}>
           <div className="group-message-sender"><span>{agentName(execution.agentId)}</span></div>
           <div className="assistant-message-bubble assistant-message-reply w-fit rounded-[22px] px-4 py-2.5 text-muted-foreground"><span aria-hidden="true" className="animate-pulse tracking-widest motion-reduce:animate-none">•••</span></div>

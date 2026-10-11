@@ -134,6 +134,11 @@ async fn migration_shares_credentials_and_preserves_project_targets_and_task_sou
 
 #[tokio::test]
 async fn shared_connection_syncs_only_into_each_bound_project() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
     let (root, state) = fixture().await;
     // Connections can be configured before any local project exists.
     let (_, Json(connection)) = create(
@@ -166,10 +171,15 @@ async fn shared_connection_syncs_only_into_each_bound_project() {
             .is_err()
         );
     }
-    let app = axum::Router::new().route("/api/v4/projects/{id}/issues", axum::routing::get(|Path(id): Path<String>, headers: axum::http::HeaderMap| async move {
+    let issue_closed = Arc::new(AtomicBool::new(false));
+    let response_closed = issue_closed.clone();
+    let app = axum::Router::new().route("/api/v4/projects/{id}/issues", axum::routing::get(move |Path(id): Path<String>, axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>, headers: axum::http::HeaderMap| {
+        let response_closed = response_closed.clone();
+        async move {
         assert_eq!(headers["private-token"], "test-token");
-        Json(json!([{"id":42,"iid":1,"project_id":id.parse::<i64>().unwrap(),"title":"Imported issue","description":"Details","web_url":"https://gitlab.example/acme/repo/-/issues/1"}]))
-    }));
+        assert_eq!(query.get("state").map(String::as_str), Some("all"));
+        Json(json!([{"id":42,"iid":1,"project_id":id.parse::<i64>().unwrap(),"title":"Imported issue","description":"Details","state":if response_closed.load(Ordering::Relaxed) { "closed" } else { "opened" },"web_url":"https://gitlab.example/acme/repo/-/issues/1"}]))
+    }}));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -197,18 +207,64 @@ async fn shared_connection_syncs_only_into_each_bound_project() {
             .await,
             Err(AppError::NotFound(_))
         ));
+        issue_closed.store(true, Ordering::Relaxed);
+        let Json(result) =
+            crate::sync_integration(State(state.clone()), Path((id.into(), binding.id.clone())))
+                .await
+                .unwrap();
+        assert_eq!(result.imported, 0);
+        assert_eq!(result.updated, 0);
+        assert_eq!(result.skipped, 1);
+        assert!(state.db.tasks(id).await.unwrap().is_empty());
+        issue_closed.store(false, Ordering::Relaxed);
         let Json(result) =
             crate::sync_integration(State(state.clone()), Path((id.into(), binding.id.clone())))
                 .await
                 .unwrap();
         assert_eq!(result.imported, 1);
+        assert_eq!(result.updated, 0);
         assert_eq!(result.failed, 0);
         let Json(result) =
             crate::sync_integration(State(state.clone()), Path((id.into(), binding.id.clone())))
                 .await
                 .unwrap();
         assert_eq!(result.imported, 0);
+        assert_eq!(result.updated, 0);
         assert_eq!(result.skipped, 1);
+        issue_closed.store(true, Ordering::Relaxed);
+        let Json(result) =
+            crate::sync_integration(State(state.clone()), Path((id.into(), binding.id.clone())))
+                .await
+                .unwrap();
+        assert_eq!(result.updated, 1);
+        let task_id: String =
+            sqlx::query_scalar("SELECT task_id FROM task_sources WHERE integration_id=?")
+                .bind(&binding.id)
+                .fetch_one(&state.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(state.db.task(&task_id).await.unwrap().status, "done");
+        issue_closed.store(false, Ordering::Relaxed);
+        let Json(result) =
+            crate::sync_integration(State(state.clone()), Path((id.into(), binding.id.clone())))
+                .await
+                .unwrap();
+        assert_eq!(result.updated, 1);
+        assert_eq!(state.db.task(&task_id).await.unwrap().status, "queued");
+        sqlx::query("UPDATE tasks SET status='running' WHERE id=?")
+            .bind(&task_id)
+            .execute(&state.db.pool)
+            .await
+            .unwrap();
+        issue_closed.store(true, Ordering::Relaxed);
+        let Json(result) =
+            crate::sync_integration(State(state.clone()), Path((id.into(), binding.id.clone())))
+                .await
+                .unwrap();
+        assert_eq!(result.updated, 0);
+        assert_eq!(result.skipped, 1);
+        assert_eq!(state.db.task(&task_id).await.unwrap().status, "running");
+        issue_closed.store(false, Ordering::Relaxed);
         let Json(tasks) = crate::list_tasks(
             State(state.clone()),
             axum::extract::Query(crate::TaskListQuery {

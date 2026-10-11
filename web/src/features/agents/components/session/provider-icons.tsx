@@ -3,7 +3,7 @@ import type { ProviderAccountStatus } from "@/features/agents/lib/api-client"
 import { cn } from "@/lib/utils"
 
 export function ProviderGlyph({ icon }: { icon: string }) {
-  if (icon === "codex") {
+  if (icon === "codex" || icon === "claude") {
     return (
       <span className="grid size-9 shrink-0 place-items-center rounded-md bg-foreground text-background">
         <ProviderMark icon={icon} className="size-5" />
@@ -22,7 +22,14 @@ export function ProviderMark({ className, icon }: { className?: string; icon?: s
   if (icon === "codex") {
     return <CodexIcon className={cn("shrink-0", className)} />
   }
+  if (icon === "claude") {
+    return <ClaudeIcon className={cn("shrink-0", className)} />
+  }
   return <Bot className={cn("shrink-0", className)} />
+}
+
+export function ClaudeIcon({ className }: { className?: string }) {
+  return <svg aria-hidden="true" className={className} fill="currentColor" focusable="false" viewBox="0 0 24 24"><path d="M16.9 2.8h-3.1L8.1 21.2h3.2l1.2-4.2h5.6l1.3 4.2h3.3L16.9 2.8Zm-3.6 11.4 2-7.1 2.1 7.1h-4.1ZM1.3 17.1l4.4-11h3.1l-4.4 11H1.3Z" /></svg>
 }
 
 export function CodexIcon({ className }: { className?: string }) {

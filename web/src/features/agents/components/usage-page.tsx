@@ -68,14 +68,13 @@ function UsageChart({ usage, days, metric }: { usage: AgentUsage; days: number; 
         setSelected(Math.max(0, Math.min(days - 1, Math.round((point - plot.left) / (plot.right - plot.left) * (days - 1)))));
       }}>
         <title id={titleId}>Daily token usage by agent{metric !== 'tokens' ? ` · ${metric === 'cachedTokens' ? 'cached' : metric === 'inputTokens' ? 'input' : 'output'}` : ''}</title>
-        <desc id={descriptionId}>Line chart for the last {days} days. Each agent has a separate colored series. Use the agent buttons to show or hide series and the day slider to inspect exact values.</desc>
+        <desc id={descriptionId}>Line chart for the last {days} days. Each agent has a separate colored series. Use the agent buttons to show or hide series and move across the chart to inspect exact values.</desc>
         {[0, 1, 2, 3, 4].map((tick) => <g key={tick}><line className="usage-grid" x1={plot.left} x2={plot.right} y1={y(ceiling * tick / 4)} y2={y(ceiling * tick / 4)} /><text className="usage-axis" x={plot.left - 10} y={y(ceiling * tick / 4) + 4} textAnchor="end">{compact.format(ceiling * tick / 4)}</text></g>)}
         {tickIndices.map((index) => <text key={index} className="usage-axis" x={x(index)} y={height - 14} textAnchor={index === 0 ? 'start' : index === days - 1 ? 'end' : 'middle'}>{shortDate.format(dates[index])}</text>)}
         <line className="usage-cursor" x1={x(selected)} x2={x(selected)} y1={plot.top} y2={plot.bottom} />
         {visible.map((agent, index) => <g key={agent.agentId} data-agent-id={agent.agentId}><polyline fill="none" stroke={usageColor(agent.agentId)} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" strokeDasharray={index % 3 === 0 ? undefined : index % 3 === 1 ? '7 3' : '2 4'} points={agent.values.map((value, day) => `${x(day)},${y(value)}`).join(' ')} /><circle cx={x(selected)} cy={y(agent.values[selected])} r="4" fill={usageColor(agent.agentId)} /></g>)}
       </svg>
       {total === 0 && <p className="usage-empty"><ChartNoAxesCombined aria-hidden="true" />{metric !== 'tokens' && totals.total > 0 && !coverage ? 'Token breakdown unavailable for these records.' : 'No recorded usage in this period.'}</p>}
-      <div className="usage-inspector"><label htmlFor={`${titleId}-day`}>Inspect day</label><input id={`${titleId}-day`} type="range" min={0} max={days - 1} value={selected} onChange={(event) => setSelected(Number(event.target.value))} aria-valuetext={fullDate.format(dates[selected])} /></div>
       <div className="usage-day-details" aria-live="polite" aria-atomic="true"><strong>{fullDate.format(dates[selected])}</strong><div>{visible.length ? visible.map((agent) => <span key={agent.agentId}><i style={{ background: usageColor(agent.agentId) }} />{agent.name}<b>{exact.format(agent.values[selected])}</b></span>) : <span>Select an agent below to show usage.</span>}</div></div>
     </div>
     {series.length > 0 && <div className="usage-legend" role="group" aria-label="Agent series">{series.map((agent) => <button key={agent.agentId} aria-pressed={!hidden.has(agent.agentId)} onClick={() => setHidden((old) => {

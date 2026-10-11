@@ -2,7 +2,7 @@ import { TaskMarkdown, toggleMarkdown, type SaveCheckbox } from "@/components/as
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useAttachmentPreviewLayout } from "@/components/attachment-preview-layout";
-import { Download, FileText, LoaderCircle, Maximize, SquareArrowOutUpRight, X, ZoomIn, ZoomOut } from "lucide-react";
+import { Download, FileCode2, FileText, LoaderCircle, Maximize, SquareArrowOutUpRight, X, ZoomIn, ZoomOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
@@ -16,6 +16,7 @@ type AttachmentPreviewProps = {
   sourceKey?: string;
   load?: () => Promise<AttachmentFile>;
   compact?: boolean;
+  inline?: boolean;
   label?: ReactNode;
   className?: string;
 };
@@ -28,7 +29,7 @@ function safeSource(src?: string) {
   return src && /^(?:https?:\/\/|blob:|data:)/i.test(src) ? src : undefined;
 }
 
-export function AttachmentPreview({ name, mimeType, src, sourceKey, load, compact, label, className, saveCheckbox }: AttachmentPreviewProps) {
+export function AttachmentPreview({ name, mimeType, src, sourceKey, load, compact, inline, label, className, saveCheckbox }: AttachmentPreviewProps) {
   const layout = useAttachmentPreviewLayout();
   const id = useId();
   const [open, setOpen] = useState(false);
@@ -156,10 +157,14 @@ export function AttachmentPreview({ name, mimeType, src, sourceKey, load, compac
         </div>
   </>;
 
+  const fallback = inline
+    ? <span className="inline-flex min-w-0 max-w-full items-baseline gap-1 leading-[inherit]">{/\.(?:[cm]?[jt]sx?|css|scss|rs|py|go|java|kt|swift|rb|php|vue|svelte)$/i.test(name) ? <FileCode2 className="relative top-[0.12em] size-[1em] shrink-0 self-start" /> : <FileText className="relative top-[0.12em] size-[1em] shrink-0 self-start" />}<span className="truncate">{label ?? name}</span></span>
+    : <span className="flex max-w-64 items-center gap-2 px-3 py-2 text-xs">{image && !error && !imageError ? <LoaderCircle className="size-4 shrink-0 animate-spin" /> : <FileText className="size-4 shrink-0" />}<span className="truncate">{label ?? name}</span></span>;
+
   return <>
-    <button ref={triggerRef} type="button" aria-label={`View ${name}`} title={name} onClick={() => { setZoom(1); setSplit(layout?.claim(id) ?? false); setOpen(true); }} className={cn("inline-block max-w-full overflow-hidden rounded-lg border border-border bg-secondary text-left align-middle outline-none hover:border-primary/50 focus-visible:ring-2 focus-visible:ring-ring", className)}>
+    <button ref={triggerRef} type="button" aria-label={`View ${name}`} title={name} onClick={() => { setZoom(1); setSplit(layout?.claim(id) ?? false); setOpen(true); }} className={cn(inline ? "workspace-file-link inline-flex max-w-full items-baseline align-baseline text-left text-primary outline-none hover:underline focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-ring" : "inline-block max-w-full overflow-hidden rounded-lg border border-border bg-secondary text-left align-middle outline-none hover:border-primary/50 focus-visible:ring-2 focus-visible:ring-ring", className)}>
       {image && !imageError && displaySource ? <img alt={name} src={displaySource} onError={() => setImageError(true)} className={compact ? "h-16 w-20 object-cover" : "max-h-64 max-w-full object-contain"} />
-        : <span className="flex max-w-64 items-center gap-2 px-3 py-2 text-xs">{image && !error && !imageError ? <LoaderCircle className="size-4 shrink-0 animate-spin" /> : <FileText className="size-4 shrink-0" />}<span className="truncate">{label ?? name}</span></span>}
+        : fallback}
     </button>
     {open && split && layout?.target && createPortal(<div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden p-4">{preview}</div>, layout.target)}
     <Dialog open={open && !split} onOpenChange={(value) => { if (!value) close(); }}>

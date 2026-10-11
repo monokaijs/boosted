@@ -39,7 +39,7 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
   })
   const state = snapshot.data ?? null
   const providers = useQuery({ queryKey: ["provider-accounts"], queryFn: apiClient.providerAccounts.list, staleTime: 30_000 })
-  const accounts = useMemo(() => (providers.data ?? []).filter((account) => account.status === "CONNECTED"), [providers.data])
+  const accounts = useMemo(() => (providers.data ?? []).filter((account) => account.status === "CONNECTED" && account.providerId !== "claude"), [providers.data])
   const [accountId, setAccountId] = useWorkspaceState(`assistant:${agentId}:account`, "")
   const [localError, setError] = useState<string | null>(null)
   const error = localError ?? snapshot.error?.message ?? providers.error?.message ?? null

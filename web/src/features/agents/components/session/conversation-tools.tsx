@@ -43,7 +43,7 @@ function ActionGroupContent({ actions, shell, onOpenChat }: { actions: Assistant
       </button>
       <div className="assistant-tool-reveal" data-expanded={expanded} id={panelId} aria-hidden={!expanded} inert={!expanded}>
         <div className="min-h-0 overflow-hidden">
-          <div className="flex min-w-0 flex-col items-start gap-1 pt-1.5">
+          <div className="assistant-tool-panel mt-1.5 flex min-w-0 flex-col gap-0.5 rounded-xl border border-border bg-card p-1.5 shadow-sm">
             {revealed ? actions.map((action) => <ActionReceipt action={action} key={action.id} shell={shell} onOpenChat={onOpenChat} />) : null}
           </div>
         </div>
@@ -59,13 +59,13 @@ function ActionReceipt({ action, shell, onOpenChat }: { action: AssistantAction;
   const workspace = shell?.recentWorkspaces.find((item) => item.path === directory)
   const linkedChat = action.chatId ? { id: action.chatId, title: chat?.title ?? "Codex chat" } : null
   return (
-    <details className="group min-w-0 max-w-full" onToggle={(event) => setOpen(event.currentTarget.open)}>
-      <summary className="inline-flex min-h-8 max-w-full cursor-pointer list-none items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 text-xs transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
+    <details className="group min-w-0 w-full" onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary className="flex min-h-8 w-full cursor-pointer list-none items-center gap-2 rounded-lg px-2 py-1.5 text-xs transition-colors hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
         {action.status === "running" ? <LoaderCircle role="img" aria-label="Running" className="size-3.5 shrink-0 animate-spin text-muted-foreground motion-reduce:animate-none" /> : action.status === "failed" ? <TriangleAlert role="img" aria-label="Failed" className="size-3.5 shrink-0 text-destructive" /> : <Check role="img" aria-label="Completed" className="size-3.5 shrink-0 text-emerald-500" />}
         <span className="truncate">{labels[action.tool] ?? action.tool}</span>
         <ChevronRight aria-hidden="true" className="size-3 shrink-0 text-muted-foreground transition-transform duration-200 group-open:rotate-90 motion-reduce:transition-none" />
       </summary>
-      {open ? <div className="mt-1 rounded-2xl border border-border bg-card px-3 py-3">
+      {open ? <div className="mx-2 mb-2 mt-1 rounded-lg bg-secondary/60 px-3 py-3">
         {linkedChat ? <button type="button" className="mb-3 inline-block text-xs text-info underline underline-offset-4" onClick={() => onOpenChat ? onOpenChat(linkedChat.id) : shell ? void shell.openSidebarChat(linkedChat) : window.dispatchEvent(new CustomEvent("boosted:open-codex-chat", { detail: { threadId: linkedChat.id } }))}>Open chat{workspace ? ` · ${workspace.name}` : ""}</button> : null}
         <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-[11px] leading-5 text-muted-foreground">{action.result ? prettyResult(action.result) : prettyResult(JSON.stringify(action.arguments))}</pre>
       </div> : null}

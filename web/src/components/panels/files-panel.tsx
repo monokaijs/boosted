@@ -51,7 +51,7 @@ export function FilesPanel() {
     <div className="panel-root tool-panel">
       <div className="panel-header"><div className="panel-title"><FileCode2 className="size-3.5" />Files</div><span className="font-mono text-[9px] text-muted-foreground">{taskId ? "worktree" : "project"}</span></div>
       <div className="file-tree min-h-0 flex-1 overflow-auto px-1 pb-3 pt-1">
-        <div className="mb-1 flex h-8 items-center gap-2 rounded bg-accent px-2 text-xs font-semibold text-foreground">{project ? <ProjectAvatar project={project} /> : <FolderOpen className="size-4" />}<span className="truncate">{project?.name ?? "Repository"}</span></div>
+        <div className="mb-1 flex h-8 items-center gap-2 px-2 text-xs font-medium text-muted-foreground">{project ? <ProjectAvatar project={project} /> : <FolderOpen className="size-4" />}<span className="truncate">{project?.name ?? "Repository"}</span></div>
         <Directory source={source} path="" depth={0} onSelect={selectFile} selected={selected} />
       </div>
     </div>

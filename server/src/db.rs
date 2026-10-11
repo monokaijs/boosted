@@ -206,7 +206,8 @@ impl Database {
     }
 
     pub async fn tasks(&self, project_id: &str) -> AppResult<Vec<Task>> {
-        let query = TASK_SELECT.to_owned() + " WHERE t.project_id=? ORDER BY t.updated_at DESC";
+        let query = TASK_SELECT.to_owned()
+            + " WHERE t.project_id=? ORDER BY t.updated_at DESC,t.created_at DESC,t.id DESC";
         let rows = sqlx::query(&query)
             .bind(project_id)
             .fetch_all(&self.pool)
@@ -470,5 +471,26 @@ mod tests {
             db.update_project_icon("missing", None).await,
             Err(AppError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn tasks_use_stable_tiebreakers_for_equal_update_times() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Database::connect(&root.path().join("boosted.sqlite3"))
+            .await
+            .unwrap();
+        insert_project(&db).await;
+        for id in ["task-a", "task-b"] {
+            sqlx::query("INSERT INTO tasks(id,project_id,title,description,status,branch_name,worktree_path,created_by,created_at,updated_at) VALUES(?,'project',?,'','queued',?,?,'user','2026-10-06','2026-10-06')")
+                .bind(id).bind(id).bind(id).bind(root.path().to_string_lossy().to_string()).execute(&db.pool).await.unwrap();
+        }
+        let tasks = db.tasks("project").await.unwrap();
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["task-b", "task-a"]
+        );
     }
 }

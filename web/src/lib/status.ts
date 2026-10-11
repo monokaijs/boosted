@@ -12,4 +12,9 @@ export const taskStatusMeta: Record<TaskStatus, { label: string; boardLabel: str
   failed: { label: "Failed", boardLabel: "Failed", color: "text-destructive", icon: CircleAlert },
 };
 
-export const boardStatuses: TaskStatus[] = ["queued", "planning", "ready", "running", "needs_input", "review", "done", "failed"];
+export const boardColumns = [
+  { id: "todo", label: "To do", statuses: ["queued", "planning", "ready"], targetStatus: "queued", color: "text-muted-foreground", icon: ListTodo },
+  { id: "in-progress", label: "In progress", statuses: ["running"], targetStatus: "running", color: "text-chat-accent", icon: LoaderCircle },
+  { id: "attention", label: "Needs attention", statuses: ["needs_input", "review", "failed"], targetStatus: "review", color: "text-warning", icon: MessageCircleQuestion },
+  { id: "done", label: "Done", statuses: ["done"], targetStatus: "done", color: "text-success", icon: CircleCheck },
+] satisfies { id: string; label: string; statuses: TaskStatus[]; targetStatus: TaskStatus; color: string; icon: typeof CircleCheck }[];

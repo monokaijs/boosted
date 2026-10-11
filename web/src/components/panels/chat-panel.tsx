@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowUpRight, MessagesSquare, Bot, Check, ChevronDown, ChevronRight, CircleStop, ExternalLink, FileDiff, FolderOpen, GitBranch, History, ListChecks, ListTodo, LoaderCircle, Plus, RefreshCw, Send, TerminalSquare, UserRound, X } from "lucide-react";
 import { TaskMarkdown, type SaveCheckbox } from "@/components/assistant-ui/task-markdown";
@@ -34,40 +34,62 @@ function markdownPlanStep(plan: TaskPlan) {
   return /(?:^|\n)\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s)|\*\*|`/.test(step.step) ? step : undefined;
 }
 
-function GitlabActivityPanel({ taskId, issueUrl, onClose }: { taskId: string; issueUrl: string; onClose(): void }) {
+function resolveGitlabUrl(issueUrl: string, value?: string) {
+  if (!value) return undefined;
+  try { return new URL(value, issueUrl).toString(); } catch { return value; }
+}
+
+function isGitlabUpload(issueUrl: string, value?: string) {
+  const resolved = resolveGitlabUrl(issueUrl, value);
+  if (!resolved) return false;
+  try { return new URL(resolved).pathname.split("/").includes("uploads"); } catch { return false; }
+}
+
+function gitlabAttachmentName(value: string, fallback = "GitLab attachment") {
+  try { return decodeURIComponent(new URL(value, "https://gitlab.invalid").pathname.split("/").filter(Boolean).pop() ?? fallback); }
+  catch { return fallback; }
+}
+
+function normalizeGitlabMarkdown(content: string) {
+  return content.replace(/(\]\([^)]+\))\s*\{(?=[^}\n]*(?:width|height)=)[^}\n]+\}/gi, "$1");
+}
+
+function GitlabMarkdown({ taskId, issueUrl, content, className }: { taskId: string; issueUrl: string; content: string; className?: string }) {
+  const client = useBoostedApiClient();
+  const components = useMemo(() => ({
+    a: ({ node: _node, href, children, ...props }: ComponentPropsWithoutRef<"a"> & { node?: unknown }) => {
+      if (href && isGitlabUpload(issueUrl, href)) return <AttachmentPreview name={gitlabAttachmentName(href)} sourceKey={`${client.profileId}:${taskId}:gitlab:${href}`} load={() => client.taskSourceAsset(taskId, href)} label={children} className="gitlab-attachment" />;
+      const resolved = resolveGitlabUrl(issueUrl, href);
+      return <a {...props} href={resolved} target="_blank" rel="noreferrer">{children}</a>;
+    },
+    img: ({ node: _node, src, alt, ...props }: ComponentPropsWithoutRef<"img"> & { node?: unknown }) => {
+      if (src && isGitlabUpload(issueUrl, src)) return <AttachmentPreview name={gitlabAttachmentName(src, alt || "GitLab image")} mimeType="image/*" sourceKey={`${client.profileId}:${taskId}:gitlab:${src}`} load={() => client.taskSourceAsset(taskId, src)} className="gitlab-attachment gitlab-attachment-image" />;
+      return <img {...props} src={resolveGitlabUrl(issueUrl, src)} alt={alt ?? ""} loading="lazy" />;
+    },
+  }), [client, issueUrl, taskId]);
+  return <TaskMarkdown className={className} content={normalizeGitlabMarkdown(content)} components={components} />;
+}
+
+function GitlabDiscussion({ taskId, issueUrl }: { taskId: string; issueUrl: string }) {
   const activity = useQuery({ queryKey: ["task-source-activity", taskId], queryFn: () => api.taskSourceActivity(taskId) });
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [onClose]);
-  return <div className="task-source-activity-layer">
-    <button type="button" className="task-source-activity-scrim" aria-label="Close GitLab activity" onClick={onClose} />
-    <aside className="task-source-activity-panel" aria-label="GitLab issue activity">
-      <header className="task-source-activity-header">
-        <div className="min-w-0"><div className="flex items-center gap-2 text-sm font-semibold"><GitBranch className="size-4 text-[#FC6D26]" />GitLab activity</div><p className="mt-0.5 text-[11px] text-muted-foreground">Comments and system updates from the imported issue.</p></div>
-        <Button variant="ghost" size="icon-sm" aria-label="Refresh GitLab activity" title="Refresh" onClick={() => void activity.refetch()} disabled={activity.isFetching}><RefreshCw className={cn(activity.isFetching && "animate-spin")} /></Button>
-        <Button variant="ghost" size="icon-sm" aria-label="Close GitLab activity" onClick={onClose}><X /></Button>
-      </header>
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="task-source-activity-content">
-          <Button variant="secondary" size="sm" className="w-full" onClick={() => void openExternalUrl(issueUrl)}><ExternalLink />Open issue in GitLab</Button>
-          {activity.isLoading && <div className="grid justify-items-center gap-2 py-16 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Loading issue activity…</div>}
-          {activity.error && <div className="grid gap-3 py-10 text-center text-xs text-destructive"><p>{activity.error.message}</p><Button variant="secondary" size="sm" className="justify-self-center" onClick={() => void activity.refetch()}>Try again</Button></div>}
-          {!activity.isLoading && !activity.error && activity.data?.items.length === 0 && <div className="py-16 text-center text-xs text-muted-foreground">No GitLab activity yet.</div>}
-          {activity.data?.items.map((item) => <article key={item.id} className="task-source-activity-item">
-            <div className="task-source-activity-avatar">{item.author.name.trim().charAt(0).toUpperCase() || "G"}</div>
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5"><span className="text-xs font-medium">{item.author.name}</span>{item.author.username && <span className="text-[10px] text-muted-foreground">@{item.author.username}</span>}<time className="ml-auto text-[10px] text-muted-foreground" dateTime={item.createdAt} title={new Date(item.createdAt).toLocaleString()}>{relativeTime(item.createdAt)}</time></div>
-              {item.system && <p className="mt-1 text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">System update</p>}
-              <TaskMarkdown className="aui-markdown selectable-text mt-1 text-xs" content={item.body} />
-            </div>
-          </article>)}
-          {activity.data?.truncated && <p className="py-4 text-center text-[10px] text-muted-foreground">Showing the 100 most recent activities.</p>}
-        </div>
-      </ScrollArea>
-    </aside>
-  </div>;
+  return <section className="gitlab-discussion" aria-label="GitLab discussion">
+    <header className="gitlab-discussion-header">
+      <div><div className="flex items-center gap-2 text-xs font-medium"><History className="size-3.5 text-[#FC6D26]" />GitLab discussion{activity.data && <span className="text-[10px] text-muted-foreground">{activity.data.items.length}</span>}</div><p>Comments, replies, and issue activity from GitLab.</p></div>
+      <Button variant="ghost" size="icon-sm" aria-label="Refresh GitLab discussion" title="Refresh" onClick={() => void activity.refetch()} disabled={activity.isFetching}><RefreshCw className={cn(activity.isFetching && "animate-spin")} /></Button>
+    </header>
+    {activity.isLoading && <div className="grid justify-items-center gap-2 py-10 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Loading GitLab discussion…</div>}
+    {activity.error && <div className="grid gap-3 py-8 text-center text-xs text-destructive"><p>{activity.error.message}</p><Button variant="secondary" size="sm" className="justify-self-center" onClick={() => void activity.refetch()}>Try again</Button></div>}
+    {!activity.isLoading && !activity.error && activity.data?.items.length === 0 && <div className="py-8 text-center text-xs text-muted-foreground">No GitLab discussion or activity yet.</div>}
+    {activity.data?.items.map((item) => <article key={item.id} className={cn("gitlab-discussion-item", item.reply && "is-reply", item.system && "is-system")}>
+      <div className="task-source-activity-avatar">{item.author.avatarUrl ? <img src={item.author.avatarUrl} alt="" /> : item.author.name.trim().charAt(0).toUpperCase() || "G"}</div>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5"><span className="text-xs font-medium">{item.author.name}</span>{item.author.username && <span className="text-[10px] text-muted-foreground">@{item.author.username}</span>}<time className="ml-auto text-[10px] text-muted-foreground" dateTime={item.createdAt} title={new Date(item.createdAt).toLocaleString()}>{relativeTime(item.createdAt)}</time></div>
+        {item.system && <p className="mt-1 text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">System activity</p>}
+        <GitlabMarkdown taskId={taskId} issueUrl={issueUrl} className="aui-markdown selectable-text mt-1 text-xs" content={item.body} />
+      </div>
+    </article>)}
+    {activity.data?.truncated && <p className="py-4 text-center text-[10px] text-muted-foreground">Showing the first 100 GitLab discussions.</p>}
+  </section>;
 }
 
 function questionsFromEvent(event: TaskEvent | undefined): CodexQuestion[] {
@@ -321,7 +343,6 @@ export function NewChatPanel() {
 export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
   const client = useBoostedApiClient();
   const selectedTaskId = useAppStore((state) => state.selectedTaskId);
-  const [sourceActivityOpen, setSourceActivityOpen] = useState(false);
   const [message, setMessage] = useWorkspaceState(`task:${selectedTaskId ?? "none"}:draft`, "");
   const queryClient = useQueryClient();
   const commentInput = useRef<HTMLTextAreaElement>(null);
@@ -352,8 +373,6 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
   });
   const stop = useMutation({ mutationFn: () => api.stopTask(selectedTaskId!), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] }) });
   const ordered = useMemo(() => [...(events.data ?? [])].sort((a, b) => a.id - b.id), [events.data]);
-
-  useEffect(() => setSourceActivityOpen(false), [selectedTaskId]);
 
   if (!selectedTaskId) return <div className="empty-state"><ListTodo className="size-8" /><p>Select a task to open its details and chat.</p></div>;
   const meta = task.data ? taskStatusMeta[task.data.status] : undefined;
@@ -402,7 +421,6 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
               <h1 className="min-w-0 basis-64 flex-1 text-[15px] font-semibold leading-5">{task.data.title}</h1>
               <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
                 {gitlabSource && <>
-                  <Button variant="ghost" size="sm" onClick={() => setSourceActivityOpen(true)}><History />Activity</Button>
                   <Button asChild variant="ghost" size="sm"><a href={gitlabSource.externalUrl} target="_blank" rel="noreferrer" onClick={(event) => { event.preventDefault(); void openExternalUrl(gitlabSource.externalUrl!); }}><ExternalLink />Open in GitLab</a></Button>
                 </>}
                 {task.data.status === "review" && <Button size="sm" onClick={() => markComplete.mutate("done")} disabled={markComplete.isPending}><Check />Mark done</Button>}
@@ -423,7 +441,11 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
       )}
       <ScrollArea className="chat-scroll min-h-0 flex-1 px-4">
         <div className="mx-auto max-w-3xl py-3">
-          {task.data && <section className="mb-4 px-1 pb-2"><div className="aui-markdown text-xs"><TaskMarkdown key={`${selectedTaskId}:description`} content={task.data.description} saveCheckbox={active ? undefined : (edit) => saveCheckbox("description", undefined, edit)} components={workspaceFileMarkdownComponents} urlTransform={workspaceMarkdownUrlTransform} /></div>{task.data.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{task.data.attachments.map((attachment) => <AttachmentPreview key={attachment.id} name={attachment.name} mimeType={attachment.mimeType} sourceKey={`${task.data!.id}:${attachment.id}`} load={() => api.taskAttachment(task.data!.id, attachment.id)} />)}</div>}</section>}
+          {task.data && <section className="mb-4 px-1 pb-2">{gitlabSource
+            ? <GitlabMarkdown key={`${selectedTaskId}:gitlab-description`} taskId={selectedTaskId} issueUrl={gitlabSource.externalUrl!} className="aui-markdown text-xs" content={task.data.description} />
+            : <TaskMarkdown key={`${selectedTaskId}:description`} className="aui-markdown text-xs" content={task.data.description} saveCheckbox={active ? undefined : (edit) => saveCheckbox("description", undefined, edit)} components={workspaceFileMarkdownComponents} urlTransform={workspaceMarkdownUrlTransform} />}
+            {task.data.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{task.data.attachments.map((attachment) => <AttachmentPreview key={attachment.id} name={attachment.name} mimeType={attachment.mimeType} sourceKey={`${task.data!.id}:${attachment.id}`} load={() => api.taskAttachment(task.data!.id, attachment.id)} />)}</div>}</section>}
+          {gitlabSource && <GitlabDiscussion taskId={selectedTaskId} issueUrl={gitlabSource.externalUrl!} />}
           <div className="mb-1 flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground"><span>Comments</span><span className="h-px flex-1 bg-border" /></div>
           {ordered.length === 0 && events.isLoading && <div className="py-16 text-center text-xs text-muted-foreground">Loading comments…</div>}
           {ordered.filter((event) => !event.payload.replyTo || !ordered.some((parent) => parent.payload.commentId === event.payload.replyTo)).map((event) => <div key={event.id}>
@@ -452,7 +474,6 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
         {agents.error && <p role="alert" className="mx-auto mt-1.5 max-w-3xl text-xs text-destructive">Unable to load agents. <button type="button" onClick={() => void agents.refetch()}>Retry</button></p>}
         {send.error && <p className="mx-auto mt-1.5 max-w-3xl text-xs text-destructive">{send.error.message}</p>}
       </form>}
-      {sourceActivityOpen && gitlabSource && <GitlabActivityPanel taskId={selectedTaskId} issueUrl={gitlabSource.externalUrl!} onClose={() => setSourceActivityOpen(false)} />}
       </div>
     </WorkspaceFileProvider>
   );

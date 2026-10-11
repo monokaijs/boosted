@@ -6,6 +6,11 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::sync::{Mutex, watch};
 
+// Receipts accumulate native commands, diffs and tool results for the lifetime of
+// a group. Bound their model-facing copy independently of conversation history.
+const MODEL_RECEIPTS_CHAR_BUDGET: usize = 160_000;
+const MODEL_RECEIPT_FIELD_CHAR_BUDGET: usize = 2_000;
+
 #[derive(Clone, Default)]
 pub(crate) struct GroupManager {
     pub(crate) gate: Arc<Mutex<()>>,
@@ -2283,7 +2288,7 @@ pub(crate) fn tools(base: Value, purpose: &str) -> Value {
         ),
         (
             "read_group_context",
-            "Read current shared context, assignments, reviews and receipts.",
+            "Read current shared context, assignments, reviews and recent receipt summaries. Read the saved chat or run for complete tool output when a receipt is compacted or omitted.",
             json!({}),
             json!([]),
         ),
@@ -2922,6 +2927,45 @@ pub(crate) async fn record_child_event(
 mod tests;
 
 fn model_context(mut value: Value) -> Value {
+    fn compact_receipts(fields: &mut serde_json::Map<String, Value>) {
+        let Some(receipts) = fields.get_mut("receipts").and_then(Value::as_array_mut) else {
+            return;
+        };
+        let original_count = receipts.len();
+        let mut retained_start = original_count;
+        let mut characters = 2; // Array brackets; each retained item also needs a comma.
+        for receipt in receipts.iter_mut().rev() {
+            // A single structured result or file-change argument can be enormous.
+            // Keep small payloads intact and preserve receipt IDs/status/chat links.
+            for field in ["arguments", "result"] {
+                if let Some(payload) = receipt.get_mut(field) {
+                    let serialized = payload.to_string();
+                    if serialized.chars().count() > MODEL_RECEIPT_FIELD_CHAR_BUDGET {
+                        let preview = agents::compact_text_middle(
+                            payload.as_str().unwrap_or(&serialized),
+                            MODEL_RECEIPT_FIELD_CHAR_BUDGET,
+                        );
+                        *payload = json!({"compacted":true,"preview":preview});
+                    }
+                }
+            }
+            let count = receipt.to_string().chars().count() + 1;
+            if characters + count > MODEL_RECEIPTS_CHAR_BUDGET {
+                break;
+            }
+            characters += count;
+            retained_start -= 1;
+        }
+        receipts.drain(..retained_start);
+        if retained_start > 0 {
+            fields.insert("receiptCount".into(), json!(original_count));
+            fields.insert("omittedReceipts".into(), json!(retained_start));
+            fields.insert("receiptCompactionNotice".into(), json!(
+                "Only recent receipt summaries are included. Complete receipts remain saved; use read_chat/read_run to inspect full tool output before retrying actions."
+            ));
+        }
+    }
+
     fn strip(value: &mut Value) {
         match value {
             Value::Object(fields) => {
@@ -2932,6 +2976,7 @@ fn model_context(mut value: Value) -> Value {
                 for value in fields.values_mut() {
                     strip(value);
                 }
+                compact_receipts(fields);
             }
             Value::Array(values) => {
                 for value in values {

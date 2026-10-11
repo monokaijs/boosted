@@ -2,7 +2,7 @@ import { api } from '@/lib/api';
 import type { AgentIntegration, AgentIntegrationCreate, AgentIntegrationUpdate, AgentIntegrationChat, AssistantState, AssistantSummary, AssistantMessageRequest, CreateAssistantRequest } from '../types/assistant';
 import type { AgentUsage } from './usage';
 import type { ProviderModelPresets } from '../types/providers';
-import type { ProviderDefinitionResponse, ProviderAccountResponse, CreateProviderAccountRequest, UpdateProviderAccountRequest, AuthenticateProviderAccountResponse, ProviderModelListResponse, ProviderAccountLimitsResponse } from '../types/providers';
+import type { ProviderDefinitionResponse, ProviderAccountResponse, CreateProviderAccountRequest, UpdateProviderAccountRequest, AuthenticateProviderAccountRequest, AuthenticateProviderAccountResponse, ProviderModelListResponse, ProviderAccountLimitsResponse } from '../types/providers';
 export type * from '../types/providers';
 const encode = encodeURIComponent;
 function request<T>(path: string, method = 'GET', body?: unknown) {
@@ -37,7 +37,7 @@ export const apiClient = {
     get: (id: string) => request<ProviderAccountResponse>(`/provider-accounts/${encode(id)}`),
     update: (id: string, body: UpdateProviderAccountRequest) => request<ProviderAccountResponse>(`/provider-accounts/${encode(id)}`, 'PATCH', body),
     delete: (id: string) => request<void>(`/provider-accounts/${encode(id)}`, 'DELETE'),
-    authenticate: (id: string) => request<AuthenticateProviderAccountResponse>(`/provider-accounts/${encode(id)}/authenticate`, 'POST'),
+    authenticate: (id: string, body?: AuthenticateProviderAccountRequest) => request<AuthenticateProviderAccountResponse>(`/provider-accounts/${encode(id)}/authenticate`, 'POST', body),
     models: (id: string) => request<ProviderModelListResponse>(`/provider-accounts/${encode(id)}/models`),
     limits: () => request<ProviderAccountLimitsResponse>('/provider-accounts/limits'),
   },

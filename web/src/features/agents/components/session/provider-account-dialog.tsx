@@ -96,9 +96,9 @@ function ProviderAccountDialogBody({
         </div>
       ) : null}
       <div className="space-y-3">
-        <ProviderAccountNameAuth dialog={dialog} />
+        <ProviderAccountNameAuth dialog={dialog} provider={provider} />
         {provider.id === "codex" ? <ProviderPersonalityField dialog={dialog} /> : null}
-        {dialog.hasCodexHomeField ? <ProviderCodexHomeField dialog={dialog} /> : null}
+        {dialog.hasCodexHomeField ? <ProviderCodexHomeField dialog={dialog} provider={provider} /> : null}
         {dialog.hasDefaultModelField || dialog.hasDefaultPermissionField || dialog.hasDefaultReasoningField || dialog.hasDefaultServiceTierField
           ? <ProviderRuntimeDefaultsField dialog={dialog} />
           : null}
@@ -134,9 +134,9 @@ function ProviderAccountNotice({ notice }: { notice: ProviderAccountDialogState[
   )
 }
 
-function ProviderAccountNameAuth({ dialog }: { dialog: ProviderAccountDialogState }) {
+function ProviderAccountNameAuth({ dialog, provider }: { dialog: ProviderAccountDialogState; provider: ProviderDefinitionResponse }) {
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
+    <div className="grid gap-2">
       <label className="block">
         <span className="mb-1 block text-[11px] font-medium text-muted-foreground">Name</span>
         <input
@@ -145,22 +145,26 @@ function ProviderAccountNameAuth({ dialog }: { dialog: ProviderAccountDialogStat
           onChange={(event) => dialog.setDisplayName(event.target.value)}
         />
       </label>
-      <ProviderAccountAuthButton dialog={dialog} />
+      {provider.id === "claude" ? <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
+        <label className="block"><span className="mb-1 block text-[11px] font-medium text-muted-foreground">Authentication</span><select aria-label="Claude authentication" className="h-8 w-full rounded-md border border-input bg-background px-2 text-[12px]" value={dialog.authMode} onChange={(event) => dialog.setAuthMode(event.target.value as "web" | "apiKey")}><option value="web">Claude web sign-in</option><option value="apiKey">Anthropic API key</option></select></label>
+        {dialog.authMode === "apiKey" ? <label className="block"><span className="mb-1 block text-[11px] font-medium text-muted-foreground">API key</span><input aria-label="Anthropic API key" autoComplete="off" className="h-8 w-full rounded-md border border-input bg-background px-2 font-mono text-[12px]" placeholder="sk-ant-…" type="password" value={dialog.apiKey} onChange={(event) => dialog.setApiKey(event.target.value)} /></label> : <span className="self-center text-[11px] text-muted-foreground">Completes in your browser.</span>}
+        <ProviderAccountAuthButton dialog={dialog} provider={provider} />
+      </div> : <div className="flex justify-end"><ProviderAccountAuthButton dialog={dialog} provider={provider} /></div>}
     </div>
   )
 }
 
-function ProviderAccountAuthButton({ dialog }: { dialog: ProviderAccountDialogState }) {
+function ProviderAccountAuthButton({ dialog, provider }: { dialog: ProviderAccountDialogState; provider: ProviderDefinitionResponse }) {
   return (
     <button
       className="flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-[12px] font-medium text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-55"
-      disabled={dialog.authenticating}
+      disabled={dialog.authenticating || (provider.id === "claude" && dialog.authMode === "apiKey" && !dialog.apiKey.trim())}
       type="button"
       onClick={() => void dialog.authenticate()}
     >
       <MonitorCog className="size-3.5" />
       <span className="whitespace-nowrap">
-        {dialog.authenticating ? "Authenticating" : dialog.connected ? "Re-authenticate" : "Sign in with device code"}
+        {dialog.authenticating ? "Authenticating" : dialog.connected ? "Re-authenticate" : provider.id === "claude" ? "Connect" : "Sign in with device code"}
       </span>
     </button>
   )
@@ -191,10 +195,10 @@ function ProviderPersonalityField({ dialog }: { dialog: ProviderAccountDialogSta
   )
 }
 
-function ProviderCodexHomeField({ dialog }: { dialog: ProviderAccountDialogState }) {
+function ProviderCodexHomeField({ dialog, provider }: { dialog: ProviderAccountDialogState; provider: ProviderDefinitionResponse }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[11px] font-medium text-muted-foreground">Codex home</span>
+      <span className="mb-1 block text-[11px] font-medium text-muted-foreground">{provider.id === "claude" ? "Claude home" : "Codex home"}</span>
       <input
         className="h-8 w-full rounded-md border border-input bg-background px-2 font-mono text-[12px] text-foreground outline-none focus:border-primary disabled:opacity-65"
         value={dialog.codexHome}

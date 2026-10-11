@@ -142,11 +142,24 @@ pub struct CodexChatMessage {
     pub role: String,
     pub content: String,
     pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
     pub created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub questions: Option<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<CodexMessageAttachment>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<CodexFileChange>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexFileChange {
+    pub path: String,
+    pub additions: usize,
+    pub deletions: usize,
+    pub diff: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -379,6 +392,7 @@ pub struct IntegrationDiscoveryRequest {
 #[serde(rename_all = "camelCase")]
 pub struct IntegrationSyncResult {
     pub imported: i64,
+    pub updated: i64,
     pub skipped: i64,
     pub failed: i64,
     pub message: String,
@@ -463,6 +477,17 @@ pub struct GitStatus {
     pub ahead: i64,
     pub behind: i64,
     pub changes: Vec<GitChange>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommit {
+    pub hash: String,
+    pub short_hash: String,
+    pub subject: String,
+    pub author_name: String,
+    pub author_email: String,
+    pub authored_at: String,
 }
 
 #[derive(Debug, Deserialize)]

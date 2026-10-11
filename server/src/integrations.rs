@@ -5,7 +5,7 @@ use crate::{
 use percent_encoding::percent_decode_str;
 use reqwest::{
     Client, Response, Url,
-    header::{HeaderMap, LINK},
+    header::{CONTENT_DISPOSITION, CONTENT_TYPE, HeaderMap, LINK},
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -23,6 +23,13 @@ pub struct ImportedIssue {
     pub title: String,
     pub description: String,
     pub external_url: Option<String>,
+    pub status: Option<ImportedIssueStatus>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportedIssueStatus {
+    Open,
+    Closed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -36,6 +43,8 @@ pub struct GitlabIssueActivity {
 #[serde(rename_all = "camelCase")]
 pub struct GitlabActivityItem {
     pub id: String,
+    pub discussion_id: String,
+    pub reply: bool,
     pub body: String,
     pub system: bool,
     pub created_at: String,
@@ -49,6 +58,13 @@ pub struct GitlabActivityAuthor {
     pub name: String,
     pub username: Option<String>,
     pub avatar_url: Option<String>,
+}
+
+pub struct GitlabIssueAsset {
+    pub bytes: Vec<u8>,
+    pub content_type: Option<String>,
+    pub content_disposition: Option<String>,
+    pub filename: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -778,7 +794,7 @@ fn gitlab_issues_url(
     }
     let mut query = url.query_pairs_mut();
     query
-        .append_pair("state", "opened")
+        .append_pair("state", "all")
         .append_pair("scope", "all")
         .append_pair("per_page", "100");
     if let Some(page) = page {
@@ -844,7 +860,7 @@ fn gitlab_issue_reference(base: &Url, external_url: &str) -> AppResult<(String, 
     Ok((project, (*iid).to_string()))
 }
 
-fn gitlab_issue_notes_url(base: &Url, external_url: &str) -> AppResult<Url> {
+fn gitlab_issue_discussions_url(base: &Url, external_url: &str) -> AppResult<Url> {
     let (project, iid) = gitlab_issue_reference(base, external_url)?;
     let mut url = base.clone();
     url.set_query(None);
@@ -853,21 +869,30 @@ fn gitlab_issue_notes_url(base: &Url, external_url: &str) -> AppResult<Url> {
         let mut segments = url
             .path_segments_mut()
             .map_err(|_| AppError::BadRequest("GitLab URL cannot be used as a base URL".into()))?;
-        segments
-            .pop_if_empty()
-            .extend(["api", "v4", "projects", &project, "issues", &iid, "notes"]);
+        segments.pop_if_empty().extend([
+            "api",
+            "v4",
+            "projects",
+            &project,
+            "issues",
+            &iid,
+            "discussions",
+        ]);
     }
-    url.query_pairs_mut()
-        .append_pair("order_by", "created_at")
-        .append_pair("sort", "desc")
-        .append_pair("per_page", "100");
+    url.query_pairs_mut().append_pair("per_page", "100");
     Ok(url)
 }
 
-fn parse_gitlab_activity_item(note: &Value) -> Option<GitlabActivityItem> {
+fn parse_gitlab_activity_item(
+    note: &Value,
+    discussion_id: &str,
+    reply: bool,
+) -> Option<GitlabActivityItem> {
     let author = note.get("author")?;
     Some(GitlabActivityItem {
         id: note.get("id").and_then(json_identifier)?,
+        discussion_id: discussion_id.to_string(),
+        reply,
         body: note.get("body")?.as_str()?.to_string(),
         system: note.get("system").and_then(Value::as_bool).unwrap_or(false),
         created_at: note.get("created_at")?.as_str()?.to_string(),
@@ -899,7 +924,7 @@ pub async fn fetch_gitlab_issue_activity(
     external_url: &str,
 ) -> AppResult<GitlabIssueActivity> {
     let (base, token) = gitlab_connection(config)?;
-    let url = gitlab_issue_notes_url(&base, external_url)?;
+    let url = gitlab_issue_discussions_url(&base, external_url)?;
     let response = integration_client()?
         .get(url)
         .header("PRIVATE-TOKEN", token)
@@ -914,15 +939,120 @@ pub async fn fetch_gitlab_issue_activity(
     }
     let value =
         response_json_limited(response, MAX_ISSUE_RESPONSE_BYTES, "GitLab issue activity").await?;
-    let notes = value.as_array().ok_or_else(|| {
-        AppError::BadRequest("GitLab issue activity response must be an array".into())
+    let discussions = value.as_array().ok_or_else(|| {
+        AppError::BadRequest("GitLab issue discussions response must be an array".into())
     })?;
+    let mut items = discussions
+        .iter()
+        .flat_map(|discussion| {
+            let discussion_id = discussion
+                .get("id")
+                .and_then(json_identifier)
+                .unwrap_or_default();
+            discussion
+                .get("notes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .filter_map(move |(index, note)| {
+                    parse_gitlab_activity_item(note, &discussion_id, index > 0)
+                })
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
     Ok(GitlabIssueActivity {
-        truncated: notes.len() == 100,
-        items: notes
-            .iter()
-            .filter_map(parse_gitlab_activity_item)
-            .collect(),
+        truncated: discussions.len() == 100,
+        items,
+    })
+}
+
+pub async fn fetch_gitlab_issue_asset(
+    config: &Value,
+    external_url: &str,
+    asset_url: &str,
+) -> AppResult<GitlabIssueAsset> {
+    let (base, token) = gitlab_connection(config)?;
+    gitlab_issue_reference(&base, external_url)?;
+    let issue = Url::parse(external_url)
+        .map_err(|_| AppError::BadRequest("GitLab issue URL is invalid".into()))?;
+    let mut url = issue
+        .join(asset_url)
+        .map_err(|_| AppError::BadRequest("GitLab attachment URL is invalid".into()))?;
+    if url.scheme() != base.scheme()
+        || url.host_str() != base.host_str()
+        || url.port_or_known_default() != base.port_or_known_default()
+        || !url
+            .path_segments()
+            .into_iter()
+            .flatten()
+            .any(|segment| segment == "uploads")
+    {
+        return Err(AppError::BadRequest(
+            "GitLab attachment URL is outside the issue's uploads".into(),
+        ));
+    }
+    url.set_fragment(None);
+    let filename = url
+        .path_segments()
+        .and_then(Iterator::last)
+        .and_then(|value| {
+            percent_decode_str(value)
+                .decode_utf8()
+                .ok()
+                .map(|value| value.into_owned())
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "attachment".into());
+    let response = integration_client()?
+        .get(url)
+        .header("PRIVATE-TOKEN", token)
+        .send()
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("GitLab attachment request failed: {error}"))
+        })?;
+    if !response.status().is_success() {
+        return Err(AppError::BadRequest(format!(
+            "GitLab returned {} while loading the attachment",
+            response.status()
+        )));
+    }
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_ISSUE_RESPONSE_BYTES as u64)
+    {
+        return Err(AppError::BadRequest(
+            "GitLab attachment exceeds the 20 MB limit".into(),
+        ));
+    }
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let content_disposition = response
+        .headers()
+        .get(CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let bytes = response.bytes().await.map_err(|error| {
+        AppError::Internal(format!("Unable to read GitLab attachment: {error}"))
+    })?;
+    if bytes.len() > MAX_ISSUE_RESPONSE_BYTES {
+        return Err(AppError::BadRequest(
+            "GitLab attachment exceeds the 20 MB limit".into(),
+        ));
+    }
+    Ok(GitlabIssueAsset {
+        bytes: bytes.to_vec(),
+        content_type,
+        content_disposition,
+        filename,
     })
 }
 
@@ -969,6 +1099,13 @@ fn parse_gitlab_issue(
             .get("web_url")
             .and_then(Value::as_str)
             .map(str::to_string),
+        status: Some(
+            if issue.get("state").and_then(Value::as_str) == Some("closed") {
+                ImportedIssueStatus::Closed
+            } else {
+                ImportedIssueStatus::Open
+            },
+        ),
     })
 }
 
@@ -1126,6 +1263,7 @@ async fn fetch_huly(integration: &Integration) -> AppResult<Vec<ImportedIssue>> 
                 title,
                 description,
                 external_url,
+                status: None,
             })
         }));
     }
@@ -1245,7 +1383,7 @@ mod tests {
             .get("private-token")
             .and_then(|value| value.to_str().ok())
             != Some("gitlab-token")
-            || query.get("state").map(String::as_str) != Some("opened")
+            || query.get("state").map(String::as_str) != Some("all")
         {
             return StatusCode::UNAUTHORIZED.into_response();
         }
@@ -1262,14 +1400,14 @@ mod tests {
             response.headers_mut().insert(
                 LINK,
                 axum::http::HeaderValue::from_static(
-                    "</api/v4/groups/7/issues?state=opened&scope=all&per_page=100&page=2>; rel=\"next\"",
+                    "</api/v4/groups/7/issues?state=all&scope=all&per_page=100&page=2>; rel=\"next\"",
                 ),
             );
         }
         response
     }
 
-    async fn mock_gitlab_issue_notes(
+    async fn mock_gitlab_issue_discussions(
         headers: AxumHeaderMap,
         Query(query): Query<HashMap<String, String>>,
     ) -> axum::response::Response {
@@ -1277,19 +1415,43 @@ mod tests {
             .get("private-token")
             .and_then(|value| value.to_str().ok())
             != Some("gitlab-token")
-            || query.get("order_by").map(String::as_str) != Some("created_at")
-            || query.get("sort").map(String::as_str) != Some("desc")
+            || query.get("per_page").map(String::as_str) != Some("100")
         {
             return StatusCode::UNAUTHORIZED.into_response();
         }
         Json(json!([{
-            "id": 9,
-            "body": "Added a regression test",
-            "system": false,
-            "created_at": "2026-10-06T08:00:00Z",
-            "author": {"name":"Alex","username":"alex"}
+            "id": "discussion-1",
+            "individual_note": false,
+            "notes": [{
+                "id": 9,
+                "body": "Added a regression test",
+                "system": false,
+                "created_at": "2026-10-06T08:00:00Z",
+                "author": {"name":"Alex","username":"alex"}
+            }, {
+                "id": 10,
+                "body": "Confirmed on staging",
+                "system": false,
+                "created_at": "2026-10-06T09:00:00Z",
+                "author": {"name":"Sam","username":"sam"}
+            }]
         }]))
         .into_response()
+    }
+
+    async fn mock_gitlab_asset(headers: AxumHeaderMap) -> axum::response::Response {
+        if headers
+            .get("private-token")
+            .and_then(|value| value.to_str().ok())
+            != Some("gitlab-token")
+        {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        (
+            [(axum::http::header::CONTENT_TYPE, "image/png")],
+            vec![137, 80, 78, 71],
+        )
+            .into_response()
     }
 
     #[test]
@@ -1523,10 +1685,12 @@ mod tests {
 
     #[tokio::test]
     async fn loads_gitlab_issue_activity_with_the_connection_token() {
-        let app = Router::new().route(
-            "/api/v4/projects/7/issues/42/notes",
-            get(mock_gitlab_issue_notes),
-        );
+        let app = Router::new()
+            .route(
+                "/api/v4/projects/7/issues/42/discussions",
+                get(mock_gitlab_issue_discussions),
+            )
+            .route("/uploads/secret/image.png", get(mock_gitlab_asset));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1537,10 +1701,33 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(activity.items.len(), 1);
+        assert_eq!(activity.items.len(), 2);
         assert_eq!(activity.items[0].body, "Added a regression test");
         assert_eq!(activity.items[0].author.username.as_deref(), Some("alex"));
+        assert_eq!(activity.items[0].discussion_id, "discussion-1");
+        assert!(!activity.items[0].reply);
+        assert!(activity.items[1].reply);
         assert!(!activity.truncated);
+
+        let asset = fetch_gitlab_issue_asset(
+            &json!({"baseUrl":format!("http://{address}"),"token":"gitlab-token"}),
+            &format!("http://{address}/7/-/issues/42"),
+            "/uploads/secret/image.png",
+        )
+        .await
+        .unwrap();
+        assert_eq!(asset.bytes, vec![137, 80, 78, 71]);
+        assert_eq!(asset.content_type.as_deref(), Some("image/png"));
+        assert_eq!(asset.filename, "image.png");
+        assert!(
+            fetch_gitlab_issue_asset(
+                &json!({"baseUrl":format!("http://{address}"),"token":"gitlab-token"}),
+                &format!("http://{address}/7/-/issues/42"),
+                "/api/v4/projects/7",
+            )
+            .await
+            .is_err()
+        );
 
         server.abort();
     }
@@ -1589,7 +1776,7 @@ mod tests {
             gitlab_issues_url(&base, "groups", "42", Some("3"))
                 .unwrap()
                 .as_str(),
-            "https://gitlab.example/root/api/v4/groups/42/issues?state=opened&scope=all&per_page=100&page=3"
+            "https://gitlab.example/root/api/v4/groups/42/issues?state=all&scope=all&per_page=100&page=3"
         );
     }
 
@@ -1597,13 +1784,13 @@ mod tests {
     fn builds_gitlab_issue_activity_urls_from_issue_and_work_item_links() {
         let base = Url::parse("https://gitlab.example/root/").unwrap();
         assert_eq!(
-            gitlab_issue_notes_url(
+            gitlab_issue_discussions_url(
                 &base,
                 "https://gitlab.example/root/acme/mobile-app/-/issues/42",
             )
             .unwrap()
             .as_str(),
-            "https://gitlab.example/root/api/v4/projects/acme%2Fmobile-app/issues/42/notes?order_by=created_at&sort=desc&per_page=100"
+            "https://gitlab.example/root/api/v4/projects/acme%2Fmobile-app/issues/42/discussions?per_page=100"
         );
         assert_eq!(
             gitlab_issue_reference(
@@ -1632,8 +1819,10 @@ mod tests {
             "updated_at": "2026-10-06T08:01:00Z",
             "author": {"name":"Alex","username":"alex","avatar_url":"https://gitlab.example/avatar.png"}
         });
-        let parsed = parse_gitlab_activity_item(&note).unwrap();
+        let parsed = parse_gitlab_activity_item(&note, "discussion-1", true).unwrap();
         assert_eq!(parsed.id, "17");
+        assert_eq!(parsed.discussion_id, "discussion-1");
+        assert!(parsed.reply);
         assert!(parsed.system);
         assert_eq!(parsed.author.username.as_deref(), Some("alex"));
     }

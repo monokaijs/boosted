@@ -44,5 +44,5 @@ export function ProjectsPage({ onOpenProject, onSelect }: { onOpenProject(): voi
 }
 
 export function ScheduledPage() {
-  return <div className="full-page-scroll"><div className="page-content"><header className="page-heading"><div><h1>Scheduled</h1><p>A place for work that runs on your schedule.</p></div></header><div className="page-empty scheduled-empty"><span className="page-empty-icon"><CalendarClock /></span><h2>Scheduled work is coming</h2><p>Scheduling isn’t available on this server yet.<br />You can create and run work from Tasks.</p><Button variant="secondary" onClick={() => { window.location.hash = "tasks"; }}>Go to tasks</Button></div></div></div>;
+  return <div className="full-page-scroll"><div className="page-content"><header className="page-heading"><div><h1>Scheduled</h1><p>A place for work that runs on your schedule.</p></div></header><div className="page-empty scheduled-empty"><span className="page-empty-icon"><CalendarClock /></span><h2>Scheduled work is coming</h2><p>Scheduling isn’t available on this server yet.<br />You can create and run work from Projects.</p><Button variant="secondary" onClick={() => window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: "tasks" }))}>View project tasks</Button></div></div></div>;
 }

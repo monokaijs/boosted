@@ -6,9 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import { applyCodexEvent } from "@/lib/codex-chat-state";
+import { useWorkspaceStore } from "@/lib/workspace-state";
 import type { Task, TaskEvent } from "@/lib/types";
 
-const api = vi.hoisted(() => ({ featureRequest: vi.fn(), toggleMarkdownCheckbox: vi.fn(), projects: vi.fn(), projectBranches: vi.fn(), projectBranch: vi.fn(), switchProjectBranch: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexApprovals: vi.fn(), codexAttachment: vi.fn(), uploadCodexAttachment: vi.fn(), workspaceFile: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), taskSourceActivity: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn(), answerTaskQuestions: vi.fn() }));
+const api = vi.hoisted(() => ({ profileId: "test", featureRequest: vi.fn(), toggleMarkdownCheckbox: vi.fn(), projects: vi.fn(), projectBranches: vi.fn(), projectBranch: vi.fn(), switchProjectBranch: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexApprovals: vi.fn(), codexAttachment: vi.fn(), uploadCodexAttachment: vi.fn(), workspaceFile: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), taskSourceActivity: vi.fn(), taskSourceAsset: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn(), answerTaskQuestions: vi.fn() }));
 const openExternalUrl = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/api", () => ({ api }));
 vi.mock("@/lib/api-context", () => ({ useBoostedApiClient: () => api }));
@@ -33,6 +34,7 @@ beforeEach(() => {
   // jsdom has no layout scrolling or resize notifications for the chat viewport.
   if (!HTMLElement.prototype.scrollTo) HTMLElement.prototype.scrollTo = vi.fn();
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+  useWorkspaceStore.getState().reset();
   useAppStore.setState({ selectedProjectId: "project-a", selectedTaskId: "task-a", activeMachineId: undefined });
   api.projects.mockResolvedValue([{ id: "project-a", name: "Project", repoPath: "/repo" }]);
   api.projectBranches.mockResolvedValue(["main", "feature"]);
@@ -44,6 +46,7 @@ beforeEach(() => {
   api.task.mockResolvedValue(task);
   api.taskEvents.mockResolvedValue([]);
   api.taskSourceActivity.mockResolvedValue({ items: [], truncated: false });
+  api.taskSourceAsset.mockResolvedValue({ blob: new Blob(["image"], { type: "image/png" }), name: "image.png" });
   api.startTaskPlan.mockResolvedValue(task);
   api.approvePlan.mockResolvedValue(task);
   api.sendMessage.mockResolvedValue(task);
@@ -67,9 +70,162 @@ it("keeps the Codex composer outside transcript scroll ownership", async () => {
   const input = await screen.findByPlaceholderText("Message Codex...");
   const transcript = container.querySelector(".codex-thread-viewport")!;
   expect(transcript).not.toContainElement(input);
-  expect(container.querySelector(".codex-composer-footer")?.parentElement).toBe(transcript.parentElement);
+  expect(container.querySelector(".codex-composer-footer")?.parentElement).toBe(transcript.closest(".codex-thread-root"));
   fireEvent.change(input, { target: { value: "Multiple\nlines\nremain editable" } });
   expect(input).toHaveValue("Multiple\nlines\nremain editable");
+});
+
+it("restores a conversation timeline with turn previews and smooth navigation", async () => {
+  const scrollIntoView = vi.fn();
+  HTMLElement.prototype.scrollIntoView = scrollIntoView;
+  api.codexChat.mockResolvedValueOnce({
+    chat: { id: "chat-a", title: "Planning chat", status: "idle", cwd: "/repo", model: "model" },
+    runtimeDefaults: { model: "model", reasoningEffort: "high", accessMode: "fullAccess" },
+    messages: [
+      { id: "user-1", role: "user", kind: "message", content: "Create the project layout" },
+      { id: "assistant-1", role: "assistant", kind: "message", content: "Implemented the initial layout." },
+      { id: "user-2", role: "user", kind: "message", content: "Polish the navigation" },
+      { id: "assistant-2", role: "assistant", kind: "message", content: "Updated spacing and interactions." },
+    ],
+  });
+  renderPanel(<CodexChatPanel threadId="chat-a" />);
+  const timeline = await screen.findByRole("navigation", { name: "Conversation timeline" });
+  expect(within(timeline).getAllByRole("button")).toHaveLength(2);
+  expect(within(timeline).getByText("Updated spacing and interactions.")).toBeInTheDocument();
+  fireEvent.click(within(timeline).getByRole("button", { name: "Jump to: Polish the navigation" }));
+  expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "center" });
+});
+
+it("compacts Codex commentary and tool calls into one clean activity group", async () => {
+  api.codexChat.mockResolvedValueOnce({
+    chat: { id: "chat-a", title: "Planning chat", status: "idle", cwd: "/repo", model: "model" },
+    runtimeDefaults: { model: "model", reasoningEffort: "high", accessMode: "fullAccess" },
+    messages: [
+      { id: "user-1", role: "user", kind: "message", content: "Clean up this view", createdAt: "2026-10-09T08:00:00Z" },
+      { id: "commentary-1", role: "assistant", kind: "message", phase: "commentary", content: "I’ll inspect the current chat layout.", createdAt: "2026-10-09T08:00:01Z" },
+      { id: "tool-1", role: "assistant", kind: "tool", content: "**Command** · completed\n\n```sh\nnpm test\n```", createdAt: "2026-10-09T08:00:10Z" },
+      { id: "final-1", role: "assistant", kind: "message", phase: "final_answer", content: "The chat UI is clean and compact now.", createdAt: "2026-10-09T08:00:21Z" },
+    ],
+  });
+
+  renderPanel(<CodexChatPanel threadId="chat-a" />);
+
+  const activity = await screen.findByRole("button", { name: "Worked for 20s" });
+  expect(activity).toHaveAttribute("aria-expanded", "false");
+  expect(screen.getByText("The chat UI is clean and compact now.")).toBeInTheDocument();
+  expect(screen.queryByText("Codex")).not.toBeInTheDocument();
+  fireEvent.click(activity);
+  expect(activity).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByText("I’ll inspect the current chat layout.")).toBeInTheDocument();
+  expect(screen.getByText("Command · completed")).toBeInTheDocument();
+});
+
+it("keeps the current Codex activity open while work is running", async () => {
+  api.codexChat.mockResolvedValueOnce({
+    chat: { id: "chat-a", title: "Planning chat", status: "active", cwd: "/repo", model: "model" },
+    runtimeDefaults: { model: "model", reasoningEffort: "high", accessMode: "fullAccess" },
+    messages: [
+      { id: "user-1", role: "user", kind: "message", content: "Run the checks" },
+      { id: "commentary-1", role: "assistant", kind: "message", phase: "commentary", content: "Checking the build now." },
+      { id: "tool-1", role: "assistant", kind: "tool", content: "**Command** · running" },
+    ],
+  });
+
+  renderPanel(<CodexChatPanel threadId="chat-a" />);
+
+  expect(await screen.findByRole("button", { name: /Working for \d+s/ })).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByText("Checking the build now.")).toBeInTheDocument();
+});
+
+it("shows a compact changes toast while a Codex run is active", async () => {
+  api.codexChat.mockResolvedValueOnce({
+    chat: { id: "chat-a", title: "Planning chat", status: "active", cwd: "/repo", model: "model" },
+    runtimeDefaults: { model: "model", reasoningEffort: "high", accessMode: "fullAccess" },
+    messages: [
+      { id: "user-1", role: "user", kind: "message", content: "Update the app" },
+      { id: "commentary-1", role: "assistant", kind: "message", phase: "commentary", content: "Making the changes." },
+      { id: "change-1", role: "assistant", kind: "tool", content: "**Files changed**", changes: [
+        { path: "web/src/app.tsx", additions: 12, deletions: 3 },
+        { path: "web/src/app.css", additions: 4, deletions: 1 },
+      ] },
+    ],
+  });
+  const openPanel = vi.fn();
+  window.addEventListener("boosted:open-panel", openPanel);
+
+  renderPanel(<CodexChatPanel threadId="chat-a" />);
+
+  const toast = await screen.findByRole("button", { name: "View 2 files changed" });
+  expect(toast).toHaveTextContent("+16");
+  expect(toast).toHaveTextContent("−4");
+  expect(screen.queryByRole("region", { name: "Edited 2 files" })).not.toBeInTheDocument();
+  fireEvent.click(toast);
+  expect(openPanel).toHaveBeenCalledOnce();
+  window.removeEventListener("boosted:open-panel", openPanel);
+});
+
+it("renders a persistent per-file changes block after a Codex run", async () => {
+  api.codexChat.mockResolvedValueOnce({
+    chat: { id: "chat-a", title: "Planning chat", status: "idle", cwd: "/repo", model: "model" },
+    runtimeDefaults: { model: "model", reasoningEffort: "high", accessMode: "fullAccess" },
+    messages: [
+      { id: "user-1", role: "user", kind: "message", content: "Update the app", createdAt: "2026-10-09T08:00:00Z" },
+      { id: "change-1", role: "assistant", kind: "tool", content: "**Files changed**", createdAt: "2026-10-09T08:00:01Z", changes: [
+        { path: "web/src/app.tsx", additions: 12, deletions: 3 },
+        { path: "web/src/oldest.ts", additions: 1, deletions: 0 },
+        { path: "web/src/middle.ts", additions: 2, deletions: 0 },
+        { path: "web/src/app.css", additions: 4, deletions: 1 },
+      ] },
+      { id: "change-2", role: "assistant", kind: "tool", content: "**Files changed**", createdAt: "2026-10-09T08:00:03Z", changes: [
+        { path: "web/src/app.tsx", additions: 2, deletions: 0 },
+        { path: "web/src/latest.ts", additions: 5, deletions: 0, diff: "@@ -1 +1 @@\n-old\n+latest" },
+      ] },
+      { id: "final-1", role: "assistant", kind: "message", phase: "final_answer", content: "The app is updated.", createdAt: "2026-10-09T08:00:05Z" },
+    ],
+  });
+
+  renderPanel(<CodexChatPanel threadId="chat-a" />);
+
+  const block = await screen.findByRole("region", { name: "Edited 5 files" });
+  expect(within(block).getByText("web/src/latest.ts")).toBeInTheDocument();
+  expect(within(block).getByText("web/src/app.tsx")).toBeInTheDocument();
+  expect(within(block).getByText("web/src/app.css")).toBeInTheDocument();
+  expect(within(block).queryByText("web/src/middle.ts")).not.toBeInTheDocument();
+  expect(within(block).queryByText("web/src/oldest.ts")).not.toBeInTheDocument();
+  expect(block).toHaveTextContent("+26");
+  expect(block).toHaveTextContent("−4");
+  fireEvent.click(within(block).getByRole("button", { name: "Show 2 more files" }));
+  expect(within(block).getByText("web/src/middle.ts")).toBeInTheDocument();
+  expect(within(block).getByText("web/src/oldest.ts")).toBeInTheDocument();
+  expect(within(block).getByRole("button", { name: "Show fewer files" })).toHaveAttribute("aria-expanded", "true");
+  expect(screen.queryByRole("button", { name: "View 5 files changed" })).not.toBeInTheDocument();
+  expect(within(block).getByRole("button", { name: "View changes" })).toBeInTheDocument();
+  const openPanel = vi.fn();
+  window.addEventListener("boosted:open-panel", openPanel);
+  fireEvent.click(within(block).getByRole("button", { name: /web\/src\/latest\.ts/ }));
+  expect(useAppStore.getState().gitDiffTarget).toEqual({ path: "web/src/latest.ts", staged: false, diff: "@@ -1 +1 @@\n-old\n+latest" });
+  expect(openPanel).toHaveBeenCalledOnce();
+  window.removeEventListener("boosted:open-panel", openPanel);
+});
+
+it("compacts legacy Codex turns by keeping only the answer after the last tool visible", async () => {
+  api.codexChat.mockResolvedValueOnce({
+    chat: { id: "chat-a", title: "Legacy chat", status: "idle", cwd: "/repo", model: "model" },
+    messages: [
+      { id: "user-1", role: "user", kind: "message", content: "Fix the layout" },
+      { id: "preamble-1", role: "assistant", kind: "message", content: "I’ll inspect the panel first." },
+      { id: "tool-1", role: "assistant", kind: "tool", content: "**Files changed**" },
+      { id: "answer-1", role: "assistant", kind: "message", content: "The layout is fixed." },
+    ],
+  });
+
+  renderPanel(<CodexChatPanel threadId="chat-a" />);
+
+  expect(await screen.findByText("The layout is fixed.")).toBeInTheDocument();
+  const activity = screen.getByRole("button", { name: /Worked for \d+s/ });
+  fireEvent.click(activity);
+  expect(screen.getByText("I’ll inspect the panel first.")).toBeInTheDocument();
+  expect(screen.getByText("Files changed", { selector: "span" })).toBeInTheDocument();
 });
 
 it("opens an imported task in the system browser", async () => {
@@ -81,17 +237,21 @@ it("opens an imported task in the system browser", async () => {
   expect(openExternalUrl).toHaveBeenCalledWith("https://gitlab.example/group/project/-/work_items/42");
 });
 
-it("shows imported GitLab activity in a floating panel", async () => {
-  api.task.mockResolvedValue({ ...task, source: { provider: "gitlab", externalId: "issue:42", externalUrl: "https://gitlab.example/group/project/-/issues/42" } });
-  api.taskSourceActivity.mockResolvedValue({ items: [{ id: "note-1", body: "Added **regression coverage**", system: false, createdAt: "2026-10-06T08:00:00Z", author: { name: "Alex", username: "alex" } }], truncated: false });
+it("shows GitLab discussions and uploaded images inline in task details", async () => {
+  api.task.mockResolvedValue({ ...task, description: "Screenshot: [image.png](/uploads/secret/image.png){width=829 height=470}", source: { provider: "gitlab", externalId: "issue:42", externalUrl: "https://gitlab.example/group/project/-/issues/42" } });
+  api.taskSourceActivity.mockResolvedValue({ items: [
+    { id: "note-1", discussionId: "discussion-1", reply: false, body: "Added **regression coverage**", system: false, createdAt: "2026-10-06T08:00:00Z", author: { name: "Alex", username: "alex" } },
+    { id: "note-2", discussionId: "discussion-1", reply: true, body: "Confirmed with ![result](/uploads/secret/result.png)", system: false, createdAt: "2026-10-06T09:00:00Z", author: { name: "Sam", username: "sam" } },
+  ], truncated: false });
   renderPanel(<TaskPanel />);
-  fireEvent.click(await screen.findByRole("button", { name: "Activity" }));
-  const panel = await screen.findByRole("complementary", { name: "GitLab issue activity" });
-  expect((await within(panel).findByText("regression coverage")).tagName).toBe("STRONG");
-  expect(within(panel).getByText("@alex")).toBeInTheDocument();
+  const discussion = await screen.findByRole("region", { name: "GitLab discussion" });
+  expect((await within(discussion).findByText("regression coverage")).tagName).toBe("STRONG");
+  expect(within(discussion).getByText("@alex")).toBeInTheDocument();
+  expect(within(discussion).getByText("Confirmed with").closest("article")).toHaveClass("is-reply");
+  expect(await screen.findByRole("button", { name: "View image.png" })).toBeInTheDocument();
+  expect(screen.queryByText("{width=829 height=470}")).not.toBeInTheDocument();
   expect(api.taskSourceActivity).toHaveBeenCalledWith("task-a");
-  fireEvent.click(within(panel).getByRole("button", { name: "Close GitLab activity" }));
-  expect(screen.queryByRole("complementary", { name: "GitLab issue activity" })).not.toBeInTheDocument();
+  await waitFor(() => expect(api.taskSourceAsset).toHaveBeenCalledWith("task-a", "/uploads/secret/image.png"));
 });
 
 it("refreshes legacy planning tasks and keeps the existing plan readable", async () => {
@@ -497,6 +657,7 @@ describe("Codex attachments", () => {
     expect(await screen.findByRole("img", { name: "saved.png" })).toBeInTheDocument();
     expect(api.workspaceFile).toHaveBeenCalledWith({ kind: "codex", id: "chat-a" }, "/uploads/saved.png");
     act(() => applyCodexEvent(client, { threadId: "chat-a", turnId: "turn", method: "item/completed", message: { id: "live", role: "assistant", kind: "tool", content: "**Screenshot**", attachments: [{ name: "live.png", mimeType: "image/png", path: "/uploads/live.png" }] } }));
+    fireEvent.click(await screen.findByRole("button", { name: /Worked for \d+s/ }));
     fireEvent.click(await screen.findByText("Screenshot", { selector: "span" }));
     fireEvent.click(await screen.findByRole("button", { name: "View live.png" }));
     expect(screen.getByRole("dialog", { name: "live.png" })).toBeInTheDocument();
@@ -504,7 +665,20 @@ describe("Codex attachments", () => {
     result.unmount(); client.clear();
   });
 
-  it.each(["click", "keyboard", "submit"])("shows uploaded images in the draft and optimistic image-only message sent by %s", async (method) => {
+  it("renders a user attachment above and outside its compact message bubble", async () => {
+    api.codexChat.mockResolvedValueOnce({
+      chat: { id: "chat-a", title: "Images", status: "idle", cwd: "/repo", model: "model" },
+      messages: [{ id: "saved", role: "user", kind: "message", content: "Review this image", attachments: [{ name: "saved.png", mimeType: "image/png", path: "/uploads/saved.png" }] }],
+    });
+    renderPanel(<CodexChatPanel threadId="chat-a" />);
+    const image = await screen.findByRole("img", { name: "saved.png" });
+    const bubble = screen.getByText("Review this image").closest(".selectable-text");
+    expect(bubble).toBeInTheDocument();
+    expect(bubble).not.toContainElement(image);
+    expect(image).toHaveClass("h-16", "w-20", "object-cover");
+  });
+
+  it.each(["click", "keyboard", "submit"])("moves an uploaded image immediately from the draft into the outgoing message sent by %s", async (method) => {
     api.codexOptions.mockResolvedValueOnce({ models: [{ id: "model", model: "model", displayName: "Model", defaultReasoningEffort: "high", supportedReasoningEfforts: [{ id: "high" }], inputModalities: ["image"] }], defaultModel: "model", defaultAccessMode: "fullAccess", accessModes: [{ id: "fullAccess", label: "Full access" }] });
     api.uploadCodexAttachment.mockResolvedValueOnce({ id: "upload.png", name: "photo.png", mimeType: "image/png" });
     let finish!: (result: { threadId: string; turnId: string }) => void;
@@ -519,11 +693,35 @@ describe("Codex attachments", () => {
     else if (method === "keyboard") fireEvent.keyDown(input, { key: "Enter" });
     else fireEvent.submit(input.closest("form")!);
     await waitFor(() => expect(api.sendCodexMessage).toHaveBeenCalledWith("chat-a", "", expect.any(String), expect.objectContaining({ attachmentIds: ["upload.png"] })));
-    await waitFor(() => expect(screen.getAllByRole("img", { name: "photo.png" })).toHaveLength(2));
+    expect(screen.getAllByRole("img", { name: "photo.png" })).toHaveLength(1);
+    expect(screen.getByText("Sending…")).toBeInTheDocument();
     expect(screen.queryByText("[Image attachment]")).not.toBeInTheDocument();
     await act(async () => finish({ threadId: "chat-a", turnId: "turn" }));
     await waitFor(() => expect(screen.getAllByRole("img", { name: "photo.png" })).toHaveLength(1));
+    expect(await screen.findByText("Sent")).toBeInTheDocument();
   });
+});
+
+it("shows Codex messages immediately and keeps failed sends retryable with the same id", async () => {
+  let fail!: (cause: Error) => void;
+  api.sendCodexMessage.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+  renderPanel(<CodexChatPanel threadId="chat-a" />);
+  const input = await screen.findByPlaceholderText("Message Codex...");
+  fireEvent.change(input, { target: { value: "Show this immediately" } });
+  await waitFor(() => expect(screen.getByTitle("Send message")).toBeEnabled());
+  fireEvent.click(screen.getByTitle("Send message"));
+
+  expect(await screen.findByText("Show this immediately")).toBeInTheDocument();
+  expect(await screen.findByText("Sending…")).toBeInTheDocument();
+  const clientMessageId = api.sendCodexMessage.mock.calls[0][2];
+
+  await act(async () => fail(new Error("Connection lost")));
+  expect(await screen.findByText("Not sent")).toBeInTheDocument();
+  expect(screen.getByText("Show this immediately")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(api.sendCodexMessage).toHaveBeenCalledTimes(2));
+  expect(api.sendCodexMessage.mock.calls[1][2]).toBe(clientMessageId);
+  expect(await screen.findByText("Sent")).toBeInTheDocument();
 });
 
 it("persists task descriptions, plans and existing messages without sending or navigating", async () => {

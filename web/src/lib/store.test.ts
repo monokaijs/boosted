@@ -55,10 +55,11 @@ describe("app selection state", () => {
     useAppStore.getState().selectProject(firstProject);
     useAppStore.getState().selectTask(task("task-a", firstProject.id));
     useAppStore.getState().openFile("src/alpha.ts");
+    useAppStore.getState().openGitDiff({ path: "src/alpha.ts", staged: false });
     useAppStore.getState().selectProject(secondProject);
     useAppStore.getState().selectCodexChat("chat-b");
     useAppStore.getState().selectProject(firstProject);
-    expect(useAppStore.getState()).toMatchObject({ selectedProjectId: firstProject.id, selectedTaskId: undefined, selectedCodexChatId: undefined, openFilePath: undefined });
+    expect(useAppStore.getState()).toMatchObject({ selectedProjectId: firstProject.id, selectedTaskId: undefined, selectedCodexChatId: undefined, openFilePath: undefined, gitDiffTarget: undefined });
     expect(localStorage.getItem("boosted.workspace-contexts.v1")).toBeNull();
   });
 

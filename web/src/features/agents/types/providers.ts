@@ -1,7 +1,7 @@
 import type { JsonObject, JsonSerializable } from "./json"
 
 export type ProviderAccountStatus = "DISCONNECTED" | "AUTHENTICATING" | "CONNECTED" | "INVALIDATED" | "ERROR"
-export type AccountAuthMode = "device"
+export type AccountAuthMode = "device" | "web" | "apiKey"
 export type RunStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED"
 export type ChatStatus = "IDLE" | "RUNNING" | "ARCHIVED"
 export type MessageScheduleStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "ARCHIVED"
@@ -173,6 +173,7 @@ export type UpdateProviderSettingsRequest = {
 }
 
 export type AuthenticateProviderAccountRequest = {
+  apiKey?: string
   mode?: AccountAuthMode
 }
 

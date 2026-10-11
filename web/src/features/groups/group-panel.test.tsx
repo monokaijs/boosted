@@ -144,6 +144,55 @@ describe('group conversations', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Message group' })).toBeInTheDocument();
   });
+  it('keeps tool receipts with the agent message from their request', async () => {
+    mocks.featureRequest.mockResolvedValue({ ...base,
+      messages: [
+        { id: 'one', groupId: 'g', rootId: 'one', sequence: 1, senderType: 'user', senderId: 'u', senderName: 'User', content: 'First', recipientIds: [], kind: 'message', createdAt: base.createdAt },
+        { id: 'one-reply-a', groupId: 'g', rootId: 'one', sequence: 2, senderType: 'agent', senderId: 'a', senderName: 'Nova', content: 'First reply', recipientIds: [], kind: 'message', createdAt: base.createdAt },
+        { id: 'one-reply-b', groupId: 'g', rootId: 'one', sequence: 3, senderType: 'agent', senderId: 'a', senderName: 'Nova', content: 'More detail', recipientIds: [], kind: 'message', createdAt: base.createdAt },
+        { id: 'two', groupId: 'g', rootId: 'two', sequence: 4, senderType: 'user', senderId: 'u', senderName: 'User', content: 'Second', recipientIds: [], kind: 'message', createdAt: base.createdAt },
+        { id: 'two-reply', groupId: 'g', rootId: 'two', sequence: 5, senderType: 'agent', senderId: 'a', senderName: 'Nova', content: 'Second reply', recipientIds: [], kind: 'message', createdAt: base.createdAt },
+      ],
+      executions: [
+        { id: 'run-one', rootId: 'one', agentId: 'a', status: 'completed' },
+        { id: 'run-two', rootId: 'two', agentId: 'a', status: 'completed' },
+      ],
+      receipts: [
+        { id: 'receipt-one', tool: 'commandExecution', arguments: {}, status: 'completed', agentId: 'a', executionId: 'run-one' },
+        { id: 'receipt-two', tool: 'fileChange', arguments: {}, status: 'completed', agentId: 'a', executionId: 'run-two' },
+      ],
+    });
+    const { container } = renderWithQuery(<GroupPanel groupId="g" />);
+    await screen.findByText('Second');
+    const replies = screen.getAllByRole('article', { name: 'Nova reply' });
+    expect(within(replies[0]).queryByRole('button', { name: '1 tool' })).not.toBeInTheDocument();
+    const toggles = screen.getAllByRole('button', { name: '1 tool' });
+    expect(toggles).toHaveLength(2);
+    expect(within(replies[1]).getByRole('button', { name: '1 tool' })).toBe(toggles[0]);
+    expect(within(replies[2]).getByRole('button', { name: '1 tool' })).toBe(toggles[1]);
+    expect(container.querySelectorAll('.group-message-work-summary')).toHaveLength(2);
+    fireEvent.click(toggles[0]);
+    expect(screen.getByText('Run command')).toBeInTheDocument();
+    expect(screen.queryByText('Edit files')).not.toBeInTheDocument();
+    fireEvent.click(toggles[1]);
+    expect(screen.getByText('Edit files')).toBeInTheDocument();
+  });
+  it('places a compact task status below its owner’s final message', async () => {
+    mocks.featureRequest.mockResolvedValue({ ...base,
+      messages: [
+        { id: 'request', groupId: 'g', rootId: 'request', sequence: 1, senderType: 'user', senderId: 'u', senderName: 'User', content: 'Ship the update', recipientIds: [], kind: 'message', createdAt: base.createdAt },
+        { id: 'reply', groupId: 'g', rootId: 'request', sequence: 2, senderType: 'agent', senderId: 'a', senderName: 'Nova', content: 'I will handle it.', recipientIds: [], kind: 'message', createdAt: base.createdAt },
+      ],
+      tasks: [{ id: 'task', rootId: 'request', title: 'Release the mobile update', ownerId: 'a', status: 'queued', dependencyIds: [], fileResponsibilities: [], revision: 1 }],
+    });
+    renderWithQuery(<GroupPanel groupId="g" />);
+    const userMessage = await screen.findByRole('article', { name: 'Your message' });
+    const agentMessage = screen.getByRole('article', { name: 'Nova reply' });
+    expect(within(userMessage).queryByText('Release the mobile update')).not.toBeInTheDocument();
+    const task = within(agentMessage).getByRole('button', { name: /Release the mobile update/ });
+    expect(task).toHaveClass('group-task-update');
+    expect(task.closest('.group-message-work-summary')).toBeInTheDocument();
+  });
   it('clears a deleted group when reconnecting after missing its live deletion event', async () => {
     useAppStore.getState().selectGroup('g');
     mocks.featureRequest.mockRejectedValue(new ApiError(404, 'Group not found'));
@@ -384,10 +433,17 @@ describe('group conversations', () => {
   it('loads earlier history without duplicating the current message', async () => {
     const latest = { id: 'three', sequence: 3, senderType: 'user', senderName: 'User', senderId: 'u', recipientIds: [], content: 'Latest', createdAt: '2026-10-04T00:00:00Z' };
     mocks.featureRequest.mockImplementation((path: string) => Promise.resolve(path.includes('?before') ? [{ ...latest, id: 'two', sequence: 2, content: 'Earlier' }] : { ...base, messages: [latest], messageCount: 3 }));
-    renderWithQuery(<GroupPanel groupId="g" />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Load older messages' }));
+    const { container } = renderWithQuery(<GroupPanel groupId="g" />);
+    await screen.findByText('Latest');
+    const transcript = container.querySelector<HTMLElement>('.group-chat-scroll')!;
+    Object.defineProperties(transcript, { scrollHeight: { configurable: true, value: 600 }, clientHeight: { configurable: true, value: 300 } });
+    transcript.scrollTop = 0;
+    fireEvent.scroll(transcript);
+    fireEvent.scroll(transcript);
+    expect(screen.queryByRole('button', { name: 'Load older messages' })).not.toBeInTheDocument();
     expect(await screen.findByText('Earlier')).toBeInTheDocument();
     expect(screen.getAllByText('Latest')).toHaveLength(1);
+    expect(mocks.featureRequest.mock.calls.filter(([path]) => String(path).includes('?before')).length).toBe(1);
   });
   it('uses chat bubbles, groups consecutive replies, and opens details on demand', async () => {
     const message = { groupId: 'g', rootId: 'one', kind: 'message', recipientIds: [], createdAt: base.createdAt };

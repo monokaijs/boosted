@@ -1,6 +1,138 @@
 use super::*;
 use std::time::Duration;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn large_receipt_history_does_not_block_new_group_messages() {
+    let (root, state, peer) = fixture().await;
+    let g = group(&state, &peer, false).await;
+    let arguments =
+        json!({"command":"verify".repeat(1_000),"changes":[{"diff":"+line\n".repeat(1_000)}]});
+    let result = "output\n".repeat(1_000);
+    for index in 0..285 {
+        put(
+            &state.db,
+            "group_receipts",
+            id(&g),
+            &json!({"id":format!("receipt-{index}"),"groupId":id(&g),
+                "agentId":"pock","tool":"commandExecution","status":"completed",
+                "chatId":"saved-chat","arguments":arguments,"result":result}),
+        )
+        .await
+        .unwrap();
+    }
+    let request = "Keep each issue in its own commit. "
+        .repeat(200)
+        .trim()
+        .to_owned();
+    let message = human(&state, id(&g), &request, vec!["pock"], "next-request").await;
+    let view = settle(&state, id(&g)).await;
+    assert!(
+        view["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|execution| { execution["status"] == "completed" }),
+        "{}",
+        view["executions"]
+    );
+
+    let saved = get(&state.db, "group_receipts", "receipt-284")
+        .await
+        .unwrap();
+    assert_eq!(saved["arguments"], arguments);
+    assert_eq!(saved["result"], result);
+    assert!(view["receipts"].as_array().unwrap().len() >= 285);
+
+    let log =
+        std::fs::read_to_string(root.path().join("accounts/account/group-rpc-log.jsonl")).unwrap();
+    let prompts: Vec<Value> = log
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|rpc| rpc["method"] == "turn/start")
+        .map(|rpc| {
+            let text = rpc["params"]["input"][0]["text"].as_str().unwrap();
+            assert!(text.chars().count() <= 800_000);
+            serde_json::from_str(text).unwrap()
+        })
+        .collect();
+    assert!(!prompts.is_empty());
+    for prompt in prompts {
+        assert_eq!(
+            prompt["groupContext"]["originalUserRequest"]["content"],
+            request
+        );
+        assert!(
+            prompt["groupContext"]["group"]["omittedReceipts"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        if prompt["currentUserMessages"][0]["id"] == message["id"] {
+            assert_eq!(prompt["currentUserMessages"][0]["content"], request);
+        }
+    }
+}
+
+#[test]
+fn group_model_context_bounds_nested_receipts_without_changing_assignments() {
+    let receipts: Vec<_> = (0..100)
+        .map(|index| {
+            json!({
+                "id":format!("receipt-{index}"),"tool":"fileChange","status":"completed",
+                "chatId":"saved-chat","taskId":"task-1",
+                "arguments":{"changes":[{"diff":"+\\\"\n🦀".repeat(2_000)}]},
+                "result":{"output":"begin\n".repeat(2_000),"status":"verified"}
+            })
+        })
+        .collect();
+    let assignment =
+        json!({"id":"task-1","instructions":"Keep all current requirements. ".repeat(1_000)});
+    let source = json!({"receipts":receipts,"tasks":[assignment]});
+    for nested in [false, true] {
+        let input = if nested {
+            json!({"group":source,"assignment":assignment})
+        } else {
+            source.clone()
+        };
+        let model = model_context(input);
+        let group = if nested { &model["group"] } else { &model };
+        let retained = group["receipts"].as_array().unwrap();
+        assert!(!retained.is_empty());
+        assert!(group["receipts"].to_string().chars().count() <= MODEL_RECEIPTS_CHAR_BUDGET);
+        assert_eq!(group["receiptCount"], 100);
+        assert_eq!(
+            retained.len() + group["omittedReceipts"].as_u64().unwrap() as usize,
+            100
+        );
+        let latest = retained.last().unwrap();
+        assert_eq!(latest["id"], "receipt-99");
+        assert_eq!(latest["chatId"], "saved-chat");
+        assert_eq!(latest["status"], "completed");
+        assert_eq!(latest["arguments"]["compacted"], true);
+        assert!(
+            latest["result"]["preview"]
+                .as_str()
+                .unwrap()
+                .contains("verified")
+        );
+        assert_eq!(group["tasks"][0], assignment);
+        if nested {
+            assert_eq!(model["assignment"], assignment);
+        }
+    }
+    assert_eq!(source["receipts"].as_array().unwrap().len(), 100);
+    assert!(
+        source["receipts"][99]["arguments"]["changes"][0]["diff"]
+            .as_str()
+            .unwrap()
+            .ends_with('🦀')
+    );
+
+    let small = json!({"receipts":[{"id":"small","arguments":{"command":"verify"},"result":{"status":"ok"}}]});
+    assert_eq!(model_context(small.clone()), small);
+}
+
 #[tokio::test]
 async fn group_list_tracks_incoming_messages_without_counting_user_or_role_updates() {
     let (_root, state, peer) = fixture().await;

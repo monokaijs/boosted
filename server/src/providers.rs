@@ -4,7 +4,8 @@ use tokio::sync::Mutex;
 
 mod selection;
 pub(crate) use selection::{
-    account_available, choose_account, mark_exhausted, new_work_client, start_turn, task_client,
+    account_available, choose_account_for_provider, mark_exhausted, new_work_client, start_turn,
+    task_client,
 };
 
 #[derive(Clone)]
@@ -52,18 +53,23 @@ impl ProviderManager {
             .or_default()
             .clone()
     }
-    pub(crate) async fn agent_client(&self, home: &Path) -> AppResult<CodexClient> {
+    pub(crate) async fn agent_client(&self, db: &Database, id: &str) -> AppResult<CodexClient> {
+        let account = document(db, "accounts", id).await?;
+        let home = account_home(self, &account)?;
+        if account["providerId"] == "claude" {
+            return CodexClient::for_claude_account(&home, read_claude_api_key(&home).await?).await;
+        }
         #[cfg(test)]
         if let Some(program) = &self.test_program {
-            return CodexClient::test_process_with_home(program.clone(), Some(home), true).await;
+            return CodexClient::test_process_with_home(program.clone(), Some(&home), true).await;
         }
-        CodexClient::for_account(home, true).await
+        CodexClient::for_account(&home, true).await
     }
     pub async fn client(&self, db: &Database, id: &str) -> AppResult<CodexClient> {
         let account = document(db, "accounts", id).await?;
-        if account["providerId"] != "codex" {
+        if !matches!(account["providerId"].as_str(), Some("codex" | "claude")) {
             return Err(AppError::BadRequest(
-                "This account is not a Codex provider".into(),
+                "This account uses an unsupported provider".into(),
             ));
         }
         let home = account_home(self, &account)?;
@@ -73,15 +79,20 @@ impl ProviderManager {
         }
         tokio::fs::create_dir_all(&home).await?;
         private_directory(&home).await?;
-        #[cfg(test)]
-        let client = match &self.test_program {
-            Some(program) => {
-                CodexClient::test_process_with_home(program.clone(), Some(&home), false).await?
-            }
-            None => CodexClient::for_account(&home, false).await?,
+        let client = if account["providerId"] == "claude" {
+            CodexClient::for_claude_account(&home, read_claude_api_key(&home).await?).await?
+        } else {
+            #[cfg(test)]
+            let client = match &self.test_program {
+                Some(program) => {
+                    CodexClient::test_process_with_home(program.clone(), Some(&home), false).await?
+                }
+                None => CodexClient::for_account(&home, false).await?,
+            };
+            #[cfg(not(test))]
+            let client = CodexClient::for_account(&home, false).await?;
+            client
         };
-        #[cfg(not(test))]
-        let client = CodexClient::for_account(&home, false).await?;
         clients.insert(id.into(), client.clone());
         Ok(client)
     }
@@ -100,12 +111,41 @@ pub(crate) async fn private_directory(path: &Path) -> AppResult<()> {
     }
     Ok(())
 }
+
+fn claude_api_key_path(home: &Path) -> PathBuf {
+    home.join(".boosted-anthropic-api-key")
+}
+
+async fn read_claude_api_key(home: &Path) -> AppResult<Option<String>> {
+    match tokio::fs::read_to_string(claude_api_key_path(home)).await {
+        Ok(key) => Ok(Some(key.trim().to_string()).filter(|key| !key.is_empty())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn write_claude_api_key(home: &Path, key: &str) -> AppResult<()> {
+    tokio::fs::create_dir_all(home).await?;
+    private_directory(home).await?;
+    let path = claude_api_key_path(home);
+    tokio::fs::write(&path, key).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
+    }
+    Ok(())
+}
 pub(crate) fn account_home(manager: &ProviderManager, account: &Value) -> AppResult<PathBuf> {
-    let default = manager
-        .home
-        .join(account["id"].as_str().unwrap_or_default());
+    let accounts_home =
+        provider_accounts_home(manager, account["providerId"].as_str().unwrap_or("codex"));
+    let default = accounts_home.join(account["id"].as_str().unwrap_or_default());
     let home = match account
-        .pointer("/settings/codexHome")
+        .pointer(if account["providerId"] == "claude" {
+            "/settings/claudeHome"
+        } else {
+            "/settings/codexHome"
+        })
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty())
     {
@@ -122,19 +162,45 @@ pub(crate) fn account_home(manager: &ProviderManager, account: &Value) -> AppRes
     };
     if !home.is_absolute() {
         return Err(AppError::BadRequest(
-            "Codex home must be an absolute path".into(),
+            "Provider home must be an absolute path".into(),
         ));
     }
-    let shared = std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| dirs_next::home_dir().unwrap_or_default().join(".codex"));
+    let shared = if account["providerId"] == "claude" {
+        std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| dirs_next::home_dir().unwrap_or_default().join(".claude"))
+    } else {
+        std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| dirs_next::home_dir().unwrap_or_default().join(".codex"))
+    };
     let resolved = home.canonicalize().unwrap_or_else(|_| home.clone());
     if resolved == shared.canonicalize().unwrap_or(shared) {
         return Err(AppError::BadRequest(
-            "Choose a separate Codex home for this account".into(),
+            "Choose a separate provider home for this account".into(),
         ));
     }
     Ok(home)
+}
+
+fn provider_accounts_home(manager: &ProviderManager, provider_id: &str) -> PathBuf {
+    if provider_id == "claude"
+        && manager.home.file_name().and_then(|name| name.to_str()) == Some("accounts")
+        && manager
+            .home
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some("codex")
+    {
+        return manager
+            .home
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(&manager.home)
+            .join("claude/accounts");
+    }
+    manager.home.clone()
 }
 pub(crate) async fn document(db: &Database, namespace: &str, id: &str) -> AppResult<Value> {
     let data = sqlx::query_scalar::<_, String>(
@@ -176,9 +242,10 @@ pub(crate) fn text(value: &Value, field: &str, limit: usize) -> AppResult<String
 }
 
 pub(crate) async fn list_providers(State(state): State<AppState>) -> Json<Value> {
-    Json(
-        json!([{"id":"codex","label":"OpenAI Codex","icon":"codex", "capabilities":["auth","chat","history","limits","models","accountSwitchHooks","localRuntime","threadLifecycle","fork","config"],"composerFeatures":["accessMode","imageAttachment"],"defaultSettings":{"accountsHome":state.providers.home,"sharedChatHome":"~/.codex"},"settingsFields":[],"accountFields":[{"key":"codexHome","label":"Codex home","type":"path"},{"key":"personality","label":"Personality","type":"string"}],"runtimeFields":[{"key":"model","label":"Model","type":"string"},{"key":"reasoningEffort","label":"Reasoning","type":"string"},{"key":"permissionMode","label":"Access","type":"string"},{"key":"serviceTier","label":"Speed","type":"string"}],"authModes":[{"mode":"device","label":"Device login"}]}]),
-    )
+    Json(json!([
+        {"id":"codex","label":"OpenAI Codex","icon":"codex", "capabilities":["auth","chat","history","limits","models","accountSwitchHooks","localRuntime","threadLifecycle","fork","config"],"composerFeatures":["accessMode","imageAttachment"],"defaultSettings":{"accountsHome":state.providers.home,"sharedChatHome":"~/.codex"},"settingsFields":[],"accountFields":[{"key":"codexHome","label":"Codex home","type":"path"},{"key":"personality","label":"Personality","type":"string"}],"runtimeFields":[{"key":"model","label":"Model","type":"string"},{"key":"reasoningEffort","label":"Reasoning","type":"string"},{"key":"permissionMode","label":"Access","type":"string"},{"key":"serviceTier","label":"Speed","type":"string"}],"authModes":[{"mode":"device","label":"Device login"}]},
+        {"id":"claude","label":"Anthropic Claude","icon":"claude", "capabilities":["auth","chat","history","models","accountSwitchHooks","localRuntime","threadLifecycle","fork","config"],"composerFeatures":["accessMode","imageAttachment","planMode"],"defaultSettings":{"accountsHome":provider_accounts_home(&state.providers, "claude"),"sharedChatHome":"~/.claude"},"settingsFields":[],"accountFields":[{"key":"claudeHome","label":"Claude home","type":"path"}],"runtimeFields":[{"key":"model","label":"Model","type":"string"},{"key":"reasoningEffort","label":"Reasoning","type":"string"},{"key":"permissionMode","label":"Access","type":"string"}],"authModes":[{"mode":"web","label":"Sign in with Claude"},{"mode":"apiKey","label":"API key"}]}
+    ]))
 }
 
 pub(crate) async fn model_presets(db: &Database) -> AppResult<Value> {
@@ -225,7 +292,7 @@ pub(crate) async fn update_model_presets(
         .ok_or_else(|| AppError::BadRequest("Provider presets must be an object".into()))?;
     let mut providers = serde_json::Map::new();
     for (id, preset) in overrides {
-        if id != "codex" {
+        if !matches!(id.as_str(), "codex" | "claude") {
             return Err(AppError::BadRequest("Unknown provider".into()));
         }
         providers.insert(id.clone(), validate_preset(preset)?);
@@ -284,7 +351,7 @@ pub(crate) async fn model_options(
 ) -> AppResult<CodexOptions> {
     let mut options = load_codex_options(client).await?;
     let presets = model_presets(&state.db).await?;
-    let defaults = resolve_model_defaults(&presets, "codex");
+    let defaults = resolve_model_defaults(&presets, client.provider_id());
     // Saving an automatic preset also replaces the composer's remembered choice.
     options.has_model_preset = presets.get("id").is_some();
     let requested = defaults["model"].as_str().unwrap_or(&options.default_model);
@@ -323,13 +390,19 @@ pub(crate) async fn create_account(
     Json(input): Json<Value>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
     ensure_admin(&user)?;
-    if input["providerId"].as_str() != Some("codex") {
+    let provider_id = input["providerId"].as_str().unwrap_or_default();
+    if !matches!(provider_id, "codex" | "claude") {
         return Err(AppError::BadRequest(
-            "Only OpenAI Codex is supported".into(),
+            "Provider must be codex or claude".into(),
         ));
     }
     let now = Utc::now().to_rfc3339();
-    let account = json!({"id":Uuid::new_v4().to_string(),"providerId":"codex","displayName":input["displayName"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or("OpenAI Codex account"),"settings":input.get("settings").cloned().unwrap_or(json!({})),"runtimeDefaults":input.get("runtimeDefaults").cloned().unwrap_or(json!({"permissionMode":"default"})),"status":"DISCONNECTED","createdAt":now,"updatedAt":now});
+    let default_name = if provider_id == "claude" {
+        "Anthropic Claude account"
+    } else {
+        "OpenAI Codex account"
+    };
+    let account = json!({"id":Uuid::new_v4().to_string(),"providerId":provider_id,"displayName":input["displayName"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or(default_name),"settings":input.get("settings").cloned().unwrap_or(json!({})),"runtimeDefaults":input.get("runtimeDefaults").cloned().unwrap_or(json!({"permissionMode":"askForApproval"})),"status":"DISCONNECTED","createdAt":now,"updatedAt":now});
     validate_account(&state, &account).await?;
     save_document(&state.db, "accounts", &account).await?;
     Ok((StatusCode::CREATED, Json(account)))
@@ -350,7 +423,7 @@ async fn validate_account(state: &AppState, account: &Value) -> AppResult<()> {
                 == home.canonicalize().unwrap_or(home.clone())
         {
             return Err(AppError::Conflict(
-                "Each account needs its own Codex home".into(),
+                "Each account needs its own provider home".into(),
             ));
         }
     }
@@ -377,7 +450,10 @@ async fn refresh_account(state: &AppState, account: Value) -> AppResult<Value> {
                 Ok(result) if result.get("account").is_some_and(|v| !v.is_null()) => {
                     account["status"] = json!("CONNECTED");
                     account["lastError"] = Value::Null;
-                    if account["displayName"] == "OpenAI Codex account" {
+                    if matches!(
+                        account["displayName"].as_str(),
+                        Some("OpenAI Codex account" | "Anthropic Claude account")
+                    ) {
                         if let Some(email) =
                             result.pointer("/account/email").and_then(Value::as_str)
                         {
@@ -449,7 +525,7 @@ pub(crate) async fn update_account(
         });
         if state.agents.uses_account(&id).await || has_active_chat || has_active_task {
             return Err(AppError::Conflict(
-                "Stop this account's active agents and coding runs before changing its Codex home"
+                "Stop this account's active agents and coding runs before changing its provider home"
                     .into(),
             ));
         }
@@ -468,7 +544,7 @@ pub(crate) async fn delete_account(
     ensure_admin(&user)?;
     let lock = state.providers.account_lock(&id).await;
     let _guard = lock.lock().await;
-    document(&state.db, "accounts", &id).await?;
+    let account = document(&state.db, "accounts", &id).await?;
     if documents(&state.db, "provider-chats")
         .await?
         .iter()
@@ -484,6 +560,10 @@ pub(crate) async fn delete_account(
         ));
     }
     state.providers.invalidate(&id).await;
+    if account["providerId"] == "claude" {
+        let home = account_home(&state.providers, &account)?;
+        let _ = tokio::fs::remove_file(claude_api_key_path(&home)).await;
+    }
     sqlx::query("DELETE FROM feature_documents WHERE namespace='accounts' AND id=?")
         .bind(id)
         .execute(&state.db.pool)
@@ -494,15 +574,56 @@ pub(crate) async fn authenticate_account(
     State(state): State<AppState>,
     Extension(user): Extension<AuthUser>,
     AxumPath(id): AxumPath<String>,
+    input: Option<Json<Value>>,
 ) -> AppResult<Json<Value>> {
     ensure_admin(&user)?;
     let lock = state.providers.account_lock(&id).await;
     let _guard = lock.lock().await;
+    let mut account = document(&state.db, "accounts", &id).await?;
+    if account["providerId"] == "claude" {
+        let input = input.map(|Json(value)| value).unwrap_or_else(|| json!({}));
+        let mode = input["mode"].as_str().unwrap_or("web");
+        let home = account_home(&state.providers, &account)?;
+        state.providers.invalidate(&id).await;
+        match mode {
+            "apiKey" => {
+                let key = input["apiKey"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .ok_or_else(|| AppError::BadRequest("Anthropic API key is required".into()))?;
+                write_claude_api_key(&home, key).await?;
+                account["status"] = json!("CONNECTED");
+                account["lastAuthMode"] = json!("apiKey");
+                account["authState"] = json!({"type":"apiKey"});
+                account["lastError"] = Value::Null;
+                save_document(&state.db, "accounts", &account).await?;
+                return Ok(Json(
+                    json!({"accountId":id,"status":"CONNECTED","authMode":"apiKey","authState":{"type":"apiKey"},"message":"Anthropic API key saved."}),
+                ));
+            }
+            "web" => {
+                let _ = tokio::fs::remove_file(claude_api_key_path(&home)).await;
+                crate::claude::start_web_login(&home).await?;
+                account["status"] = json!("AUTHENTICATING");
+                account["lastAuthMode"] = json!("web");
+                account["lastError"] = Value::Null;
+                save_document(&state.db, "accounts", &account).await?;
+                return Ok(Json(
+                    json!({"accountId":id,"status":"AUTHENTICATING","authMode":"web","message":"Finish signing in in the browser opened by Claude Code."}),
+                ));
+            }
+            _ => {
+                return Err(AppError::BadRequest(
+                    "Invalid Claude authentication mode".into(),
+                ));
+            }
+        }
+    }
     let client = state.providers.client(&state.db, &id).await?;
     let result = client
         .request("account/login/start", json!({"type":"chatgptDeviceCode"}))
         .await?;
-    let mut account = document(&state.db, "accounts", &id).await?;
     account["status"] = json!("AUTHENTICATING");
     account["lastAuthMode"] = json!("device");
     account["lastAuthUrl"] = result["verificationUrl"].clone();
@@ -700,6 +821,51 @@ mod question_tests {
             json!({"decision":"decline"})
         );
         assert!(codex_request_response(&request, &json!({"decision":"unknown"})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod claude_account_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stores_anthropic_keys_outside_the_account_document() {
+        let root = tempfile::tempdir().unwrap();
+        write_claude_api_key(root.path(), "sk-ant-test")
+            .await
+            .unwrap();
+        assert_eq!(
+            read_claude_api_key(root.path()).await.unwrap().as_deref(),
+            Some("sk-ant-test")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(claude_api_key_path(root.path()))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn separates_default_claude_and_codex_homes() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = ProviderManager::new(root.path().join("providers/codex/accounts"));
+        let codex = json!({"id":"one","providerId":"codex","settings":{}});
+        let claude = json!({"id":"two","providerId":"claude","settings":{}});
+        assert_eq!(
+            account_home(&manager, &codex).unwrap(),
+            root.path().join("providers/codex/accounts/one")
+        );
+        assert_eq!(
+            account_home(&manager, &claude).unwrap(),
+            root.path().join("providers/claude/accounts/two")
+        );
     }
 }
 

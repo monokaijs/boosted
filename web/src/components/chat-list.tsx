@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, CircleAlert, FolderPlus, LoaderCircle, MessageSquarePlus, Pin, Plus, Search, Trash2, Ellipsis, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,16 @@ import { chatProject } from "@/lib/chat-project";
 import { conversationKey, useUnreadStore, type ConversationKind } from "@/lib/unread-conversations";
 
 type ProjectChat = { chat: CodexChat; project?: Project };
+type SidebarSection = "agents" | "groups" | "projects" | "recent";
+
+function SectionHeading({ id, label, expanded, onToggle, action }: { id: string; label: string; expanded: boolean; onToggle(): void; action?: ReactNode }) {
+  return <div className="chat-section-heading">
+    <h2 id={`${id}-heading`}><button type="button" className="chat-section-toggle" aria-expanded={expanded} aria-controls={`${id}-content`} title={`${expanded ? "Collapse" : "Expand"} ${label}`} onClick={onToggle}>
+      {expanded ? <ChevronDown /> : <ChevronRight />}<span>{label}</span>
+    </button></h2>
+    {action}
+  </div>;
+}
 
 export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, onSelectAgent, onCreateAgent, onNewChat, onOpenProject, onClose }: {
   agents: readonly AssistantSummary[];
@@ -48,6 +58,7 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [search, setSearch] = useWorkspaceState("chat-list:search", "");
   const [expanded, setExpanded] = useWorkspaceState<Set<string>>("chat-list:expanded", () => new Set());
+  const [collapsedSections, setCollapsedSections] = useWorkspaceState<Set<SidebarSection>>("chat-list:collapsedSections", () => new Set());
   const [visibleCounts, setVisibleCounts] = useWorkspaceState<Record<string, number>>("chat-list:visibleCounts", {});
   const [searchOpen, setSearchOpen] = useWorkspaceState("chat-list:searchOpen", false);
   const projectId = useAppStore((state) => state.selectedProjectId);
@@ -63,7 +74,15 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
     return [...unique.values()].sort((a, b) => Date.parse(b.chat.updatedAt) - Date.parse(a.chat.updatedAt));
   }, [chats.data, projects.data, needle]);
   const groups = (projects.data ?? []).map((project) => ({ project, entries: entries.filter((entry) => entry.project?.id === project.id) }));
-  const activeChatVisibleInProject = groups.some(({ project, entries }) => expanded.has(project.id) && entries.slice(0, visibleCounts[project.id] ?? 4).some(({ chat }) => chat.id === activeChatId));
+  const activeChatVisibleInProject = !collapsedSections.has("projects") && groups.some(({ project, entries }) => expanded.has(project.id) && entries.slice(0, visibleCounts[project.id] ?? 4).some(({ chat }) => chat.id === activeChatId));
+
+  function toggleSection(section: SidebarSection) {
+    setCollapsedSections((current) => {
+      const next = new Set(current);
+      if (next.has(section)) next.delete(section); else next.add(section);
+      return next;
+    });
+  }
 
   function toggleProject(id: string) {
     if (expanded.has(id)) setVisibleCounts((counts) => ({ ...counts, [id]: 4 }));
@@ -99,51 +118,61 @@ export function ChatList({ agents, activeAgentId, activeGroupId, activeChatId, o
     <div className="chat-list-scroll">
       <>
         <nav className="chat-list-agents" aria-label="Agents">
-          <div className="chat-agents-heading"><h2>Agents</h2><Button variant="ghost" size="icon-sm" aria-label="New agent" title="New agent" onClick={() => { onCreateAgent(); onClose(); }}><Plus /></Button></div>
-          {agents.filter((agent) => !needle || agent.profile.name.toLowerCase().includes(needle)).map((agent) => <button key={agent.id} type="button" className={cn("chat-list-row chat-agent-row", activeAgentId === agent.id && "is-selected")} aria-current={activeAgentId === agent.id ? "page" : undefined} onClick={() => { onSelectAgent(agent.id); onClose(); }}>
-            <AgentAvatar name={agent.profile.name} avatar={agent.profile.avatar} className="size-6 text-[10px]" /><span>{agent.profile.name}</span>
-            {unreadMarker("agent", agent.id)}
-          </button>)}
+          <SectionHeading id="chat-list-agents" label="Agents" expanded={!collapsedSections.has("agents")} onToggle={() => toggleSection("agents")} action={<Button variant="ghost" size="icon-sm" aria-label="New agent" title="New agent" onClick={() => { onCreateAgent(); onClose(); }}><Plus /></Button>} />
+          <div id="chat-list-agents-content" hidden={collapsedSections.has("agents")}>
+            {agents.filter((agent) => !needle || agent.profile.name.toLowerCase().includes(needle)).map((agent) => <button key={agent.id} type="button" className={cn("chat-list-row chat-agent-row", activeAgentId === agent.id && "is-selected")} aria-current={activeAgentId === agent.id ? "page" : undefined} onClick={() => { onSelectAgent(agent.id); onClose(); }}>
+              <AgentAvatar name={agent.profile.name} avatar={agent.profile.avatar} className="size-6 text-[10px]" /><span>{agent.profile.name}</span>
+              {unreadMarker("agent", agent.id)}
+            </button>)}
+          </div>
         </nav>
         <Separator className="chat-agents-divider" decorative={false} />
       </>
-      <section aria-labelledby="group-chats-heading"><h2 id="group-chats-heading">Groups</h2>
-        <button className="chat-list-row chat-new" onClick={() => setCreatingGroup(true)}><MessageSquarePlus /><span>New group</span></button>
-        {rooms.data?.filter((room) => !needle || room.name.toLowerCase().includes(needle)).map((room) => {
-          const members = room.memberIds.map((id) => agentsById.get(id) ?? { id, profile: { name: id, avatar: undefined } });
-          const memberNames = members.map((member) => member.profile.name).join(", ");
-          return <div key={room.id} className="chat-group-row"><button aria-label={room.name} className={cn("chat-list-row", activeGroupId === room.id && "is-selected")} aria-current={activeGroupId === room.id ? "true" : undefined} onClick={() => { useAppStore.getState().selectGroup(room.id); window.dispatchEvent(new CustomEvent("boosted:open-group", { detail: room.id })); onClose(); }}>
-            <GroupAvatar group={room} className="size-6 rounded-md" /><span>{room.name}</span>
-            {unreadMarker("group", room.id)}
-            {room.stopped && <CircleAlert aria-label="Stopped" className="chat-status" />}
-            {!!members.length && <span className="chat-group-avatars" role="img" aria-label={`Participants: ${memberNames}`} title={memberNames}>
-              {members.slice(0, 4).map((member) => <AgentAvatar key={member.id} name={member.profile.name} avatar={member.profile.avatar} className="size-6 text-[10px]" />)}
-              {members.length > 4 && <span className="chat-group-avatar-count">+{members.length - 4}</span>}
-            </span>}
-          </button><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="chat-group-menu" aria-label={`Options for ${room.name}`}><Ellipsis /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem className="text-destructive" onSelect={() => setDeletingGroup(room)}><Trash2 className="size-4" />Delete group</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>;
-        })}
-        {rooms.error && <p className="chat-list-note text-destructive">{rooms.error.message}<button onClick={() => void rooms.refetch()}>Retry</button></p>}
+      <section aria-labelledby="chat-list-groups-heading">
+        <SectionHeading id="chat-list-groups" label="Groups" expanded={!collapsedSections.has("groups")} onToggle={() => toggleSection("groups")} />
+        <div id="chat-list-groups-content" hidden={collapsedSections.has("groups")}>
+          <button className="chat-list-row chat-new" onClick={() => setCreatingGroup(true)}><MessageSquarePlus /><span>New group</span></button>
+          {rooms.data?.filter((room) => !needle || room.name.toLowerCase().includes(needle)).map((room) => {
+            const members = room.memberIds.map((id) => agentsById.get(id) ?? { id, profile: { name: id, avatar: undefined } });
+            const memberNames = members.map((member) => member.profile.name).join(", ");
+            return <div key={room.id} className="chat-group-row"><button aria-label={room.name} className={cn("chat-list-row", activeGroupId === room.id && "is-selected")} aria-current={activeGroupId === room.id ? "true" : undefined} onClick={() => { useAppStore.getState().selectGroup(room.id); window.dispatchEvent(new CustomEvent("boosted:open-group", { detail: room.id })); onClose(); }}>
+              <GroupAvatar group={room} className="size-6 rounded-md" /><span>{room.name}</span>
+              {unreadMarker("group", room.id)}
+              {room.stopped && <CircleAlert aria-label="Stopped" className="chat-status" />}
+              {!!members.length && <span className="chat-group-avatars" role="img" aria-label={`Participants: ${memberNames}`} title={memberNames}>
+                {members.slice(0, 4).map((member) => <AgentAvatar key={member.id} name={member.profile.name} avatar={member.profile.avatar} className="size-6 text-[10px]" />)}
+                {members.length > 4 && <span className="chat-group-avatar-count">+{members.length - 4}</span>}
+              </span>}
+            </button><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="chat-group-menu" aria-label={`Options for ${room.name}`}><Ellipsis /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem className="text-destructive" onSelect={() => setDeletingGroup(room)}><Trash2 className="size-4" />Delete group</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>;
+          })}
+          {rooms.error && <p className="chat-list-note text-destructive">{rooms.error.message}<button onClick={() => void rooms.refetch()}>Retry</button></p>}
+        </div>
       </section>
-      <section aria-labelledby="project-chats-heading"><h2 id="project-chats-heading">Projects</h2>
-        {projects.isPending && <p className="chat-list-note"><LoaderCircle className="animate-spin" />Loading projects…</p>}
-        {projects.error && <p className="chat-list-note text-destructive">{projects.error.message}<button onClick={() => void projects.refetch()}>Retry</button></p>}
-        {groups.filter(({ project, entries }) => !needle || entries.length || project.name.toLowerCase().includes(needle)).map(({ project, entries }) => <div key={project.id}>
-          <div className="chat-project-heading">
-            <button className={cn("chat-project-row", projectId === project.id && "is-current-project")} aria-label={`${expanded.has(project.id) ? "Collapse" : "Expand"} ${project.name}`} aria-expanded={expanded.has(project.id)} onClick={() => toggleProject(project.id)} title={project.repoPath}>
-              {expanded.has(project.id) ? <ChevronDown className="project-chevron" /> : <ChevronRight className="project-chevron" />}<ProjectAvatar project={project} /><span>{project.name}</span>
-            </button>
-            <Button variant="ghost" size="icon-sm" className="chat-project-add" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} onClick={() => { useAppStore.getState().selectProject(project); onNewChat(); onClose(); }}><Plus /></Button>
-          </div>
-          {expanded.has(project.id) && <div>{entries.slice(0, visibleCounts[project.id] ?? 4).map((entry) => chatRow(entry, true))}{entries.length > (visibleCounts[project.id] ?? 4) && <button className="chat-list-row chat-list-child chat-show-all" onClick={() => setVisibleCounts((counts) => ({ ...counts, [project.id]: (counts[project.id] ?? 4) + 4 }))}><span>Load more</span></button>}</div>}
-
-        </div>)}
-        {projects.data?.length === 0 && <button className="chat-list-row" onClick={onOpenProject}><FolderPlus /><span>Add your first project</span></button>}
+      <section aria-labelledby="chat-list-projects-heading">
+        <SectionHeading id="chat-list-projects" label="Projects" expanded={!collapsedSections.has("projects")} onToggle={() => toggleSection("projects")} />
+        <div id="chat-list-projects-content" hidden={collapsedSections.has("projects")}>
+          {projects.isPending && <p className="chat-list-note"><LoaderCircle className="animate-spin" />Loading projects…</p>}
+          {projects.error && <p className="chat-list-note text-destructive">{projects.error.message}<button onClick={() => void projects.refetch()}>Retry</button></p>}
+          {groups.filter(({ project, entries }) => !needle || entries.length || project.name.toLowerCase().includes(needle)).map(({ project, entries }) => <div key={project.id}>
+            <div className="chat-project-heading">
+              <button className={cn("chat-project-row", projectId === project.id && "is-current-project")} aria-label={`${expanded.has(project.id) ? "Collapse" : "Expand"} ${project.name}`} aria-expanded={expanded.has(project.id)} onClick={() => toggleProject(project.id)} title={project.repoPath}>
+                {expanded.has(project.id) ? <ChevronDown className="project-chevron" /> : <ChevronRight className="project-chevron" />}<ProjectAvatar project={project} /><span>{project.name}</span>
+              </button>
+              <Button variant="ghost" size="icon-sm" className="chat-project-add" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} onClick={() => { useAppStore.getState().selectProject(project); onNewChat(); onClose(); }}><Plus /></Button>
+            </div>
+            {expanded.has(project.id) && <div>{entries.slice(0, visibleCounts[project.id] ?? 4).map((entry) => chatRow(entry, true))}{entries.length > (visibleCounts[project.id] ?? 4) && <button className="chat-list-row chat-list-child chat-show-all" onClick={() => setVisibleCounts((counts) => ({ ...counts, [project.id]: (counts[project.id] ?? 4) + 4 }))}><span>Load more</span></button>}</div>}
+          </div>)}
+          {projects.data?.length === 0 && <button className="chat-list-row" onClick={onOpenProject}><FolderPlus /><span>Add your first project</span></button>}
+        </div>
       </section>
-      <section aria-labelledby="recent-chats-heading"><h2 id="recent-chats-heading">Recent</h2>
-        {chats.isPending && <p className="chat-list-note"><LoaderCircle className="animate-spin" />Loading chats…</p>}
-        {chats.error && <p className="chat-list-note">Unable to load chats. <button onClick={() => void chats.refetch()}>Retry</button></p>}
-        {entries.slice(0, 30).map((entry) => chatRow(entry))}
-        {!entries.length && !chats.isPending && !chats.error && <p className="chat-list-note">{needle ? "No matching chats." : "Your recent chats will appear here."}</p>}
+      <section aria-labelledby="chat-list-recent-heading">
+        <SectionHeading id="chat-list-recent" label="Recent" expanded={!collapsedSections.has("recent")} onToggle={() => toggleSection("recent")} />
+        <div id="chat-list-recent-content" hidden={collapsedSections.has("recent")}>
+          {chats.isPending && <p className="chat-list-note"><LoaderCircle className="animate-spin" />Loading chats…</p>}
+          {chats.error && <p className="chat-list-note">Unable to load chats. <button onClick={() => void chats.refetch()}>Retry</button></p>}
+          {entries.slice(0, 30).map((entry) => chatRow(entry))}
+          {!entries.length && !chats.isPending && !chats.error && <p className="chat-list-note">{needle ? "No matching chats." : "Your recent chats will appear here."}</p>}
+        </div>
       </section>
     </div>
     {deletingGroup && <DeleteGroupDialog group={deletingGroup} open onOpenChange={(open) => { if (!open) setDeletingGroup(undefined); }} />}

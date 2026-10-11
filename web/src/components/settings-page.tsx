@@ -612,14 +612,14 @@ export function IntegrationsSettings({ embedded = false }: { embedded?: boolean 
         {integrations.error && <p role="alert" className="settings-error">{integrations.error.message}</p>}
       </div>
     </SettingsSection>}
-    {listFilter !== "installed" && <SettingsSection title="Available integrations" description="Connect external sources to this project’s taskboard. Configure GitLab accounts in Settings → Integrations.">
+    {listFilter !== "installed" && <SettingsSection title="Available integrations" description="Connect external sources to this project’s tasks. Configure GitLab accounts in Settings → Integrations.">
       <div className="settings-plugin-list">
         {pluginVisible("gitlab") && <Button variant="ghost" type="button" className="integration-plugin-card" disabled={save.isPending || !projectId || !connections.data?.length} onClick={() => begin("gitlab")}><span className="grid size-10 place-items-center rounded-lg bg-[#FC6D26]/10 text-[#FC6D26]"><Gitlab className="size-5" /></span><span className="min-w-0 flex-1"><span className="block text-xs font-medium">GitLab</span><span className="mt-1 block text-[11px] leading-4 text-muted-foreground">Import open issues from GitLab projects and groups.</span></span><Plus className="size-4 text-muted-foreground" /></Button>}
         {pluginVisible("huly") && <Button variant="ghost" type="button" className="integration-plugin-card" disabled={save.isPending || !projectId} onClick={() => begin("huly")}><span className="grid size-10 place-items-center rounded-lg bg-primary/10 text-primary"><Code2 className="size-5" /></span><span className="min-w-0 flex-1"><span className="block text-xs font-medium">Huly</span><span className="mt-1 block text-[11px] leading-4 text-muted-foreground">Import issues from Huly workspace projects.</span></span><Plus className="size-4 text-muted-foreground" /></Button>}
         {!pluginVisible("gitlab") && !pluginVisible("huly") && <div className="settings-empty"><p>No available integrations match your search.</p><Button variant="ghost" size="sm" onClick={() => setListSearch("")}>Clear search</Button></div>}
       </div>
     </SettingsSection>}
-    {installing && <SettingsSection title={`${editingId ? "Edit" : "Connect"} ${installing === "gitlab" ? "GitLab" : "Huly"}`} description={installing === "gitlab" ? "Choose a saved GitLab connection and the projects or groups to import into this project’s taskboard." : "Add every Huly workspace/project pair that should feed this workspace through the connector."}>
+    {installing && <SettingsSection title={`${editingId ? "Edit" : "Connect"} ${installing === "gitlab" ? "GitLab" : "Huly"}`} description={installing === "gitlab" ? "Choose a saved GitLab connection and the projects or groups to import into this project’s tasks." : "Add every Huly workspace/project pair that should feed this workspace through the connector."}>
       <form className="settings-card grid gap-4" onSubmit={(event) => { event.preventDefault(); if (!save.isPending && name.trim() && targetsValid) save.mutate(); }}>
         <label className="grid gap-1.5"><span className="settings-label">Import name</span><Input value={name} onChange={(event) => setName(event.target.value)} required /></label>
         {installing === "gitlab"

@@ -57,9 +57,18 @@ export interface CodexChatMessage {
   role: "user" | "assistant";
   content: string;
   kind: "message" | "reasoning" | "plan" | "tool" | "system";
+  phase?: "commentary" | "final_answer";
   createdAt?: string;
   questions?: { title: string; options?: string[] | null }[];
   attachments?: MessageAttachment[];
+  changes?: CodexFileChange[];
+}
+
+export interface CodexFileChange {
+  path: string;
+  additions: number;
+  deletions: number;
+  diff?: string;
 }
 
 export interface MessageAttachment {
@@ -142,6 +151,7 @@ export interface CodexLiveEvent {
   clientMessageId?: string;
   itemId?: string;
   delta?: string;
+  phase?: CodexChatMessage["phase"];
   message?: CodexChatMessage;
   status?: string;
   error?: unknown;
@@ -239,6 +249,8 @@ export interface GitlabIssueActivity {
 
 export interface GitlabActivityItem {
   id: string;
+  discussionId: string;
+  reply: boolean;
   body: string;
   system: boolean;
   createdAt: string;
@@ -274,6 +286,7 @@ export interface Integration {
 
 export interface IntegrationSyncResult {
   imported: number;
+  updated: number;
   skipped: number;
   failed: number;
   message: string;
@@ -409,6 +422,15 @@ export interface GitStatus {
   ahead: number;
   behind: number;
   changes: GitChange[];
+}
+
+export interface GitCommit {
+  hash: string;
+  shortHash: string;
+  subject: string;
+  authorName: string;
+  authorEmail: string;
+  authoredAt: string;
 }
 
 export interface Health {

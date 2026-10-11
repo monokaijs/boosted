@@ -14,6 +14,7 @@ function readMachineState(machineId?: string) {
     selectedGroupId: localStorage.getItem(key(machineId, "boosted.group")) ?? undefined,
     selectedCodexChatId: localStorage.getItem(key(machineId, "boosted.codexChat")) ?? undefined,
     openFilePath: undefined as string | undefined,
+    gitDiffTarget: undefined as { path: string; staged: boolean; diff?: string } | undefined,
   };
 }
 
@@ -35,6 +36,7 @@ type AppStore = ReturnType<typeof readMachineState> & {
   syncCodexChatProject: (id: string, project?: Project) => void;
   selectGroup: (id?: string) => void;
   openFile: (path?: string) => void;
+  openGitDiff: (target?: { path: string; staged: boolean; diff?: string }) => void;
   setTaskDrawerOpen: (open: boolean) => void;
 };
 
@@ -57,7 +59,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     setOptional(state.activeMachineId, "boosted.project", project?.id);
     setOptional(state.activeMachineId, "boosted.task");
     setOptional(state.activeMachineId, "boosted.codexChat");
-    set({ selectedProjectId: project?.id, selectedTaskId: undefined, selectedCodexChatId: undefined, openFilePath: undefined });
+    set({ selectedProjectId: project?.id, selectedTaskId: undefined, selectedCodexChatId: undefined, openFilePath: undefined, gitDiffTarget: undefined });
   },
   selectTask: (task) => {
     const state = get();
@@ -85,9 +87,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
     const state = get();
     if (state.selectedCodexChatId !== id || state.selectedProjectId === project?.id) return;
     setOptional(state.activeMachineId, "boosted.project", project?.id);
-    set({ selectedProjectId: project?.id, openFilePath: undefined });
+    set({ selectedProjectId: project?.id, openFilePath: undefined, gitDiffTarget: undefined });
   },
   openFile: (openFilePath) => set({ openFilePath }),
+  openGitDiff: (gitDiffTarget) => set({ gitDiffTarget }),
   setTaskDrawerOpen: (taskDrawerOpen) => set({ taskDrawerOpen }),
 }));
 

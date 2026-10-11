@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({
   projects: vi.fn(), globalSettings: vi.fn(), updateGlobalSettings: vi.fn(), setupState: vi.fn(),
   gitlabConnections: vi.fn(), createGitlabConnection: vi.fn(), updateGitlabConnection: vi.fn(), deleteGitlabConnection: vi.fn(),
   integrations: vi.fn(), workspaceCodexSettings: vi.fn(), updateWorkspaceCodexSettings: vi.fn(), usage: vi.fn(), featureRequest: vi.fn(), users: vi.fn(),
-  presets: vi.fn(), updatePresets: vi.fn(), codexModelCatalog: vi.fn(), providers: vi.fn(), accounts: vi.fn(), limits: vi.fn(), models: vi.fn(), updateAccount: vi.fn(),
+  presets: vi.fn(), updatePresets: vi.fn(), codexModelCatalog: vi.fn(), providers: vi.fn(), accounts: vi.fn(), limits: vi.fn(), models: vi.fn(), createAccount: vi.fn(), getAccount: vi.fn(), updateAccount: vi.fn(), deleteAccount: vi.fn(), authenticateAccount: vi.fn(),
   close: vi.fn(),
 }));
 vi.mock("@/lib/api", () => ({ api: mocks }));
@@ -19,7 +19,7 @@ vi.mock("@/features/agents/lib/api-client", () => ({ apiClient: {
   assistant: { usage: mocks.usage },
   providers: { list: mocks.providers },
   modelPresets: { read: mocks.presets, update: mocks.updatePresets },
-  providerAccounts: { list: mocks.accounts, limits: mocks.limits, models: mocks.models, update: mocks.updateAccount },
+  providerAccounts: { list: mocks.accounts, limits: mocks.limits, models: mocks.models, create: mocks.createAccount, get: mocks.getAccount, update: mocks.updateAccount, delete: mocks.deleteAccount, authenticate: mocks.authenticateAccount },
 } }));
 
 import { SettingsPage, type SettingsSectionId } from "./settings-page";
@@ -66,6 +66,10 @@ beforeEach(() => {
   mocks.limits.mockResolvedValue({ data: {}, errors: {} });
   mocks.models.mockResolvedValue({ data: [{ id: "model-a", model: "model-a", displayName: "Model A" }] });
   mocks.updateAccount.mockImplementation(async (_id, patch) => ({ ...account, ...patch }));
+  mocks.createAccount.mockImplementation(async ({ providerId }) => ({ ...account, id: `new-${providerId}`, providerId, displayName: providerId === "claude" ? "Anthropic Claude account" : "OpenAI Codex account", status: "DISCONNECTED", settings: {}, runtimeDefaults: {} }));
+  mocks.getAccount.mockResolvedValue(account);
+  mocks.deleteAccount.mockResolvedValue(undefined);
+  mocks.authenticateAccount.mockResolvedValue({ accountId: "account-a", status: "CONNECTED" });
 });
 
 describe("settings page", () => {
@@ -175,6 +179,34 @@ describe("settings page", () => {
     expect(await screen.findByRole("button", { name: /Personal account/ })).toBeInTheDocument();
   });
 
+  it("adds Claude accounts and supports web or API-key authentication", async () => {
+    const claudeProvider = { id: "claude", label: "Anthropic Claude", icon: "claude", capabilities: ["models", "auth"], runtimeFields: [{ key: "model" }, { key: "reasoningEffort" }, { key: "permissionMode" }], accountFields: [{ key: "claudeHome" }], defaultSettings: { accountsHome: "/isolated/claude", sharedChatHome: "~/.claude" } };
+    const claudeAccount = { ...account, id: "claude-a", providerId: "claude", displayName: "Claude Max", settings: { claudeHome: "/isolated/claude-a" }, lastAuthMode: "web", runtimeDefaults: { permissionMode: "askForApproval" } };
+    mocks.providers.mockResolvedValue([
+      { id: "codex", label: "OpenAI Codex", icon: "codex", capabilities: ["models", "auth"], runtimeFields: [{ key: "model" }, { key: "reasoningEffort" }, { key: "serviceTier" }, { key: "permissionMode" }], accountFields: [{ key: "codexHome" }], defaultSettings: { accountsHome: "/isolated", sharedChatHome: "~/.codex" } },
+      claudeProvider,
+    ]);
+    mocks.accounts.mockResolvedValue([claudeAccount]);
+    mocks.updateAccount.mockImplementation(async (_id, patch) => ({ ...claudeAccount, ...patch }));
+    mocks.authenticateAccount.mockResolvedValue({ accountId: "claude-a", status: "CONNECTED", authMode: "apiKey", message: "Anthropic API key saved." });
+    renderPage("providers");
+    const providerPicker = await screen.findByRole("combobox", { name: "New account provider" });
+    await waitFor(() => expect(providerPicker).toHaveTextContent("OpenAI Codex"));
+    fireEvent.keyDown(providerPicker, { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("option", { name: "Anthropic Claude" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add account" }));
+    await waitFor(() => expect(mocks.createAccount).toHaveBeenCalledWith({ providerId: "claude" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "All accounts" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Claude Max/ }));
+    fireEvent.keyDown(await screen.findByRole("combobox", { name: "Authentication" }), { key: "ArrowDown" });
+    fireEvent.click(await screen.findByRole("option", { name: "Anthropic API key" }));
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-ant-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    await waitFor(() => expect(mocks.authenticateAccount).toHaveBeenCalledWith("claude-a", { mode: "apiKey", apiKey: "sk-ant-secret" }));
+    expect(screen.getByRole("textbox", { name: "Claude home" })).toHaveValue("/isolated/claude-a");
+  });
+
   it("shows connected accounts to members while disabling administrative edits", async () => {
     mocks.state.user.role = "member";
     renderPage("providers");
@@ -186,6 +218,42 @@ describe("settings page", () => {
     expect(screen.getByRole("combobox", { name: "Access" })).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "Model" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
+  });
+
+  it("charts provider quota usage and refreshes it on demand", async () => {
+    mocks.accounts.mockResolvedValue([account, { ...account, id: "account-b", displayName: "Edward" }]);
+    mocks.limits.mockResolvedValue({ data: { "account-a": { rateLimits: {
+      primary: { usedPercent: 35, windowDurationMins: 300 },
+      secondary: { usedPercent: 72, windowDurationMins: 10_080 },
+    } }, "account-b": { rateLimits: { secondary: { usedPercent: 58, windowDurationMins: 10_080 } } } }, errors: {} });
+    renderPage("providers");
+    const chart = await screen.findByRole("figure", { name: "Provider quota usage" });
+    expect(within(chart).getByRole("progressbar", { name: "Work account 5-hour window usage" })).toHaveAttribute("aria-valuenow", "35");
+    expect(within(chart).getByRole("progressbar", { name: "Work account 7-day window usage" })).toHaveAttribute("aria-valuenow", "72");
+    expect(within(chart).getByRole("progressbar", { name: "Work account 5-hour window usage" }).parentElement).toHaveTextContent(/35%\s*used/);
+    expect(within(chart).getByRole("img", { name: "Work account quota usage trend" })).toBeInTheDocument();
+    expect(within(chart).getAllByText("Collecting trend data…")).toHaveLength(2);
+    const edward = within(chart).getByText("Edward").closest(".provider-usage-account");
+    expect(edward).toHaveAttribute("data-limit-count", "1");
+    expect(within(edward as HTMLElement).getAllByRole("progressbar")).toHaveLength(1);
+    expect(mocks.limits).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh provider usage" }));
+    await waitFor(() => expect(mocks.limits).toHaveBeenCalledTimes(2));
+  });
+
+  it("renders a fresh persisted quota snapshot without waiting for the provider request", async () => {
+    const savedAt = Date.now();
+    const earlier = { "account-a": { rateLimits: { primary: { usedPercent: 24, windowDurationMins: 300 } } } };
+    const latest = { "account-a": { rateLimits: { primary: { usedPercent: 48, windowDurationMins: 300 } } } };
+    localStorage.setItem("boosted.machine.machine-a.providerQuotas", JSON.stringify({ version: 1, savedAt, value: { data: latest, errors: {} }, history: [{ capturedAt: savedAt - 10 * 60_000, data: earlier }, { capturedAt: savedAt, data: latest }] }));
+    mocks.limits.mockImplementation(() => new Promise(() => undefined));
+    renderPage("providers");
+    expect(await screen.findByRole("progressbar", { name: "Work account 5-hour window usage" })).toHaveAttribute("aria-valuenow", "48");
+    const trend = screen.getByRole("img", { name: "Work account quota usage trend" });
+    expect(trend.querySelectorAll("polyline")).toHaveLength(1);
+    expect(screen.queryByText("Collecting trend data…")).not.toBeInTheDocument();
+    expect(screen.queryByText("Loading provider usage…")).not.toBeInTheDocument();
+    expect(mocks.limits).not.toHaveBeenCalled();
   });
 
   it("saves the shared model preset and lets a provider override or inherit it", async () => {

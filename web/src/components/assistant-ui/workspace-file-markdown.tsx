@@ -51,6 +51,12 @@ export function workspaceFileName(path: string) {
   return withoutLine.split(/[\\/]/).filter(Boolean).pop() ?? "artifact";
 }
 
+function workspaceFileLocation(path: string) {
+  const match = path.match(/#L?(\d+)(?:-L?(\d+))?$/) ?? path.match(/:(\d+)$/);
+  if (!match) return undefined;
+  return match[2] && match[2] !== match[1] ? `lines ${match[1]}–${match[2]}` : `line ${match[1]}`;
+}
+
 type MarkdownAnchorProps = ComponentPropsWithoutRef<"a"> & { node?: unknown };
 
 function WorkspaceFileLink({ node: _node, href, children, onClick: _onClick, ...props }: MarkdownAnchorProps) {
@@ -62,7 +68,10 @@ function WorkspaceFileLink({ node: _node, href, children, onClick: _onClick, ...
     const external = Boolean(href && /^[a-z][a-z\d+.-]*:/i.test(href));
     return <a {...props} href={href} target={external ? "_blank" : props.target} rel={external ? "noreferrer" : props.rel}>{children}</a>;
   }
-  return <AttachmentPreview name={workspaceFileName(path)} sourceKey={`${api.profileId}:${scope.kind}:${scope.id}:${path}`} load={() => api.workspaceFile(scope, path)} saveCheckbox={scope.kind === "task" && !readOnly ? (edit) => api.toggleMarkdownCheckbox(`/tasks/${encodeURIComponent(scope.id)}`, "file", path, edit) : undefined} label={children} className="border-0 bg-transparent text-primary underline underline-offset-4" />;
+  const location = workspaceFileLocation(path);
+  const childText = typeof children === "string" ? children : "";
+  const label = <>{children}{location && !/(?:\blines?\s+\d+|:\d+(?:[–-]\d+)?)$/i.test(childText) && <span className="text-muted-foreground"> ({location})</span>}</>;
+  return <AttachmentPreview inline name={workspaceFileName(path)} sourceKey={`${api.profileId}:${scope.kind}:${scope.id}:${path}`} load={() => api.workspaceFile(scope, path)} saveCheckbox={scope.kind === "task" && !readOnly ? (edit) => api.toggleMarkdownCheckbox(`/tasks/${encodeURIComponent(scope.id)}`, "file", path, edit) : undefined} label={label} />;
 }
 
 export function WorkspaceAttachment({ attachment, compact }: { attachment: MessageAttachment; compact?: boolean }) {

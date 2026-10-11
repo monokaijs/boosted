@@ -28,13 +28,14 @@ describe("Codex chat live state", () => {
   });
 
   it("appends assistant deltas before a turn-completed event exists", () => {
-    const first: CodexLiveEvent = { threadId: "thread", turnId: "turn", method: "item/agentMessage/delta", itemId: "answer", delta: "Live " };
+    const first: CodexLiveEvent = { threadId: "thread", turnId: "turn", method: "item/agentMessage/delta", itemId: "answer", delta: "Live ", phase: "commentary" };
     const second: CodexLiveEvent = { ...first, delta: "response" };
 
     const afterFirst = appendCodexDelta([], first, "message");
     const afterSecond = appendCodexDelta(afterFirst, second, "message");
 
     expect(afterFirst[0]?.content).toBe("Live ");
+    expect(afterFirst[0]?.phase).toBe("commentary");
     expect(afterSecond[0]?.content).toBe("Live response");
   });
 });

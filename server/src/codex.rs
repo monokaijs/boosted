@@ -1,4 +1,5 @@
 use crate::{
+    claude::ClaudeClient,
     error::{AppError, AppResult},
     process::background_command,
 };
@@ -152,19 +153,44 @@ pub struct CodexInfo {
 
 #[derive(Clone)]
 pub struct CodexClient {
-    writer: Arc<Mutex<tokio::process::ChildStdin>>,
+    claude: Option<ClaudeClient>,
+    writer: Option<Arc<Mutex<tokio::process::ChildStdin>>>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<AppResult<Value>>>>>,
     next_id: Arc<AtomicU64>,
     notifications: broadcast::Sender<Value>,
-    _child: Arc<Mutex<Child>>,
+    _child: Option<Arc<Mutex<Child>>>,
 }
 
 impl CodexClient {
+    pub(crate) fn provider_id(&self) -> &'static str {
+        if self.claude.is_some() {
+            "claude"
+        } else {
+            "codex"
+        }
+    }
+
     pub async fn for_account(home: &std::path::Path, dynamic_tools: bool) -> AppResult<Self> {
         let codex = resolve_codex_command()
             .await
             .ok_or_else(|| AppError::Internal("Codex CLI was not found in PATH".into()))?;
         Self::spawn_with_home(&codex, Some(home), dynamic_tools).await
+    }
+
+    pub async fn for_claude_account(
+        home: &std::path::Path,
+        api_key: Option<String>,
+    ) -> AppResult<Self> {
+        let claude = ClaudeClient::new(home.to_path_buf(), api_key).await?;
+        let (notifications, _) = broadcast::channel(1);
+        Ok(Self {
+            claude: Some(claude),
+            writer: None,
+            pending: Default::default(),
+            next_id: Arc::new(AtomicU64::new(1)),
+            notifications,
+            _child: None,
+        })
     }
 
     #[cfg(test)]
@@ -190,7 +216,13 @@ impl CodexClient {
     }
 
     pub async fn shutdown(&self) {
-        let _ = self._child.lock().await.kill().await;
+        if let Some(claude) = &self.claude {
+            claude.shutdown().await;
+            return;
+        }
+        if let Some(child) = &self._child {
+            let _ = child.lock().await.kill().await;
+        }
     }
 
     async fn spawn(codex: &CodexCommand) -> AppResult<Self> {
@@ -233,13 +265,14 @@ impl CodexClient {
             Arc::new(Mutex::new(HashMap::new()));
         let (notifications, _) = broadcast::channel(2048);
         let client = Self {
-            writer: Arc::new(Mutex::new(stdin)),
+            claude: None,
+            writer: Some(Arc::new(Mutex::new(stdin))),
             pending: pending.clone(),
             next_id: Arc::new(AtomicU64::new(1)),
             notifications: notifications.clone(),
-            _child: Arc::new(Mutex::new(child)),
+            _child: Some(Arc::new(Mutex::new(child))),
         };
-        let writer = client.writer.clone();
+        let writer = client.writer.as_ref().expect("Codex writer").clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -313,11 +346,14 @@ impl CodexClient {
     }
 
     pub async fn request(&self, method: &str, params: Value) -> AppResult<Value> {
+        if let Some(claude) = &self.claude {
+            return claude.request(method, params).await;
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().await.insert(id, sender);
         let payload = json!({ "method": method, "id": id, "params": params });
-        let mut writer = self.writer.lock().await;
+        let mut writer = self.writer.as_ref().expect("Codex writer").lock().await;
         writer
             .write_all(format!("{}\n", payload).as_bytes())
             .await?;
@@ -330,7 +366,10 @@ impl CodexClient {
     }
 
     pub async fn notify(&self, method: &str, params: Value) -> AppResult<()> {
-        let mut writer = self.writer.lock().await;
+        if let Some(claude) = &self.claude {
+            return claude.notify(method, params).await;
+        }
+        let mut writer = self.writer.as_ref().expect("Codex writer").lock().await;
         writer
             .write_all(format!("{}\n", json!({"method":method,"params":params})).as_bytes())
             .await?;
@@ -339,7 +378,10 @@ impl CodexClient {
     }
 
     pub async fn respond(&self, id: Value, result: Value) -> AppResult<()> {
-        let mut writer = self.writer.lock().await;
+        if let Some(claude) = &self.claude {
+            return claude.respond(id, result).await;
+        }
+        let mut writer = self.writer.as_ref().expect("Codex writer").lock().await;
         writer
             .write_all(format!("{}\n", json!({"id":id,"result":result})).as_bytes())
             .await?;
@@ -348,6 +390,9 @@ impl CodexClient {
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
+        if let Some(claude) = &self.claude {
+            return claude.subscribe();
+        }
         self.notifications.subscribe()
     }
 }

@@ -31,7 +31,7 @@ vi.mock("@/components/panels/codex-chat-panel", () => ({ CodexChatPanel: ({ thre
 vi.mock("@/components/panels/editor-panel", () => ({ EditorPanel: () => <p>Editor content</p> }));
 vi.mock("@/components/panels/files-panel", () => ({ FilesPanel: () => <p>Files content</p> }));
 vi.mock("@/components/panels/git-panel", () => ({ GitPanel: () => <p>Changes content</p> }));
-vi.mock("@/components/panels/taskboard-panel", () => ({ TaskboardPanel: () => <h1>Task board content</h1> }));
+vi.mock("@/components/panels/taskboard-panel", () => ({ TasksPanel: () => <h1>Task list content</h1>, BoardsPanel: () => <h1>Boards content</h1> }));
 
 import { AppShell } from "./app-shell";
 
@@ -178,7 +178,7 @@ describe("page navigation and conversations", () => {
     useAppStore.setState({ selectedCodexChatId: "old" });
     renderShell();
     const mobile = within(screen.getByRole("navigation", { name: "Mobile navigation" }));
-    expect(mobile.getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Chats", "Scheduled", "Projects", "Tasks", "Settings"]);
+    expect(mobile.getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Chats", "Scheduled", "Projects", "Boards", "Settings"]);
     expect(screen.getByRole("heading", { name: "Chats" })).toBeInTheDocument();
     expect(screen.queryByText("Conversation old")).not.toBeInTheDocument();
     fireEvent.click(mobile.getByRole("button", { name: "Settings" }));
@@ -211,7 +211,7 @@ describe("page navigation and conversations", () => {
     vi.stubGlobal("innerWidth", 393);
     renderShell();
     const mobile = within(screen.getByRole("navigation", { name: "Mobile navigation" }));
-    for (const [tab, content] of [["Scheduled", "Scheduled work is coming"], ["Projects", "A home for your code and conversations."], ["Tasks", "Task board content"], ["Settings", "Settings page content"]]) {
+    for (const [tab, content] of [["Scheduled", "Scheduled work is coming"], ["Projects", "A home for your code and conversations."], ["Boards", "Boards content"], ["Settings", "Settings page content"]]) {
       fireEvent.click(mobile.getByRole("button", { name: tab }));
       expect(await screen.findByText(content)).toBeInTheDocument();
       expect(mobile.getByRole("button", { name: tab })).toHaveAttribute("aria-current", "page");
@@ -259,7 +259,7 @@ describe("page navigation and conversations", () => {
     renderShell();
     const agents = await screen.findByRole("navigation", { name: "Agents" });
     const sage = await within(agents).findByRole("button", { name: "Sage" });
-    expect(within(agents).getAllByRole("button")).toHaveLength(3);
+    expect(within(agents).getAllByRole("button")).toHaveLength(4);
     expect(screen.getByRole("region", { name: "Chats" })).toContainElement(agents);
     expect(document.querySelector(".navigation-rail")).not.toContainElement(agents);
     expect(sage.querySelector("img")).toHaveAttribute("src", "/sage.png");
@@ -350,7 +350,7 @@ describe("page navigation and conversations", () => {
     renderShell();
     const recent = screen.getByRole("region", { name: "Recent" });
     await within(recent).findByRole("button", { name: "Latest beta chat" });
-    expect(within(recent).getAllByRole("button").map((button) => button.textContent)).toEqual(["Latest beta chat", "Older alpha chat"]);
+    expect(within(recent).getAllByRole("button").filter((button) => button.classList.contains("chat-list-row")).map((button) => button.textContent)).toEqual(["Latest beta chat", "Older alpha chat"]);
     goTo("Scheduled");
     fireEvent.click(within(recent).getByRole("button", { name: "Latest beta chat" }));
     expect(await screen.findByText("Conversation new")).toBeInTheDocument();
@@ -364,8 +364,8 @@ describe("page navigation and conversations", () => {
     goTo("Scheduled");
     expect(screen.getByRole("heading", { name: "Scheduled work is coming" })).toBeInTheDocument();
     expect(screen.queryByText("Start a conversation")).not.toBeInTheDocument();
-    goTo("Tasks");
-    expect(screen.getByText("Task board content")).toBeInTheDocument();
+    goTo("Boards");
+    expect(screen.getByText("Boards content")).toBeInTheDocument();
     goTo("Settings");
     expect(screen.getByText("Settings page content")).toBeInTheDocument();
     expect(screen.queryByRole("complementary", { name: "Navigation and chats" })).not.toBeInTheDocument();
@@ -378,32 +378,55 @@ describe("page navigation and conversations", () => {
     goTo("Projects");
     const sidebar = await screen.findByRole("region", { name: "Project navigation" });
     expect(within(sidebar).queryByRole("navigation", { name: "Agents" })).not.toBeInTheDocument();
-    fireEvent.click(await within(sidebar).findByRole("button", { name: "Beta" }));
+    expect(within(sidebar).getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Chats", "Files", "Changes"]);
+    expect(within(sidebar).queryByRole("button", { name: "All projects" })).not.toBeInTheDocument();
+    expect(document.querySelector(".project-workspace-tabs")).toBeNull();
+    expect(await within(sidebar).findByRole("button", { name: "Older alpha chat" })).toBeInTheDocument();
+    expect(within(sidebar).queryByRole("button", { name: "Latest beta chat" })).not.toBeInTheDocument();
+    const search = within(sidebar).getByRole("textbox", { name: "Search project chats" });
+    fireEvent.change(search, { target: { value: "missing" } });
+    expect(within(sidebar).queryByRole("button", { name: "Older alpha chat" })).not.toBeInTheDocument();
+    expect(within(sidebar).getByText("No matching chats.")).toBeInTheDocument();
+    fireEvent.change(search, { target: { value: "" } });
+    fireEvent.pointerDown(document.querySelector(".project-context")!, { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Beta" }));
     expect(screen.getByRole("region", { name: "Projects page" })).toBeInTheDocument();
-    expect(screen.getByText("Task board content")).toBeInTheDocument();
+    expect(screen.getByText("Task list content")).toBeInTheDocument();
     const conversations = within(await screen.findByRole("region", { name: "Project conversations" }));
+    expect(apiMock.codexChats).toHaveBeenCalledWith("/repos/beta");
+    expect(conversations.queryByRole("button", { name: "Older alpha chat" })).not.toBeInTheDocument();
     fireEvent.click(await conversations.findByRole("button", { name: "Latest beta chat" }));
     expect(await screen.findByText("Conversation new")).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Projects page" })).toBeInTheDocument();
     act(() => window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: "files" })));
     expect(screen.getByRole("region", { name: "Projects page" })).toBeInTheDocument();
-    expect(screen.getByText("Files content")).toBeInTheDocument();
+    expect(within(sidebar).getByText("Files content")).toBeInTheDocument();
+    expect(within(sidebar).getByRole("tab", { name: "Files" })).toHaveAttribute("aria-selected", "true");
     expect(useAppStore.getState()).toMatchObject({ selectedProjectId: "beta", selectedTaskId: undefined });
-    fireEvent.click(within(sidebar).getByRole("button", { name: "Alpha" }));
-    expect(screen.getByText("Task board content")).toBeInTheDocument();
-    expect(within(screen.getByRole("region", { name: "Project conversations" })).queryByRole("button", { name: "Latest beta chat" })).not.toBeInTheDocument();
+    fireEvent.click(within(sidebar).getByRole("tab", { name: "Changes" }));
+    expect(within(sidebar).getByText("Changes content")).toBeInTheDocument();
+    fireEvent.pointerDown(document.querySelector(".project-context")!, { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Alpha" }));
+    expect(screen.getByText("Task list content")).toBeInTheDocument();
+    fireEvent.click(within(sidebar).getByRole("tab", { name: "Chats" }));
+    const alphaConversations = within(await screen.findByRole("region", { name: "Project conversations" }));
+    expect(alphaConversations.queryByRole("button", { name: "Latest beta chat" })).not.toBeInTheDocument();
+    fireEvent.click(alphaConversations.getByRole("button", { name: "New project chat" }));
+    expect(await screen.findByText("Start a conversation")).toBeInTheDocument();
   });
 
   it("keeps the desktop task list visible beside the selected task", async () => {
     renderShell();
-    goTo("Tasks");
-    expect(screen.queryByRole("complementary", { name: "Navigation and chats" })).not.toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Content" })).toHaveAttribute("data-chat-sidebar", "false");
+    act(() => window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: "task" })));
+    expect(screen.getByRole("region", { name: "Projects page" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "Navigation and chats" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Content" })).toHaveAttribute("data-chat-sidebar", "true");
+    expect(await screen.findByText("Task list content")).toBeInTheDocument();
     act(() => {
       useAppStore.setState({ selectedTaskId: "task-a" });
       window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: "task" }));
     });
-    expect(screen.getByText("Task board content")).toBeInTheDocument();
+    expect(screen.getByText("Task list content")).toBeInTheDocument();
     expect(screen.getByRole("complementary", { name: "Task details" })).toHaveTextContent("Task detail content");
     const resizer = screen.getByRole("separator", { name: "Resize task list" });
     expect(resizer).toHaveAttribute("aria-valuenow", "38");
@@ -411,16 +434,16 @@ describe("page navigation and conversations", () => {
     expect(resizer).toHaveAttribute("aria-valuenow", "40");
     expect(document.querySelector<HTMLElement>(".task-work-items-layout")?.style.getPropertyValue("--task-list-width")).toBe("40%");
     fireEvent.click(screen.getByRole("button", { name: "Close task details" }));
-    expect(screen.getByText("Task board content")).toBeInTheDocument();
+    expect(screen.getByText("Task list content")).toBeInTheDocument();
     expect(screen.queryByText("Task detail content")).not.toBeInTheDocument();
   });
 
-  it("restores the chat sidebar for tasks when the desktop is wide enough", async () => {
+  it("opens the task board inside Projects on wide desktop layouts", async () => {
     vi.stubGlobal("innerWidth", 1440);
     renderShell();
-    goTo("Tasks");
-    expect(screen.getByRole("complementary", { name: "Navigation and chats" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Content" })).toHaveAttribute("data-chat-sidebar", "true");
+    act(() => window.dispatchEvent(new CustomEvent("boosted:open-panel", { detail: "task" })));
+    expect(screen.getByRole("region", { name: "Projects page" })).toBeInTheDocument();
+    expect(await screen.findByText("Task list content")).toBeInTheDocument();
   });
 
   it("opens tools on the left while keeping the conversation and file preview in the main pane", async () => {
@@ -476,6 +499,29 @@ describe("page navigation and conversations", () => {
     expect(within(projectList).queryByRole("button", { name: /^Alpha chat/ })).not.toBeInTheDocument();
     fireEvent.click(within(projectList).getByRole("button", { name: "Expand Alpha" }));
     expect(within(projectList).getAllByRole("button", { name: /^Alpha chat/ })).toHaveLength(4);
+  });
+
+  it("collapses each top-level chat section independently", async () => {
+    apiMock.featureRequest.mockResolvedValue([{ id: "team", name: "Build team", memberIds: ["pock"] }]);
+    renderShell();
+
+    const agents = screen.getByRole("navigation", { name: "Agents" });
+    const groups = screen.getByRole("region", { name: "Groups" });
+    const projects = screen.getByRole("region", { name: "Projects" });
+    const recent = screen.getByRole("region", { name: "Recent" });
+    await within(groups).findByRole("button", { name: "Build team" });
+    await within(recent).findByRole("button", { name: "Latest beta chat" });
+
+    for (const [section, label, item] of [[agents, "Agents", "Pock"], [groups, "Groups", "Build team"], [projects, "Projects", "Expand Alpha"], [recent, "Recent", "Latest beta chat"]] as const) {
+      const toggle = within(section).getByRole("button", { name: label });
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(within(section).queryByRole("button", { name: item })).not.toBeInTheDocument();
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(within(section).getByRole("button", { name: item })).toBeInTheDocument();
+    }
   });
 
   it("keeps recent chats searchable when a project is collapsed", async () => {

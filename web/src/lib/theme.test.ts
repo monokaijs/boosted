@@ -32,7 +32,7 @@ describe("device theme", () => {
     systemTheme(true);
     expect(useThemeStore.getState().resolvedTheme).toBe("dark");
     expect(document.documentElement).toHaveClass("dark");
-    expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute("content", "#08090b");
+    expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute("content", "#101010");
     expect(document.querySelector('meta[name="color-scheme"]')).toHaveAttribute("content", "dark");
     systemTheme(false);
     expect(document.documentElement).not.toHaveClass("dark");

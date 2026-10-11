@@ -23,7 +23,7 @@ export function GitlabConnectionsSettings() {
     setDraft(connection ? { name: connection.name, baseUrl: connection.baseUrl, token: connection.token } : { name: "GitLab", baseUrl: "https://gitlab.com", token: "" });
   }
   return <div className="settings-content">
-    <SettingsSection title="GitLab connections" description="Set up an account once for this machine. In each project’s General settings, choose the GitLab groups or projects to import into that project’s taskboard.">
+    <SettingsSection title="GitLab connections" description="Set up an account once for this machine. In each project’s General settings, choose the GitLab groups or projects to import into that project’s tasks.">
       <div className="grid gap-2">
         {connections.isLoading && <p className="settings-note">Loading connections…</p>}
         {connections.data?.map((connection) => <div key={connection.id} className="settings-integration-row">

@@ -75,10 +75,10 @@ async function assertTheme(page, theme) {
   const dark = theme === 'dark';
   await page.waitForFunction(dark => document.documentElement.classList.contains('dark') === dark, dark);
   assert.equal(await page.locator('html').evaluate(el=>getComputedStyle(el).colorScheme),theme);
-  assert.equal(await page.locator('meta[name="theme-color"]').getAttribute('content'),dark?'#08090b':'#edf0f3');
-  assert.equal(await page.locator('.main-surface').evaluate(el=>getComputedStyle(el).backgroundColor),dark?'rgb(14, 16, 19)':'rgb(255, 255, 255)');
+  assert.equal(await page.locator('meta[name="theme-color"]').getAttribute('content'),dark?'#101010':'#edf0f3');
+  assert.equal(await page.locator('.main-surface').evaluate(el=>getComputedStyle(el).backgroundColor),dark?'rgb(24, 24, 24)':'rgb(255, 255, 255)');
   // Wait for the shared controls' color transitions before checking contrast or capturing screenshots.
-  await page.waitForFunction(color=>getComputedStyle(document.querySelector('.settings-select')).color === color,dark?'rgb(231, 233, 237)':'rgb(32, 36, 43)');
+  await page.waitForFunction(color=>getComputedStyle(document.querySelector('.settings-select')).color === color,dark?'rgb(242, 242, 242)':'rgb(32, 36, 43)');
 }
 
 for (const engine of ['chromium','webkit']) {
@@ -94,7 +94,7 @@ for (const engine of ['chromium','webkit']) {
     await page.screenshot({path:path.join(artifactDir,engine+'-light.png')});
     await chooseTheme(page,'Dark');
     await assertTheme(page,'dark');
-    await page.waitForFunction(()=>getComputedStyle(document.querySelector('.monaco-editor')).backgroundColor === 'rgb(14, 16, 19)');
+    await page.waitForFunction(()=>getComputedStyle(document.querySelector('.monaco-editor')).backgroundColor === 'rgb(24, 24, 24)');
     await page.screenshot({path:path.join(artifactDir,engine+'-dark.png')});
     await page.reload();
     await page.getByRole('combobox',{name:'Theme',exact:true}).waitFor();

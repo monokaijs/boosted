@@ -2,6 +2,7 @@ mod agent_integrations;
 mod agent_usage;
 mod agents;
 mod auth;
+mod claude;
 pub mod cli;
 mod codex;
 mod codex_transcript;
@@ -507,6 +508,7 @@ fn router(
             get(read_project_branch).post(switch_project_branch),
         )
         .route("/projects/{id}/git/status", get(project_git_status))
+        .route("/projects/{id}/git/history", get(project_git_history))
         .route("/projects/{id}/git/diff", get(project_git_diff))
         .route("/projects/{id}/git/stage", post(project_git_stage))
         .route("/projects/{id}/git/unstage", post(project_git_unstage))
@@ -548,6 +550,7 @@ fn router(
         .route("/tasks/{id}", get(get_task))
         .route("/tasks/{id}/events", get(task_events))
         .route("/tasks/{id}/source/activity", get(task_source_activity))
+        .route("/tasks/{id}/source/asset", get(task_source_asset))
         .route(
             "/tasks/{id}/checkboxes",
             patch(markdown_checkboxes::task_checkbox),
@@ -1537,7 +1540,14 @@ async fn create_codex_chat(
         .ok_or_else(|| AppError::Internal("Codex returned no thread".into()))?;
     let chat = codex_chat(thread);
     if input.model.is_none() {
-        let defaults = providers::provider_model_defaults(&state.db, "codex").await?;
+        let provider_id = match account_id.as_deref() {
+            Some(id) => providers::document(&state.db, "accounts", id).await?["providerId"]
+                .as_str()
+                .unwrap_or("codex")
+                .to_string(),
+            None => "codex".to_string(),
+        };
+        let defaults = providers::provider_model_defaults(&state.db, &provider_id).await?;
         providers::save_document(&state.db, "chat-runtime", &json!({"id":chat.id,"model":selected_model.model,"reasoningEffort":defaults["reasoningEffort"].as_str().unwrap_or(&selected_model.default_reasoning_effort)})).await?;
     }
     if let Some(account_id) = account_id {
@@ -2113,7 +2123,8 @@ async fn send_codex_message_locked(
                     "turnId": forward_turn_id,
                     "method": method,
                     "itemId": params.get("itemId").and_then(Value::as_str),
-                    "delta": params.get("delta").and_then(Value::as_str).unwrap_or_default()
+                    "delta": params.get("delta").and_then(Value::as_str).unwrap_or_default(),
+                    "phase": params.get("phase").and_then(Value::as_str)
                 }),
                 "turn/completed" => json!({
                     "threadId": forward_thread_id,
@@ -2515,17 +2526,29 @@ async fn run_integration_sync(state: &AppState, id: &str) -> AppResult<Integrati
         .fetch_one(&state.db.pool)
         .await?;
     let mut imported = 0;
+    let mut updated = 0;
     let mut skipped = 0;
     let mut failed = 0;
     for issue in issues {
-        let exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM task_sources WHERE integration_id=? AND external_id=?",
+        let existing_task: Option<String> = sqlx::query_scalar(
+            "SELECT task_id FROM task_sources WHERE integration_id=? AND external_id=?",
         )
         .bind(id)
         .bind(&issue.external_id)
-        .fetch_one(&state.db.pool)
+        .fetch_optional(&state.db.pool)
         .await?;
-        if exists > 0 {
+        if let Some(task_id) = existing_task {
+            match reconcile_imported_task_status(state, &task_id, &issue).await {
+                Ok(true) => updated += 1,
+                Ok(false) => skipped += 1,
+                Err(error) => {
+                    failed += 1;
+                    tracing::warn!(integration_id=%id, task_id=%task_id, %error, "failed to update imported task");
+                }
+            }
+            continue;
+        }
+        if issue.status == Some(integrations::ImportedIssueStatus::Closed) {
             skipped += 1;
             continue;
         }
@@ -2538,20 +2561,50 @@ async fn run_integration_sync(state: &AppState, id: &str) -> AppResult<Integrati
         }
     }
     let status = if failed > 0 { "partial" } else { "success" };
-    let message = format!("Imported {imported}, skipped {skipped}, failed {failed}");
+    let message =
+        format!("Imported {imported}, updated {updated}, skipped {skipped}, failed {failed}");
     let now = Utc::now().to_rfc3339();
     sqlx::query("UPDATE integrations SET last_synced_at=?,last_sync_status=?,last_sync_error=?,updated_at=? WHERE id=?")
         .bind(&now).bind(status).bind(if failed > 0 { Some(message.as_str()) } else { None }).bind(&now).bind(id).execute(&state.db.pool).await?;
     state.emit(
         "integration.synced",
-        json!({"projectId":integration.project_id,"integrationId":id,"imported":imported,"skipped":skipped,"failed":failed,"status":status}),
+        json!({"projectId":integration.project_id,"integrationId":id,"imported":imported,"updated":updated,"skipped":skipped,"failed":failed,"status":status}),
     );
     Ok(IntegrationSyncResult {
         imported,
+        updated,
         skipped,
         failed,
         message,
     })
+}
+
+async fn reconcile_imported_task_status(
+    state: &AppState,
+    task_id: &str,
+    issue: &integrations::ImportedIssue,
+) -> AppResult<bool> {
+    let Some(source_status) = issue.status else {
+        return Ok(false);
+    };
+    let task = state.db.task(task_id).await?;
+    let next_status = match source_status {
+        integrations::ImportedIssueStatus::Closed
+            if !matches!(
+                task.status.as_str(),
+                "done" | "planning" | "running" | "needs_input"
+            ) =>
+        {
+            Some("done")
+        }
+        integrations::ImportedIssueStatus::Open if task.status == "done" => Some("queued"),
+        _ => None,
+    };
+    let Some(next_status) = next_status else {
+        return Ok(false);
+    };
+    state.set_task_state(task_id, next_status, None).await?;
+    Ok(true)
 }
 
 async fn create_imported_task(
@@ -2847,6 +2900,67 @@ async fn task_source_activity(
     Ok(Json(
         integrations::fetch_gitlab_issue_activity(&config, &external_url).await?,
     ))
+}
+
+#[derive(Deserialize)]
+struct TaskSourceAssetQuery {
+    url: String,
+}
+
+async fn task_source_asset(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<TaskSourceAssetQuery>,
+) -> AppResult<Response> {
+    let source = sqlx::query(
+        "SELECT provider,integration_id,external_url FROM task_sources WHERE task_id=?",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db.pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("task has no external source".into()))?;
+    let provider: String = source.get("provider");
+    if provider != "gitlab" {
+        return Err(AppError::BadRequest(
+            "source attachments are currently available for GitLab tasks".into(),
+        ));
+    }
+    let external_url = source
+        .get::<Option<String>, _>("external_url")
+        .filter(|url| !url.trim().is_empty())
+        .ok_or_else(|| AppError::BadRequest("GitLab task has no issue URL".into()))?;
+    let integration = state
+        .db
+        .integration(&source.get::<String, _>("integration_id"))
+        .await?;
+    let config = gitlab_connections::resolve(&state.db, &provider, &integration.config).await?;
+    let asset = integrations::fetch_gitlab_issue_asset(&config, &external_url, &query.url).await?;
+    let mut response = Response::new(Body::from(asset.bytes));
+    if let Some(content_type) = asset.content_type.and_then(|value| value.parse().ok()) {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, content_type);
+    }
+    let disposition = asset.content_disposition.unwrap_or_else(|| {
+        let filename = asset
+            .filename
+            .chars()
+            .map(|character| {
+                if matches!(character, '"' | '\r' | '\n') {
+                    '_'
+                } else {
+                    character
+                }
+            })
+            .collect::<String>();
+        format!("inline; filename=\"{filename}\"")
+    });
+    if let Ok(disposition) = disposition.parse() {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_DISPOSITION, disposition);
+    }
+    Ok(response)
 }
 
 async fn send_task_message(
@@ -3364,6 +3478,15 @@ async fn project_git_status(
 ) -> AppResult<Json<GitStatus>> {
     let project = state.db.project(&id).await?;
     Ok(Json(git::status(Path::new(&project.repo_path)).await?))
+}
+async fn project_git_history(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> AppResult<Json<Vec<models::GitCommit>>> {
+    let project = state.db.project(&id).await?;
+    Ok(Json(
+        git::history(Path::new(&project.repo_path), 100).await?,
+    ))
 }
 async fn project_git_diff(
     State(state): State<AppState>,
@@ -3930,7 +4053,9 @@ async fn refresh_diff_stats(state: &AppState, task_id: &str) -> AppResult<()> {
         .iter()
         .map(|change| change.deletions)
         .sum::<i64>();
-    sqlx::query("UPDATE tasks SET additions=?,deletions=?,updated_at=? WHERE id=?")
+    sqlx::query("UPDATE tasks SET additions=?,deletions=?,updated_at=CASE WHEN additions<>? OR deletions<>? THEN ? ELSE updated_at END WHERE id=?")
+        .bind(additions)
+        .bind(deletions)
         .bind(additions)
         .bind(deletions)
         .bind(Utc::now().to_rfc3339())

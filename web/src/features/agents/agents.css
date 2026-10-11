@@ -81,6 +81,11 @@
   transform: translateY(0);
 }
 
+.assistant-tool-panel {
+  width: min(32rem, calc(100vw - 48px));
+  max-width: 100%;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .assistant-tool-reveal {
     transition: none;

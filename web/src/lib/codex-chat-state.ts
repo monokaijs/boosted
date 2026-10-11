@@ -47,10 +47,10 @@ export function appendCodexDelta(messages: CodexChatMessage[], event: CodexLiveE
   if (!event.itemId || !event.delta) return messages;
   const index = messages.findIndex((item) => item.id === event.itemId);
   if (index === -1) {
-    const message: CodexChatMessage = { id: event.itemId, role: "assistant", content: event.delta, kind };
+    const message: CodexChatMessage = { id: event.itemId, role: "assistant", content: event.delta, kind, phase: event.phase };
     return [...messages, message];
   }
   const next = [...messages];
-  next[index] = { ...next[index], content: `${next[index].content}${event.delta}` };
+  next[index] = { ...next[index], content: `${next[index].content}${event.delta}`, phase: event.phase ?? next[index].phase };
   return next;
 }

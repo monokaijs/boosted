@@ -23,6 +23,7 @@ export function ProvidersManagementDialog({
   const [isLoading, setIsLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [providers, setProviders] = useState<ProviderDefinitionResponse[]>([])
+  const [newProviderId, setNewProviderId] = useState("codex")
   const { accountLimits } = useProviderQuotas()
   const selectedAccount = accounts.find((account) => account.id === accountDialogId) ?? null
   const selectedProvider = selectedAccount
@@ -90,13 +91,14 @@ export function ProvidersManagementDialog({
         <header className="flex h-11 min-w-0 items-center gap-2 border-b border-border px-3">
           <ProviderMark icon={providers[0]?.icon ?? "codex"} className="size-4 shrink-0 text-info" />
           <h1 className="min-w-0 flex-1 truncate text-[13px] font-semibold text-foreground">Providers</h1>
+          <select aria-label="Provider to add" className="h-7 max-w-36 rounded-md border border-input bg-background px-1.5 text-[11px]" disabled={readOnly || isLoading} value={newProviderId} onChange={(event) => setNewProviderId(event.target.value)}>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}</select>
           <button
             disabled={readOnly}
             aria-label="Add provider account"
             className="grid size-7 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
             title="Add"
             type="button"
-            onClick={() => void createAccount("codex")}
+            onClick={() => void createAccount(newProviderId)}
           >
             <Plus className="size-4" />
           </button>

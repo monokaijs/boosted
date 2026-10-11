@@ -91,7 +91,15 @@ export function parseJsonRecord(value: string, label: string): Record<string, un
 }
 
 export function readCodexHomeValue(account: ProviderAccountResponse, provider: ProviderDefinitionResponse): string {
-  return readRecordString(account.settings, "codexHome") || readDefaultCodexHomeValue(account, provider)
+  return readProviderHomeValue(account, provider)
+}
+
+export function providerHomeKey(providerId: string): "claudeHome" | "codexHome" {
+  return providerId === "claude" ? "claudeHome" : "codexHome"
+}
+
+export function readProviderHomeValue(account: ProviderAccountResponse, provider: ProviderDefinitionResponse): string {
+  return readRecordString(account.settings, providerHomeKey(provider.id)) || readDefaultCodexHomeValue(account, provider)
 }
 
 export function readCodexPersonalityValue(value: unknown): "friendly" | "pragmatic" {
@@ -119,7 +127,7 @@ export function readDefaultCodexHomeValue(account: ProviderAccountResponse, prov
 }
 
 export function readSharedCodexHomeValue(provider: ProviderDefinitionResponse): string {
-  return readRecordString(provider.defaultSettings, "sharedChatHome") || "~/.codex"
+  return readRecordString(provider.defaultSettings, "sharedChatHome") || (provider.id === "claude" ? "~/.claude" : "~/.codex")
 }
 
 export function readRecordString(value: unknown, key: string): string {
@@ -221,4 +229,3 @@ export function createClientId(): string {
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
-

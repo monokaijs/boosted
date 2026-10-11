@@ -1,6 +1,6 @@
 use crate::{
     error::{AppError, AppResult},
-    models::{GitChange, GitStatus},
+    models::{GitChange, GitCommit, GitStatus},
     process::background_command,
 };
 use std::{
@@ -368,6 +368,38 @@ pub async fn commit(repo: &Path, message: &str) -> AppResult<String> {
     }
     git(repo, &["commit", "-m", message.trim()]).await?;
     Ok(git(repo, &["rev-parse", "HEAD"]).await?.trim().to_string())
+}
+
+pub async fn history(repo: &Path, limit: usize) -> AppResult<Vec<GitCommit>> {
+    if git(repo, &["rev-parse", "--verify", "HEAD"]).await.is_err() {
+        return Ok(Vec::new());
+    }
+    let max_count = format!("--max-count={}", limit.clamp(1, 200));
+    let raw = git(
+        repo,
+        &[
+            "log",
+            "--no-decorate",
+            "--date=iso-strict",
+            &max_count,
+            "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e",
+        ],
+    )
+    .await?;
+    Ok(raw
+        .split('\x1e')
+        .filter_map(|record| {
+            let mut fields = record.trim().splitn(6, '\x1f');
+            Some(GitCommit {
+                hash: fields.next()?.to_string(),
+                short_hash: fields.next()?.to_string(),
+                author_name: fields.next()?.to_string(),
+                author_email: fields.next()?.to_string(),
+                authored_at: fields.next()?.to_string(),
+                subject: fields.next()?.trim().to_string(),
+            })
+        })
+        .collect())
 }
 
 pub fn safe_path(root: &Path, relative: &str, allow_missing: bool) -> AppResult<PathBuf> {

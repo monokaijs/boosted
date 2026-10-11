@@ -96,6 +96,11 @@ async fn project_git_operations_work_without_tasks_and_stay_in_the_project_repos
     assert_eq!(status.branch, "main");
     assert_eq!(status.changes.len(), 1);
     assert_eq!(status.changes[0].path, "file.txt");
+    let Json(history) = project_git_history(State(state.clone()), id())
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].subject, "test: initialize fixture");
     let Json(diff) = project_git_diff(
         State(state.clone()),
         id(),
@@ -146,6 +151,12 @@ async fn project_git_operations_work_without_tasks_and_stay_in_the_project_repos
     .unwrap();
     assert_eq!(commit["commit"].as_str().unwrap().len(), 40);
     assert!(git::status(&repo).await.unwrap().changes.is_empty());
+    let Json(history) = project_git_history(State(state.clone()), id())
+        .await
+        .unwrap();
+    assert_eq!(history[0].subject, "fix: project change");
+    assert_eq!(history[0].hash, commit["commit"]);
+    assert_eq!(history[0].author_name, "Test");
 
     std::fs::write(repo.join("file.txt"), "discard this\n").unwrap();
     let Json(discarded) = project_git_discard(State(state.clone()), id(), paths())

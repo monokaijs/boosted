@@ -78,7 +78,9 @@ pub(crate) async fn account_available(state: &AppState, id: &str) -> AppResult<b
         Err(error) => return Err(error),
     }
     let account = document(&state.db, "accounts", id).await?;
-    if account["status"] != "CONNECTED" || account["providerId"] != "codex" {
+    if account["status"] != "CONNECTED"
+        || !matches!(account["providerId"].as_str(), Some("codex" | "claude"))
+    {
         return Ok(false);
     }
     let client = match state.providers.client(&state.db, id).await {
@@ -93,18 +95,28 @@ pub(crate) async fn account_available(state: &AppState, id: &str) -> AppResult<b
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn choose_account(
     state: &AppState,
     requested: Option<&str>,
     excluded: &HashSet<String>,
 ) -> AppResult<String> {
-    select_account(state, requested, excluded, true).await
+    select_account(state, requested, excluded, None, true).await
+}
+
+pub(crate) async fn choose_account_for_provider(
+    state: &AppState,
+    provider_id: &str,
+    excluded: &HashSet<String>,
+) -> AppResult<String> {
+    select_account(state, None, excluded, Some(provider_id), true).await
 }
 
 async fn select_account(
     state: &AppState,
     requested: Option<&str>,
     excluded: &HashSet<String>,
+    provider_id: Option<&str>,
     advance: bool,
 ) -> AppResult<String> {
     // Keep the availability check and cursor write atomic across concurrent runs.
@@ -133,7 +145,10 @@ async fn select_account(
         let Some(id) = account["id"].as_str() else {
             continue;
         };
-        if excluded.contains(id) || !account_available(state, id).await? {
+        if provider_id.is_some_and(|provider_id| account["providerId"] != provider_id)
+            || excluded.contains(id)
+            || !account_available(state, id).await?
+        {
             continue;
         }
         if advance {
@@ -147,7 +162,7 @@ async fn select_account(
         return Ok(id.to_owned());
     }
     Err(AppError::Conflict(
-        "No connected Codex account has available quota. Check Providers or wait for a quota reset"
+        "No connected provider account is available. Check Providers or wait for a quota reset"
             .into(),
     ))
 }
@@ -161,7 +176,7 @@ pub(crate) async fn new_work_client(
     if documents(&state.db, "accounts").await?.is_empty() {
         return Ok((None, state.codex.client().await?));
     }
-    let id = select_account(state, None, &HashSet::new(), advance).await?;
+    let id = select_account(state, None, &HashSet::new(), None, advance).await?;
     let client = state.providers.client(&state.db, &id).await?;
     Ok((Some(id), client))
 }

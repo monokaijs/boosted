@@ -13,6 +13,7 @@ import type {
   CodexCollaborationMode,
   CodexPendingRequest,
   GitStatus,
+  GitCommit,
   Health,
   Project,
   Session,
@@ -202,6 +203,7 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   tasks: (projectId: string) => request<Task[]>(`/tasks?projectId=${encodeURIComponent(projectId)}`),
   task: (id: string) => request<Task>(`/tasks/${id}`),
   taskSourceActivity: (id: string) => request<GitlabIssueActivity>(`/tasks/${encodeURIComponent(id)}/source/activity`),
+  taskSourceAsset: (id: string, url: string) => requestBlob(`/tasks/${encodeURIComponent(id)}/source/asset?url=${encodeURIComponent(url)}`),
   createTask: (projectId: string, title: string, description: string, options: { baseBranch?: string; model?: string; reasoningEffort?: string; accessMode?: CodexAccessOption["id"]; attachmentIds?: string[] } = {}) => request<Task>("/tasks", json("POST", { projectId, title, description, ...options })),
   taskAttachment: (taskId: string, id: string) => requestBlob(`/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(id)}`),
   downloadTaskAttachment: async (taskId: string, attachment: TaskAttachment) => {
@@ -233,6 +235,7 @@ export function createBoostedApiClient(options: ApiClientOptions) {
   readFile: (taskId: string, path: string) => request<FileContent>(`/tasks/${taskId}/file?path=${encodeURIComponent(path)}`),
   writeFile: (taskId: string, path: string, content: string, revision: string) => request<FileContent>(`/tasks/${taskId}/file`, json("PUT", { path, content, revision })),
   gitStatus: (projectId: string) => request<GitStatus>(`/projects/${projectId}/git/status`),
+  gitHistory: (projectId: string) => request<GitCommit[]>(`/projects/${projectId}/git/history`),
   gitDiff: (projectId: string, path?: string, staged = false) => request<{ diff: string }>(`/projects/${projectId}/git/diff?staged=${staged}${path ? `&path=${encodeURIComponent(path)}` : ""}`),
   gitStage: (projectId: string, paths: string[]) => request<GitStatus>(`/projects/${projectId}/git/stage`, json("POST", { paths })),
   gitUnstage: (projectId: string, paths: string[]) => request<GitStatus>(`/projects/${projectId}/git/unstage`, json("POST", { paths })),
