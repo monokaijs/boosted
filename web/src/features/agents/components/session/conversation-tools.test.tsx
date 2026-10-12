@@ -1,69 +1,51 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, expect, it, vi } from "vitest"
 import type { AssistantAction } from "@/features/agents/types/assistant"
-import { ActionGroup } from "./conversation-tools"
+import type { SessionShellState } from "./session-shell"
+import { SpawnedChatLinks } from "./conversation-tools"
 
 afterEach(cleanup)
 
-it("lets an embedded view handle chat links while retaining normal navigation by default", () => {
+const spawned: AssistantAction = { id: "create", tool: "create_chat", arguments: {}, status: "completed", chatId: "spawned-chat" }
+
+it("opens a spawned chat through the embedded handler, shell, or default navigation", () => {
   const onOpenChat = vi.fn()
+  const openSidebarChat = vi.fn()
   const navigate = vi.fn()
   window.addEventListener("boosted:open-codex-chat", navigate)
   try {
-    const action: AssistantAction = { id: "create", tool: "create_chat", arguments: {}, status: "completed", chatId: "spawned-chat" }
-    const { container, rerender } = render(<ActionGroup actions={[action]} onOpenChat={onOpenChat} />)
-    fireEvent.click(screen.getByRole("button", { name: "1 tool" }))
-    const details = container.querySelector("details")!
-    details.open = true; fireEvent(details, new Event("toggle"))
+    const { container, rerender } = render(<SpawnedChatLinks actions={[spawned]} onOpenChat={onOpenChat} />)
+    expect(container.querySelector("details, pre, .assistant-tool-panel")).toBeNull()
     fireEvent.click(screen.getByRole("button", { name: "Open chat" }))
     expect(onOpenChat).toHaveBeenCalledWith("spawned-chat")
     expect(navigate).not.toHaveBeenCalled()
-    rerender(<ActionGroup actions={[action]} />)
+    rerender(<SpawnedChatLinks actions={[spawned]} shell={{ chats: [], recentWorkspaces: [], openSidebarChat } as unknown as SessionShellState} />)
+    fireEvent.click(screen.getByRole("button", { name: "Open chat" }))
+    expect(openSidebarChat).toHaveBeenCalledWith({ id: "spawned-chat", title: "Codex chat" })
+    rerender(<SpawnedChatLinks actions={[spawned]} />)
     fireEvent.click(screen.getByRole("button", { name: "Open chat" }))
     expect(navigate).toHaveBeenCalledTimes(1)
     expect((navigate.mock.calls[0][0] as CustomEvent).detail).toEqual({ threadId: "spawned-chat" })
   } finally { window.removeEventListener("boosted:open-codex-chat", navigate) }
 })
 
-it("omits routine calls and counts only visible actions, while keeping failures inspectable", () => {
-  const routine: AssistantAction[] = ["read_group_context", "send_group_message", "request_group_peers", "list_chats", "webSearch", "mcpToolCall", "unknown_tool"].map((tool) => ({ id: tool, tool, arguments: {}, status: "completed" }))
-  const { container, rerender } = render(<ActionGroup actions={routine} />)
+it("hides all non-spawn calls, including failures and tools that reference existing chats", () => {
+  const result = vi.fn(() => "Hidden tool result")
+  const actions: AssistantAction[] = ["commandExecution", "fileChange", "generate_avatar", "read_group_context", "send_group_message", "read_chat", "send_message", "watch_chat", "clear_chat", "stop_chat", "unknown_tool"].flatMap((tool) =>
+    (["completed", "running", "failed"] as const).map((status) => ({ id: `${tool}-${status}`, tool, status, arguments: { chatId: "existing-chat" }, chatId: "existing-chat", get result() { return result() } })),
+  )
+  const { container } = render(<SpawnedChatLinks actions={actions} />)
   expect(container).toBeEmptyDOMElement()
-  const failed = { ...routine[0], id: "failed", status: "failed" as const, result: "Unable to read group" }
-  const avatar: AssistantAction = { id: "avatar", tool: "generate_avatar", arguments: {}, status: "running" }
-  rerender(<ActionGroup actions={[...routine, avatar, failed]} />)
-  const toggle = screen.getByRole("button", { name: "2 tools" })
-  fireEvent.click(toggle)
-  expect(screen.getByText("Generate avatar")).toBeInTheDocument()
-  expect(screen.getByText("Read group context")).toBeInTheDocument()
-  expect(screen.queryByText("Send group message")).not.toBeInTheDocument()
-  expect(screen.getByRole("img", { name: "Failed" })).toBeInTheDocument()
-  expect(container.querySelectorAll("details")).toHaveLength(2)
+  expect(result).not.toHaveBeenCalled()
 })
 
-it("allows full receipts in the activity view", () => {
-  render(<ActionGroup showAll actions={[{ id: "read", tool: "read_group_context", arguments: {}, status: "completed" }]} />)
-  fireEvent.click(screen.getByRole("button", { name: "1 tool" }))
-  expect(screen.getByText("Read group context")).toBeInTheDocument()
-})
-
-it("reads and formats tool payloads only when their individual details are opened", () => {
-  const result = vi.fn(() => JSON.stringify({ output: "Large tool output" }))
-  const action: AssistantAction = { id: "tool", tool: "commandExecution", arguments: {}, status: "completed", get result() { return result() } }
-  const { container } = render(<ActionGroup actions={[action]} />)
-  expect(container.querySelector("details")).toBeNull()
-  expect(result).not.toHaveBeenCalled()
-  const toggle = screen.getByRole("button", { name: "1 tool" })
-  fireEvent.click(toggle)
-  const details = container.querySelector("details")!
-  expect(screen.getByText("Run command")).toBeInTheDocument()
-  expect(result).not.toHaveBeenCalled()
-  details.open = true
-  fireEvent(details, new Event("toggle"))
-  expect(result).toHaveBeenCalled()
-  expect(screen.getByText(/Large tool output/)).toBeInTheDocument()
-  fireEvent.click(toggle)
-  fireEvent.click(toggle)
-  expect(container.querySelector("details")).toBe(details)
-  expect(details.open).toBe(true)
+it("requires completed creation with a child ID and deduplicates actual spawned chats", () => {
+  const actions: AssistantAction[] = [
+    { ...spawned, status: "running" }, { ...spawned, status: "failed" }, { ...spawned, chatId: undefined }, { ...spawned, chatId: " " },
+  ]
+  const { container, rerender } = render(<SpawnedChatLinks actions={actions} />)
+  expect(container).toBeEmptyDOMElement()
+  rerender(<SpawnedChatLinks actions={[...actions, spawned, { ...spawned, id: "duplicate" }, { ...spawned, id: "fork", tool: "fork_chat", chatId: "forked-chat" }]} />)
+  expect(screen.getAllByRole("button", { name: "Open chat" })).toHaveLength(2)
+  expect(container.querySelector("details, pre, .assistant-tool-panel")).toBeNull()
 })

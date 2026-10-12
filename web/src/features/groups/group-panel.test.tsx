@@ -124,10 +124,17 @@ describe('group conversations', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(screen.getByRole('textbox', { name: 'Message group' })).toBeInTheDocument();
   });
-  it.each(['transcript', 'activity'] as const)('opens a receipt chat in the split view from %s', async (source) => {
+  it.each([['transcript', 'create_chat'], ['activity', 'create_chat'], ['transcript', 'fork_chat'], ['activity', 'fork_chat']] as const)('opens an actual spawned child chat directly from %s for %s', async (source, tool) => {
     mocks.featureRequest.mockResolvedValue({ ...base,
       executions: [{ id: 'run', agentId: 'a', rootId: 'root', taskId: null, purpose: 'message', status: 'completed', activity: null }],
-      receipts: [{ id: 'receipt', groupId: 'g', agentId: 'a', executionId: 'run', taskId: null, tool: 'create_chat', arguments: {}, status: 'completed', chatId: 'chat-a' }],
+      messages: [
+        { id: 'request', groupId: 'g', rootId: 'root', sequence: 1, senderType: 'user', senderId: 'u', senderName: 'User', content: 'Start coding', recipientIds: [], kind: 'message', createdAt: base.createdAt },
+        { id: 'reply', groupId: 'g', rootId: 'root', sequence: 2, senderType: 'agent', senderId: 'a', senderName: 'Nova', content: 'Child started', recipientIds: [], kind: 'message', createdAt: base.createdAt },
+      ],
+      receipts: [
+        { id: 'receipt', groupId: 'g', agentId: 'a', executionId: 'run', taskId: null, tool, arguments: {}, status: 'completed', chatId: 'chat-a' },
+        { id: 'read', groupId: 'g', agentId: 'a', executionId: 'run', taskId: null, tool: 'read_chat', arguments: {}, status: 'completed', chatId: 'existing-chat', result: 'Hidden read result' },
+      ],
     });
     const { container } = renderWithQuery(<GroupPanel groupId="g" />);
     await screen.findByRole('textbox', { name: 'Message group' });
@@ -135,16 +142,18 @@ describe('group conversations', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Participants and tasks' }));
       fireEvent.click(screen.getByRole('tab', { name: 'Activity' }));
     }
+    expect(screen.getByText('Start coding')).toBeInTheDocument();
+    expect(screen.getByText('Child started')).toBeInTheDocument();
+    expect(screen.queryByText('Hidden read result')).not.toBeInTheDocument();
     const scope = source === 'activity' ? screen.getByRole('dialog') : container;
-    fireEvent.click(within(scope).getByRole('button', { name: '1 tool' }));
-    const receipt = scope.querySelector('details')!;
-    receipt.open = true; fireEvent(receipt, new Event('toggle'));
-    fireEvent.click(within(scope).getByRole('button', { name: 'Open chat' }));
+    expect(scope.querySelector('details, pre, .assistant-tool-panel')).toBeNull();
+    expect(within(scope).queryByRole('button', { name: /\d+ tools?/ })).not.toBeInTheDocument();
+    fireEvent.click(within(scope).getByRole('button', { name: 'Open Nova’s chat' }));
     expect(await screen.findByText('Coding conversation chat-a')).toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Message group' })).toBeInTheDocument();
   });
-  it('keeps tool receipts with the agent message from their request', async () => {
+  it('preserves mixed user and agent messages without rendering tool receipts', async () => {
     mocks.featureRequest.mockResolvedValue({ ...base,
       messages: [
         { id: 'one', groupId: 'g', rootId: 'one', sequence: 1, senderType: 'user', senderId: 'u', senderName: 'User', content: 'First', recipientIds: [], kind: 'message', createdAt: base.createdAt },
@@ -165,17 +174,63 @@ describe('group conversations', () => {
     const { container } = renderWithQuery(<GroupPanel groupId="g" />);
     await screen.findByText('Second');
     const replies = screen.getAllByRole('article', { name: 'Nova reply' });
-    expect(within(replies[0]).queryByRole('button', { name: '1 tool' })).not.toBeInTheDocument();
-    const toggles = screen.getAllByRole('button', { name: '1 tool' });
-    expect(toggles).toHaveLength(2);
-    expect(within(replies[1]).getByRole('button', { name: '1 tool' })).toBe(toggles[0]);
-    expect(within(replies[2]).getByRole('button', { name: '1 tool' })).toBe(toggles[1]);
-    expect(container.querySelectorAll('.group-message-work-summary')).toHaveLength(2);
-    fireEvent.click(toggles[0]);
-    expect(screen.getByText('Run command')).toBeInTheDocument();
-    expect(screen.queryByText('Edit files')).not.toBeInTheDocument();
-    fireEvent.click(toggles[1]);
-    expect(screen.getByText('Edit files')).toBeInTheDocument();
+    expect(replies).toHaveLength(3);
+    expect(replies.map((reply) => reply.textContent)).toEqual(expect.arrayContaining([
+      expect.stringContaining('First reply'), expect.stringContaining('More detail'), expect.stringContaining('Second reply'),
+    ]));
+    expect(screen.getByText('First')).toBeInTheDocument();
+    expect(screen.getByText('Second')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /\d+ tools?|Open .*chat/ })).not.toBeInTheDocument();
+    expect(container.querySelector('.group-message-work-summary, .group-work-tools, details, pre, .assistant-tool-panel')).toBeNull();
+  });
+  it.each(['completed', 'running', 'failed'] as const)('hides tool-only %s activity and non-spawn chat IDs without changing history', async (status) => {
+    const state = { ...base,
+      executions: [{ id: 'run', agentId: 'a', rootId: 'root', taskId: null, purpose: 'message' as const, status: 'completed' as const, activity: null }],
+      receipts: ['commandExecution', 'fileChange', 'generate_avatar', 'read_chat', 'send_message', 'watch_chat', 'clear_chat', 'unknown_tool', ...(status === 'completed' ? [] : ['create_chat', 'fork_chat'])].map((tool) => ({
+        id: tool, groupId: 'g', taskId: null, tool, arguments: { chatId: 'existing-chat' }, status, agentId: 'a', executionId: 'run', chatId: 'existing-chat', result: 'Hidden result',
+      })),
+    };
+    mocks.featureRequest.mockResolvedValue(state);
+    const { container, client } = renderWithQuery(<GroupPanel groupId="g" />);
+    await screen.findByRole('textbox', { name: 'Message group' });
+    expect(screen.getByText('What should we work on?')).toBeInTheDocument();
+    expect(container.querySelector('article, .group-work-summary, details, pre, .assistant-tool-panel')).toBeNull();
+    expect(screen.queryByRole('button', { name: /\d+ tools?|Open .*chat/ })).not.toBeInTheDocument();
+    expect(client.getQueryData(['groups', 'g'])).toBe(state);
+    fireEvent.click(screen.getByRole('button', { name: 'Participants and tasks' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Activity' }));
+    expect(screen.getByText('No activity yet.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /\d+ tools?|Open .*chat/ })).not.toBeInTheDocument();
+    expect(screen.queryByText('Hidden result')).not.toBeInTheDocument();
+    expect(client.getQueryData(['groups', 'g'])).toBe(state);
+  });
+  it('does not duplicate a child recorded by both an execution and creation receipts', async () => {
+    mocks.featureRequest.mockResolvedValue({ ...base,
+      executions: [{ id: 'run', agentId: 'a', rootId: 'root', taskId: null, purpose: 'message', status: 'waiting', activity: null, chatId: 'child' }],
+      receipts: [
+        { id: 'created', groupId: 'g', agentId: 'a', executionId: 'run', taskId: null, tool: 'create_chat', arguments: {}, status: 'completed', chatId: 'child' },
+        { id: 'pending', groupId: 'g', agentId: 'a', executionId: 'run', taskId: null, tool: 'create_chat', arguments: {}, status: 'completed' },
+      ],
+    });
+    renderWithQuery(<GroupPanel groupId="g" />);
+    await screen.findByRole('textbox', { name: 'Message group' });
+    expect(screen.getAllByRole('button', { name: 'Open Nova’s chat' })).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Participants and tasks' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Activity' }));
+    expect(within(screen.getByRole('dialog')).getAllByRole('button', { name: 'Open Nova’s chat' })).toHaveLength(1);
+  });
+  it('keeps assignment results but hides receipt cards in task details', async () => {
+    mocks.featureRequest.mockResolvedValue({ ...base,
+      tasks: [{ id: 'task', rootId: 'root', title: 'Implement endpoint', instructions: 'Implement', expectedResult: 'Works', result: 'Verified result', ownerId: 'a', reviewerId: null, status: 'completed', dependencyIds: [], fileResponsibilities: [], revision: 1 }],
+      receipts: [{ id: 'receipt', groupId: 'g', agentId: 'a', executionId: 'run', taskId: 'task', tool: 'commandExecution', arguments: {}, status: 'completed', result: 'Hidden tool output', chatId: 'existing' }],
+    });
+    renderWithQuery(<GroupPanel groupId="g" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Group tasks' }));
+    fireEvent.click(screen.getByText('Assignment and results'));
+    expect(screen.getByText('Verified result')).toBeInTheDocument();
+    expect(screen.queryByText('Hidden tool output')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /\d+ tools?|Open .*chat/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog').querySelector('.assistant-tool-panel, pre')).toBeNull();
   });
   it('places a compact task status below its owner’s final message', async () => {
     mocks.featureRequest.mockResolvedValue({ ...base,
@@ -411,7 +466,7 @@ describe('group conversations', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Cancel task' }));
     await waitFor(() => expect(mocks.featureRequest).toHaveBeenCalledWith('/groups/g/tasks/t/cancel', { method: 'POST' }));
   });
-  it('keeps routine tool counters and participant rows out of chat but preserves them in Activity', async () => {
+  it('hides routine tool counters and receipt rows in both chat and Activity', async () => {
     mocks.featureRequest.mockResolvedValue({ ...base,
       messages: [{ id: 'one', groupId: 'g', rootId: 'one', sequence: 1, senderType: 'user', senderId: 'u', senderName: 'User', content: 'Hello', recipientIds: [], kind: 'message', createdAt: base.createdAt }],
       executions: [{ id: 'execution', rootId: 'one', agentId: 'a', status: 'completed' }],
@@ -425,10 +480,9 @@ describe('group conversations', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Participants and tasks' }));
     fireEvent.click(await screen.findByRole('tab', { name: 'Activity' }));
     const dialog = screen.getByRole('dialog');
-    fireEvent.click(within(dialog).getByRole('button', { name: '3 tools' }));
-    expect(within(dialog).getByText('Read group context')).toBeInTheDocument();
-    expect(within(dialog).getByText('Send group message')).toBeInTheDocument();
-    expect(within(dialog).getByText('Ask a peer')).toBeInTheDocument();
+    expect(within(dialog).getByText('No activity yet.')).toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: /\d+ tools?|Open .*chat/ })).not.toBeInTheDocument();
+    expect(dialog.querySelector('details, pre, .assistant-tool-panel')).toBeNull();
   });
   it('loads earlier history without duplicating the current message', async () => {
     const latest = { id: 'three', sequence: 3, senderType: 'user', senderName: 'User', senderId: 'u', recipientIds: [], content: 'Latest', createdAt: '2026-10-04T00:00:00Z' };

@@ -173,40 +173,72 @@ describe("agent conversation scrolling", () => {
   })
 })
 
-it("collapses adjacent tools into a count and preserves expansion as new calls arrive", async () => {
-  const receipts: AssistantState["messages"] = [
-    { id: "command", role: "assistant", content: "", createdAt: "2026-10-02T00:00:02.000Z", actions: [{ id: "command-action", tool: "commandExecution", arguments: { command: "glab issue list" }, status: "failed" }] },
-    { id: "edit", role: "assistant", content: "", createdAt: "2026-10-02T00:00:03.000Z", actions: [{ id: "edit-action", tool: "fileChange", arguments: {}, status: "completed" }] },
+it("hides tool-only history and live tool updates without changing the stored state", async () => {
+  const messages: AssistantState["messages"] = [
+    { id: "command", role: "assistant", content: "", createdAt: initial.createdAt, actions: [{ id: "command-action", tool: "commandExecution", arguments: { command: "secret command" }, result: "Hidden failure", status: "failed" }] },
+    { id: "edit", role: "assistant", content: " \n ", createdAt: initial.createdAt, actions: [{ id: "edit-action", tool: "fileChange", arguments: {}, status: "completed" }] },
   ]
-  apiMock.read.mockResolvedValue({ ...initial, messages: [...initial.messages, ...receipts] })
-  await renderConversation()
-  const toggle = screen.getByRole("button", { name: "2 tools" })
-  expect(toggle).toHaveTextContent(/^2$/)
-  expect(toggle).toHaveAttribute("aria-expanded", "false")
-  const panel = document.getElementById(toggle.getAttribute("aria-controls")!)!
-  expect(panel).toHaveAttribute("aria-hidden", "true")
-  expect(panel).toHaveAttribute("inert")
-  expect(screen.queryByRole("img", { name: "Failed" })).not.toBeInTheDocument()
-  fireEvent.click(toggle)
-  expect(toggle).toHaveAttribute("aria-expanded", "true")
-  expect(panel).toHaveAttribute("data-expanded", "true")
-  expect(panel).toHaveAttribute("aria-hidden", "false")
-  expect(panel).not.toHaveAttribute("inert")
-  expect(screen.getByRole("img", { name: "Failed" })).toBeInTheDocument()
-  expect(screen.getByRole("img", { name: "Completed" })).toBeInTheDocument()
-  expect(screen.getByText("Run command").closest("summary")).toHaveTextContent(/^Run command$/)
+  const state = { ...initial, messages }
+  apiMock.read.mockResolvedValue(state)
+  const { container } = render(<AssistantPage shell={shell} agentId="pock" />)
+  await screen.findByText("What should we work on?")
+  expect(container.querySelector("article, time, details, pre, .assistant-tool-panel")).toBeNull()
+  expect(screen.queryByRole("button", { name: /tools?|Open chat/ })).not.toBeInTheDocument()
+  expect(queryClient.getQueryData(["assistant-state", "pock"])).toBe(state)
   act(() => window.dispatchEvent(new CustomEvent("boosted:assistant-updated", { detail: {
-    ...initial, updatedAt: "2026-10-02T00:00:04.000Z", messages: [...initial.messages, ...receipts,
-      { id: "avatar", role: "assistant", content: "", createdAt: "2026-10-02T00:00:04.000Z", actions: [{ id: "avatar-action", tool: "generate_avatar", arguments: {}, status: "running" }] },
+    ...state, updatedAt: "2026-10-02T00:00:04.000Z", messages: [...messages,
+      { id: "avatar", role: "assistant", content: "", createdAt: initial.createdAt, actions: [{ id: "avatar-action", tool: "generate_avatar", arguments: {}, status: "running" }] },
     ],
   } })))
-  expect(await screen.findByRole("button", { name: "3 tools" })).toBe(toggle)
-  expect(toggle).toHaveTextContent(/^3$/)
-  expect(toggle).toHaveAttribute("aria-expanded", "true")
-  expect(screen.getByRole("img", { name: "Running" })).toBeInTheDocument()
-  fireEvent.click(toggle)
-  expect(toggle).toHaveAttribute("aria-expanded", "false")
-  expect(panel).toHaveAttribute("data-expanded", "false")
-  expect(panel).toHaveAttribute("inert")
-  expect(screen.queryByRole("img", { name: "Running" })).not.toBeInTheDocument()
+  expect(container.querySelector("article, time, details, pre, .assistant-tool-panel")).toBeNull()
+  expect(screen.queryByText("Hidden failure")).not.toBeInTheDocument()
+})
+
+it("preserves normal messages, attachments and delivery while hiding mixed tool receipts", async () => {
+  const actions: NonNullable<AssistantState["messages"][number]["actions"]> = [
+    { id: "read", tool: "read_chat", arguments: {}, status: "completed", chatId: "existing-chat" },
+    { id: "send", tool: "send_message", arguments: {}, status: "completed", chatId: "existing-chat" },
+    { id: "command", tool: "commandExecution", arguments: {}, status: "failed", result: "Hidden failure" },
+  ]
+  const messages: AssistantState["messages"] = [
+    ...initial.messages,
+    { id: "sent", role: "user", content: "Please continue", createdAt: initial.createdAt, delivery: "handled" },
+    { id: "receipt", role: "assistant", content: "", createdAt: initial.createdAt, actions },
+    { id: "reply", role: "assistant", content: "Work continues", createdAt: initial.createdAt, actions },
+    { id: "attachment", role: "assistant", content: "", createdAt: initial.createdAt, actions, attachments: [{ id: "file", kind: "file", name: "report.txt", mimeType: "text/plain", size: 1, dataUrl: "data:text/plain;base64,QQ==" }] },
+  ]
+  apiMock.read.mockResolvedValue({ ...initial, messages })
+  const { container } = await renderConversation()
+  expect(screen.getByText("Please continue")).toBeInTheDocument()
+  expect(screen.getByText("Work continues")).toBeInTheDocument()
+  expect(screen.getByText("report.txt")).toBeInTheDocument()
+  expect(screen.getByText("Read")).toBeInTheDocument()
+  expect(container.querySelectorAll("article")).toHaveLength(4)
+  expect(container.querySelector("details, pre, .assistant-tool-panel")).toBeNull()
+  expect(screen.queryByRole("button", { name: /tools?|Open chat/ })).not.toBeInTheDocument()
+  expect(messages[3].actions).toBe(actions)
+  expect(queryClient.getQueryData<AssistantState>(["assistant-state", "pock"])?.messages).toBe(messages)
+})
+
+it("shows direct child-chat navigation only after creation or fork completes", async () => {
+  const action = { id: "create", tool: "create_chat", arguments: {}, status: "running" as const }
+  const receipt: AssistantState["messages"][number] = { id: "receipt", role: "assistant", content: "", createdAt: initial.createdAt, actions: [action] }
+  apiMock.read.mockResolvedValue({ ...initial, messages: [...initial.messages, receipt] })
+  const { container } = await renderConversation()
+  expect(screen.queryByRole("button", { name: "Open chat" })).not.toBeInTheDocument()
+  act(() => window.dispatchEvent(new CustomEvent("boosted:assistant-updated", { detail: {
+    ...initial, updatedAt: "2026-10-02T00:00:04.000Z", messages: [...initial.messages, { ...receipt, actions: [
+      { ...action, status: "completed", chatId: "child" },
+      { ...action, id: "fork", tool: "fork_chat", status: "completed", chatId: "forked-child" },
+      { ...action, id: "read", tool: "read_chat", status: "completed", chatId: "existing" },
+    ] }],
+  } })))
+  const links = screen.getAllByRole("button", { name: "Open chat" })
+  expect(links).toHaveLength(2)
+  fireEvent.click(links[0])
+  expect(shell.openSidebarChat).toHaveBeenCalledWith({ id: "child", title: "Codex chat" })
+  fireEvent.click(links[1])
+  expect(shell.openSidebarChat).toHaveBeenCalledWith({ id: "forked-child", title: "Codex chat" })
+  expect(container.querySelector("details, pre, .assistant-tool-panel")).toBeNull()
+  expect(screen.queryByRole("button", { name: /\d+ tools?/ })).not.toBeInTheDocument()
 })

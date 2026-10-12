@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { AgentAvatar } from '@/features/agents/components/session/agent-avatar';
 import { GroupAvatar } from './group-avatar';
 import { MarkdownContent } from '@/features/agents/components/session/chat-markdown';
-import { ActionGroup } from '@/features/agents/components/session/conversation-tools';
+import { groupChildChats } from './child-chats';
 import { taskOverlaps } from './state';
 import { memberRoleLabel } from './roles';
 import type { GroupState, GroupTask } from './types';
@@ -46,7 +46,7 @@ export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy
   const stopping = group.stopped && running.some((e) => e.status === 'running');
   const name = (id: string | null) => group.members.find((m) => m.id === id)?.profile.name ?? 'Unassigned';
   const openChat = (chatId: string) => { onOpenChange(false); onOpenChat(chatId); };
-  const codingChats = group.executions.filter((execution, index, executions) => execution.chatId && executions.findIndex((other) => other.chatId === execution.chatId) === index);
+  const codingChats = groupChildChats(group);
   return <Dialog open={open} onOpenChange={onOpenChange} modal={compact}>
     <DialogContent className="group-details-panel assistant-profile-panel translate-x-0 translate-y-0 flex flex-col gap-0 overflow-hidden p-0" onCloseAutoFocus={(event) => {
       event.preventDefault();
@@ -102,7 +102,6 @@ export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy
                 {task.result && <MarkdownContent content={task.result} saveCheckbox={!running.length ? (edit) => saveCheckbox('result', task.id, edit) : undefined} />}
                 {task.verification && <p><strong>Verification:</strong> {task.verification}</p>}
                 {group.reviews.filter((r) => r.taskId === task.id).map((review) => <p key={review.id}><strong>{name(review.reviewerId)} · {review.decision === 'approve' ? 'Approved' : 'Changes requested'}:</strong> {review.evidence}</p>)}
-                {group.receipts.some((r) => r.taskId === task.id) && <ActionGroup showAll actions={group.receipts.filter((r) => r.taskId === task.id)} onOpenChat={openChat} />}
               </div></details>
               {task.error && <p className="text-destructive">{task.error}</p>}
               <footer>
@@ -115,9 +114,8 @@ export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy
             {group.tasks.length > 0 && group.tasks.every((t) => t.status === 'completed') && <p className="mt-4 flex items-center gap-2 text-xs text-muted-foreground"><CheckCheck className="size-4 text-success" />All assignments reviewed</p>}
           </Tabs.Panel>
           <Tabs.Panel value="activity" className="outline-none">
-            {!group.receipts.length && !codingChats.length && <div className="group-details-empty"><p>No activity yet.</p><small>Tool results and coding runs will appear here.</small></div>}
+            {!codingChats.length && !group.executions.some((execution) => execution.error) && <div className="group-details-empty"><p>No activity yet.</p><small>Spawned coding chats will appear here.</small></div>}
             {codingChats.length > 0 && <div className="mb-4 flex flex-col items-start gap-1">{codingChats.map((execution) => <Button key={execution.id} size="sm" variant="ghost" onClick={() => openChat(execution.chatId!)}><MessageSquare />Open {name(execution.agentId)}’s chat</Button>)}</div>}
-            {group.members.filter((m) => group.receipts.some((r) => r.agentId === m.id)).map((member) => <section className="mb-5" key={member.id}><div className="mb-2 flex items-center gap-2 text-xs"><AgentAvatar name={member.profile.name} avatar={member.profile.avatar} className="size-5" />{member.profile.name}</div><ActionGroup showAll actions={group.receipts.filter((r) => r.agentId === member.id)} onOpenChat={openChat} /></section>)}
             {group.executions.filter((e) => e.error).map((e) => <p className="mb-2 text-xs leading-5 text-muted-foreground" key={e.id}>{name(e.agentId)}: {e.error}</p>)}
           </Tabs.Panel>
           <Tabs.Panel value="usage" className="outline-none">{open && tab === 'usage' && <Suspense fallback={<p className="text-xs text-muted-foreground">Loading usage…</p>}><GroupUsage embedded groupId={group.id} /></Suspense>}</Tabs.Panel>

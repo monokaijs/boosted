@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils"
 import { shouldAcceptAssistantState } from "@/features/agents/lib/assistant-state"
 import { assistantConversationLayout } from "@/features/agents/lib/assistant-conversation"
 import { assistantMessagesWithOutbox, type AssistantPendingMessage } from "@/features/agents/lib/assistant-outbox"
-import { ActionGroup } from "./conversation-tools"
+import { SpawnedChatLinks } from "./conversation-tools"
 import { AssistantProfilePanel } from "@/features/agents/components/session/assistant-profile-panel"
 import { AssistantAttachmentList } from "@/features/agents/components/session/assistant-attachment-list"
 import { AssistantComposer, type AssistantComposerHandle } from "./assistant-composer"
@@ -170,7 +170,7 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
       }}>
         <div className="session-conversation-column mx-auto">
           {!state && !error ? <div className="flex justify-center gap-2 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Loading conversation…</div> : null}
-          {state && !messages.length ? (
+          {state && !conversation.length ? (
             <div className="py-8 md:py-16">
               <h2 className="text-2xl font-medium tracking-tight">What should we work on?</h2>
               <p className="mt-3 max-w-lg text-sm leading-6 text-muted-foreground">Direct work across all your projects in one conversation. Start Codex chats, check progress, and keep several projects moving at once.</p>
@@ -185,7 +185,7 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
               return (
               <div className={cn("min-w-0", startGroup ? "mt-4 first:mt-0" : "mt-1")} key={message.id}>
                 {showTimestamp ? <time className="mb-3 mt-6 block text-center text-[12px] text-muted-foreground" dateTime={message.createdAt}>{conversationDate(message.createdAt)}</time> : null}
-                {item.type === "tools" ? <ActionGroup actions={item.actions} shell={shell} /> : <article aria-label={message.role === "user" ? "Your message" : `${message.assistantName ?? assistantName} reply`} className="group/message min-w-0 rounded-xl focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" tabIndex={showSentTime ? 0 : undefined}>
+                {item.type === "chats" ? <SpawnedChatLinks actions={item.actions} shell={shell} /> : <article aria-label={message.role === "user" ? "Your message" : `${message.assistantName ?? assistantName} reply`} className="group/message min-w-0 rounded-xl focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" tabIndex={showSentTime ? 0 : undefined}>
                   {message.attachments?.length ? <div className={cn("mb-2 flex max-w-[88%]", message.role === "user" && "ml-auto justify-end")}><AssistantAttachmentList attachments={message.attachments} /></div> : null}
                   {message.content ? <div className={cn("assistant-message-bubble w-fit min-w-0 max-w-[88%] rounded-[22px] px-4 py-2.5", message.role === "user" ? "assistant-message-user ml-auto text-white" : "assistant-message-reply text-foreground")}>
                     <MarkdownContent content={message.content} saveCheckbox={!running && !message.localDelivery ? async (edit) => {
@@ -193,7 +193,7 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
                       finally { void queryClient.invalidateQueries({ queryKey: ["assistant-state", agentId] }) }
                     } : undefined} />
                   </div> : null}
-                  {message.actions?.length ? <div className={cn(message.content && "mt-2")}><ActionGroup actions={message.actions} shell={shell} /></div> : null}
+                  {message.actions?.length ? <div className={cn(message.content && "mt-2")}><SpawnedChatLinks actions={message.actions} shell={shell} /></div> : null}
                   {message.delivery === "cancelled" ? <p className="mt-1 pr-4 text-right text-[11px] text-muted-foreground">Cancelled</p> : null}
                   {message.localDelivery ? <div className="mt-1 flex items-center justify-end gap-1 pr-4 text-[11px] text-muted-foreground" role="status">
                     {message.localDelivery === "sending" ? <><LoaderCircle aria-hidden="true" className="size-3 animate-spin" />Sending…</> : <><TriangleAlert aria-hidden="true" className="size-3 text-destructive" /><span title={message.sendError}>Not sent</span><button className="underline underline-offset-2" type="button" onClick={() => { const pending = outbox.find((item) => item.id === message.id); if (pending) retryMessage(pending) }}>Retry</button></>}

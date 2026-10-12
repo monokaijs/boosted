@@ -5,9 +5,8 @@ import { ArrowDown, ArrowUp, Check, ChevronDown, ListTodo, LoaderCircle, Message
 import { cn } from '@/lib/utils';
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { AssistantAttachmentList } from '@/features/agents/components/session/assistant-attachment-list';
-import { ActionGroup } from '@/features/agents/components/session/conversation-tools';
 import { assistantMessageLayout } from '@/features/agents/lib/assistant-conversation';
-import { isChatActionVisible } from '@/features/agents/lib/assistant-actions';
+import { groupChildChats } from './child-chats';
 import { GroupDetails, taskLabels, type GroupDetailTab } from './group-details';
 import '@/features/agents/agents.css';
 import { useBoostedApiClient } from '@/lib/api-context';
@@ -289,21 +288,19 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
     ...messages.map((message) => ({ ...message, inReplyTo: message.inReplyTo ? [message.inReplyTo] : undefined, role: message.senderType === 'user' && message.senderId === user?.id ? 'user' as const : 'assistant' as const, attachments: message.attachments ?? undefined, pending: undefined as GroupPendingMessage | undefined })),
     ...outbox.map((pending) => ({ id: pending.id, rootId: pending.id, senderId: user?.id ?? '', senderType: 'user' as const, senderName: user?.username ?? 'You', role: 'user' as const, content: pending.request.content, createdAt: pending.createdAt, recipientIds: pending.request.recipientIds, attachments: pending.request.attachments, kind: 'message' as const, pending })),
   ];
-  const visibleReceipts = group.receipts.filter((receipt) => isChatActionVisible(receipt) && group.executions.some((execution) => execution.id === receipt.executionId));
+  const codingChats = groupChildChats(group);
   const hasAgentMessage = (rootId: string, agentId: string) => chatMessages.some((message) => message.rootId === rootId && message.senderType === 'agent' && message.senderId === agentId);
   function workSummary(rootId: string, agentId?: string) {
     const tasks = group!.tasks.filter((task) => task.rootId === rootId && (agentId ? task.ownerId === agentId : !task.ownerId || !hasAgentMessage(rootId, task.ownerId)));
     const executions = group!.executions.filter((execution) => execution.rootId === rootId && (agentId ? execution.agentId === agentId : !hasAgentMessage(rootId, execution.agentId)));
-    const executionIds = new Set(executions.map((execution) => execution.id));
-    const receipts = visibleReceipts.filter((receipt) => executionIds.has(receipt.executionId));
-    if (!tasks.length && !receipts.length && !executions.some((execution) => execution.error || execution.chatId)) return null;
+    const chats = codingChats.filter((chat) => chat.rootId === rootId && (agentId ? chat.agentId === agentId : !hasAgentMessage(rootId, chat.agentId)));
+    if (!tasks.length && !chats.length && !executions.some((execution) => execution.error)) return null;
     return <div className={cn('group-work-summary', agentId && 'group-message-work-summary')}>
       {tasks.map((task) => <button type="button" className="group-task-update" key={task.id} onClick={(event) => openDetails('tasks', event.currentTarget)}>
         {task.status === 'completed' ? <Check className="size-3.5 shrink-0" /> : ['running', 'awaiting_review'].includes(task.status) ? <LoaderCircle className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none" /> : <ListTodo className="size-3.5 shrink-0" />}
         <span><strong>{task.title}</strong><small>{agentName(task.ownerId)} · {taskLabels[task.status]}</small></span>
       </button>)}
-      {executions.filter((execution, index) => execution.chatId && executions.findIndex((other) => other.chatId === execution.chatId) === index).map((execution) => <button type="button" className="group-task-update" key={execution.id} onClick={() => onOpenChat(execution.chatId!)}><MessageSquare className="size-3.5 shrink-0" /><span>Open {agentName(execution.agentId)}’s chat</span></button>)}
-      {group!.members.filter((member) => receipts.some((receipt) => receipt.agentId === member.id)).map((member) => <div key={member.id} className="group-work-tools">{!agentId && <span>{member.profile.name}</span>}<ActionGroup actions={receipts.filter((receipt) => receipt.agentId === member.id)} onOpenChat={onOpenChat} /></div>)}
+      {chats.map((execution) => <button type="button" className="group-task-update" key={execution.id} onClick={() => onOpenChat(execution.chatId!)}><MessageSquare className="size-3.5 shrink-0" /><span>Open {agentName(execution.agentId)}’s chat</span></button>)}
       {executions.filter((execution) => execution.error && (!execution.taskId || group!.tasks.some((task) => task.id === execution.taskId && ['failed', 'blocked', 'interrupted'].includes(task.status)))).map((execution) => <p className="px-2 text-xs text-destructive" key={execution.id}>{agentName(execution.agentId)}: {execution.error}</p>)}
     </div>;
   }
@@ -355,7 +352,7 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
             {lastRootMessage && !message.pending && workSummary(message.rootId)}
           </div>;
         })}
-        {Array.from(new Set([...group.tasks, ...group.executions].map((item) => item.rootId))).filter((rootId) => !messages.some((message) => message.rootId === rootId)).map((rootId) => <div key={rootId}>{workSummary(rootId)}</div>)}
+        {Array.from(new Set([...group.tasks, ...group.executions, ...codingChats].map((item) => item.rootId))).filter((rootId) => !messages.some((message) => message.rootId === rootId)).map((rootId) => <div key={rootId}>{workSummary(rootId)}</div>)}
         {!group.stopped && running.filter((execution) => execution.status === 'running' && execution.activity).map((execution) => <div key={execution.id} className="mt-3" role="status" aria-label={agentName(execution.agentId) + ' is typing'}>
           <div className="group-message-sender"><span>{agentName(execution.agentId)}</span></div>
           <div className="assistant-message-bubble assistant-message-reply w-fit rounded-[22px] px-4 py-2.5 text-muted-foreground"><span aria-hidden="true" className="animate-pulse tracking-widest motion-reduce:animate-none">•••</span></div>
