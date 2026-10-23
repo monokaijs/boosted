@@ -109,6 +109,8 @@ export interface GroupState extends GroupSummary {
   members: { id: string; profile: AssistantProfile; accountId: string | null }[];
   messageCount: number;
   messages: GroupMessage[];
+  olderCursor?: string | null;
+  historyAnchor?: string;
   deliveries: GroupDelivery[];
   tasks: GroupTask[];
   reviews: GroupReview[];

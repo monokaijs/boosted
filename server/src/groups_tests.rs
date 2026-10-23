@@ -1510,10 +1510,16 @@ async fn leader_quietly_forwards_greetings_preserving_identity_sender_and_recipi
         json!([]),
         "Alice's reply must not wake Coral again"
     );
+    let mut persisted = get(&state.db, "group_messages", id(&second)).await.unwrap();
     assert_eq!(
-        get(&state.db, "group_messages", id(&second)).await.unwrap(),
-        second
+        persisted["attachments"][0]["dataUrl"],
+        "data:text/plain;base64,aGVsbG8="
     );
+    crate::history::attachment_metadata(
+        &mut persisted,
+        &format!("/groups/{}", crate::history::encode(id(&g))),
+    );
+    assert_eq!(persisted, second);
     assert!(
         view["receipts"]
             .as_array()
@@ -3035,4 +3041,137 @@ async fn exhausted_quota_is_visible_on_the_assignment_without_polluting_direct_c
     let direct = state.agents.get("pock").await.unwrap();
     assert!(direct["error"].is_null());
     assert!(direct["messages"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ui_history_uses_indexed_pages_and_excludes_large_receipts() {
+    let (_root, state, peer) = fixture().await;
+    let g = group(&state, &peer, false).await;
+    let gid = id(&g);
+    let mut tx = state.db.pool.begin().await.unwrap();
+    for i in 1..=1000 {
+        let m = json!({"id":format!("m{i}"),"groupId":gid,"rootId":"root","sequence":i,"senderType":"agent","senderId":"pock","senderName":"Pock","content":format!("Reply {i}"),"recipientIds":[],"kind":"message","createdAt":"2026-10-01T00:00:00Z","attachments":[{"id":"image","name":"photo.png","mimeType":"image/png","kind":"image","size":1000,"dataUrl":"data:image/png;base64,BINARY"}]});
+        sqlx::query("INSERT INTO group_messages VALUES(?,?,?)")
+            .bind(format!("m{i}"))
+            .bind(gid)
+            .bind(m.to_string())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let receipt = json!({"id":format!("r{i}"),"tool":"commandExecution","status":"completed","arguments":{"command":"SECRET_ARG".repeat(1000)},"result":"SECRET_RESULT".repeat(1000)});
+        sqlx::query("INSERT INTO group_receipts VALUES(?,?,?)")
+            .bind(format!("r{i}"))
+            .bind(gid)
+            .bind(receipt.to_string())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    }
+    tx.commit().await.unwrap();
+    put(&state.db,"group_receipts",gid,&json!({"id":"spawn","tool":"create_chat","status":"completed","chatId":"actual-child","agentId":"pock","arguments":{"secret":"ARGUMENT"},"result":"RESULT"})).await.unwrap();
+    let baseline = snapshot(&state, gid).await.unwrap();
+    let Json(ui) = read(State(state.clone()), AxumPath(gid.into()))
+        .await
+        .unwrap();
+    let view = serde_json::to_value(ui).unwrap();
+    assert_eq!(view["messages"].as_array().unwrap().len(), 50);
+    assert_eq!(view["messages"][0]["sequence"], 951);
+    assert_eq!(view["olderCursor"], "951");
+    assert_eq!(view["messageCount"], 1000);
+    assert_eq!(view["receipts"].as_array().unwrap().len(), 1);
+    assert_eq!(view["receipts"][0]["chatId"], "actual-child");
+    let bytes = view.to_string();
+    for secret in ["SECRET_ARG", "SECRET_RESULT", "ARGUMENT", "data:image"] {
+        assert!(!bytes.contains(secret));
+    }
+    let plan:Vec<(i64,i64,i64,String)>=sqlx::query_as("EXPLAIN QUERY PLAN SELECT data FROM group_messages WHERE group_id=? AND CAST(json_extract(data,'$.sequence') AS INTEGER) < ? ORDER BY CAST(json_extract(data,'$.sequence') AS INTEGER) DESC LIMIT 51").bind(gid).bind(951).fetch_all(&state.db.pool).await.unwrap();
+    assert!(
+        plan.iter().any(|r| r.3.contains("group_messages_sequence")),
+        "{plan:?}"
+    );
+    let page = message_page(&state, gid, Some(951), None).await.unwrap();
+    assert_eq!(page["messages"][0]["sequence"], 901);
+    assert_eq!(page["messages"][49]["sequence"], 950);
+    assert_eq!(
+        get(&state.db, "group_receipts", "r1000").await.unwrap()["result"],
+        "SECRET_RESULT".repeat(1000)
+    );
+    assert!(baseline["messages"][0]["attachments"][0]["dataUrl"].is_string());
+    println!(
+        "PAYLOAD group prior_snapshot_bytes={} tail_bytes={} persisted_messages=1000 returned=50 receipts=1001",
+        baseline.to_string().len(),
+        bytes.len()
+    );
+}
+
+#[tokio::test]
+async fn ui_history_task_timeline_is_bounded_and_preserves_pending_questions_and_tool_detail() {
+    let (_root, state, _) = fixture().await;
+    sqlx::query("INSERT INTO tasks(id,project_id,title,description,status,branch_name,worktree_path,created_by,created_at,updated_at) VALUES('history-task','project','History','','needs_input','branch','/repo','admin','now','now')").execute(&state.db.pool).await.unwrap();
+    let question = state
+        .db
+        .add_event(
+            "history-task",
+            "system",
+            None,
+            &json!({"questions":[{"id":"q","question":"Continue?"}]}),
+        )
+        .await
+        .unwrap();
+    for index in 1..125 {
+        state.db.add_event("history-task",if index%2==0 {"command"} else {"agent_message"},None,&if index%2==0 {json!({"command":"SECRET_ARGUMENT".repeat(200),"output":"SECRET_OUTPUT".repeat(200),"exitCode":0})} else {json!({"text":format!("Reply {index}")})}).await.unwrap();
+    }
+    let Json(page) = crate::task_history(
+        State(state.clone()),
+        AxumPath("history-task".into()),
+        Query(crate::history::HistoryQuery::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(page["messages"].as_array().unwrap().len(), 50);
+    assert_eq!(page["pendingQuestion"]["id"], question);
+    let bytes = page.to_string();
+    assert!(!bytes.contains("SECRET"));
+    let cursor = page["olderCursor"].as_str().unwrap().to_string();
+    let Json(older) = crate::task_history(
+        State(state.clone()),
+        AxumPath("history-task".into()),
+        Query(crate::history::HistoryQuery {
+            before: Some(cursor.clone()),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        older["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["id"].as_i64().unwrap() < cursor.parse::<i64>().unwrap())
+    );
+    let tool = page["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "command")
+        .unwrap();
+    let Json(detail) = crate::task_event_detail(
+        State(state.clone()),
+        AxumPath(("history-task".into(), tool["id"].as_i64().unwrap())),
+    )
+    .await
+    .unwrap();
+    assert!(
+        detail.payload["output"]
+            .as_str()
+            .unwrap()
+            .contains("SECRET_OUTPUT")
+    );
+    let complete = state.db.events("history-task", 0).await.unwrap();
+    assert_eq!(complete.len(), 125);
+    println!(
+        "PAYLOAD task_timeline full_bytes={} tail_bytes={} persisted_events=125 returned=50",
+        serde_json::to_vec(&complete).unwrap().len(),
+        bytes.len()
+    );
 }

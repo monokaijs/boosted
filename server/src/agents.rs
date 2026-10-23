@@ -664,15 +664,23 @@ pub(crate) async fn create_agent(
 pub(crate) async fn read_agent(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<history::HistoryQuery>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(state.agents.get(&id).await?))
+    let states = state.agents.states.lock().await;
+    let agent = states
+        .get(&id)
+        .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
+    Ok(Json(history::agent_view(agent, query.before.as_deref())?))
 }
 pub(crate) async fn send_message(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(input): Json<Value>,
 ) -> AppResult<Json<Value>> {
-    enqueue_message(&state, &id, input, None).await.map(Json)
+    Ok(Json(history::agent_view(
+        &enqueue_message(&state, &id, input, None).await?,
+        None,
+    )?))
 }
 
 pub(crate) async fn enqueue_message(
@@ -721,8 +729,8 @@ pub(crate) async fn stop_agent(
             let _ = sender.send(true);
         }
     }
-    Ok(Json(
-        change(&state, &id, |agent| {
+    Ok(Json(history::agent_view(
+        &change(&state, &id, |agent| {
             for message in agent["messages"].as_array_mut().unwrap() {
                 if message["delivery"] == "queued" {
                     message["delivery"] = json!("cancelled");
@@ -732,7 +740,8 @@ pub(crate) async fn stop_agent(
             Ok(())
         })
         .await?,
-    ))
+        None,
+    )?))
 }
 pub(crate) async fn update_avatar(
     State(state): State<AppState>,
@@ -741,20 +750,21 @@ pub(crate) async fn update_avatar(
 ) -> AppResult<Json<Value>> {
     let avatar = text(&input, "avatar", 2_000_000)?;
     validate_image(&avatar)?;
-    Ok(Json(
-        change(&state, &id, |a| {
+    Ok(Json(history::agent_view(
+        &change(&state, &id, |a| {
             a["profile"]["avatar"] = json!(avatar);
             Ok(())
         })
         .await?,
-    ))
+        None,
+    )?))
 }
 pub(crate) async fn cancel_followup(
     State(state): State<AppState>,
     AxumPath((id, followup_id)): AxumPath<(String, String)>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(
-        change(&state, &id, |a| {
+    Ok(Json(history::agent_view(
+        &change(&state, &id, |a| {
             let followup = a["followUps"]
                 .as_array_mut()
                 .unwrap()
@@ -765,7 +775,8 @@ pub(crate) async fn cancel_followup(
             Ok(())
         })
         .await?,
-    ))
+        None,
+    )?))
 }
 pub(crate) fn validate_image(value: &str) -> AppResult<Vec<u8>> {
     let (header, data) = value
@@ -2571,7 +2582,7 @@ async fn clean_chat_state(
 ) -> AppResult<()> {
     for id in chat_ids {
         let mut transaction = state.db.pool.begin().await?;
-        sqlx::query("DELETE FROM feature_documents WHERE (namespace='chat-runtime' AND id=?) OR (namespace='provider-chats' AND id=? AND ?) OR (namespace IN ('chat-queue','coding-requests','run-outcomes','approvals') AND (json_extract(content_json,'$.chatId')=? OR json_extract(content_json,'$.threadId')=?))")
+        sqlx::query("DELETE FROM feature_documents WHERE (namespace='chat-runtime' AND id=?) OR (namespace='provider-chats' AND id=? AND ?) OR (namespace IN ('chat-queue','coding-requests','run-outcomes','approvals','chat-ui-items') AND (json_extract(content_json,'$.chatId')=? OR json_extract(content_json,'$.threadId')=?))")
             .bind(id).bind(id).bind(delete_metadata).bind(id).bind(id).execute(&mut *transaction).await?;
         transaction.commit().await?;
         state.started_codex_threads.write().await.remove(id);
@@ -3383,6 +3394,159 @@ async fn recover_coding_runs(state: &AppState) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ui_history_coding_pages_and_lazy_detail_use_bounded_provider_rpc() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, mut state) = fixture().await;
+        let script = root.path().join("history-codex");
+        std::fs::write(
+            &script,
+            include_str!("../tests/fixtures/history-app-server.py"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let home = root.path().join("history-home");
+        state.providers =
+            providers::ProviderManager::test_with_program(root.path().join("accounts"), script);
+        save_document(&state.db,"accounts",&json!({"id":"account","providerId":"codex","status":"CONNECTED","settings":{"codexHome":home}})).await.unwrap();
+        save_document(
+            &state.db,
+            "provider-chats",
+            &json!({"id":"chat","accountId":"account"}),
+        )
+        .await
+        .unwrap();
+        let Json(thread) = read_codex_chat(State(state.clone()), AxumPath("chat".into()))
+            .await
+            .unwrap();
+        assert_eq!(thread.messages.len(), 50);
+        assert_eq!(thread.messages[0].id, "i1950");
+        assert_eq!(thread.older_cursor.as_deref(), Some("1950"));
+        let bytes = serde_json::to_string(&thread).unwrap();
+        for secret in ["ARGUMENT", "OUTPUT"] {
+            assert!(!bytes.contains(secret));
+        }
+        let tool = thread.messages.iter().find(|m| m.kind == "tool").unwrap();
+        let Json(detail) = coding_detail(
+            State(state.clone()),
+            AxumPath(("chat".into(), tool.id.clone())),
+        )
+        .await
+        .unwrap();
+        assert!(detail.content.contains("ARGUMENT"));
+        assert!(detail.content.contains("OUTPUT"));
+        assert!(
+            coding_detail(
+                State(state.clone()),
+                AxumPath(("other-chat".into(), tool.id.clone()))
+            )
+            .await
+            .is_err()
+        );
+        // Appending does not move the exclusive cursor into a different page.
+        std::fs::write(home.join("count"), "2050").unwrap();
+        let Json(older) = coding_history(
+            State(state.clone()),
+            AxumPath("chat".into()),
+            Query(history::HistoryQuery {
+                before: thread.older_cursor,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(older.messages.len(), 50);
+        assert_eq!(older.messages[49].id, "i1949");
+        let live_item = json!({"id":"race-tool","type":"commandExecution","command":"new command","aggregatedOutput":"new output","status":"completed"});
+        coding_ui_message(&state, "chat", &live_item, None, "", 20)
+            .await
+            .unwrap();
+        let mut stale = live_item.clone();
+        stale["aggregatedOutput"] = json!("stale output");
+        let merged = coding_ui_message(&state, "chat", &stale, None, "", 10)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            merged.detail_revision.as_deref(),
+            Some(history::revision(&live_item).as_str())
+        );
+        let Json(detail) = coding_detail(
+            State(state.clone()),
+            AxumPath(("chat".into(), "race-tool".into())),
+        )
+        .await
+        .unwrap();
+        assert!(detail.content.contains("new output"));
+        assert!(!detail.content.contains("stale output"));
+        let rpc = std::fs::read_to_string(home.join("history-rpc.jsonl")).unwrap();
+        let calls: Vec<Value> = rpc
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        assert!(
+            calls
+                .iter()
+                .filter(|c| c["method"] == "thread/read")
+                .all(|c| c["params"]["includeTurns"] == false)
+        );
+        assert!(
+            calls
+                .iter()
+                .filter(|c| c["method"] == "thread/items/list")
+                .all(|c| c["params"]["limit"] == 50)
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c["method"] == "thread/items/list")
+                .count(),
+            2
+        );
+        println!(
+            "PAYLOAD coding tail_bytes={} persisted_items=2000 returned=50 provider_page_rpcs=2 full_history_rpcs=0",
+            bytes.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn ui_history_agent_live_and_http_views_leave_persistence_and_context_complete() {
+        let (_root, state) = fixture().await;
+        let mut live = state.live.subscribe();
+        let next=change(&state,"pock",|a|{
+            a["messages"]=json!((0..151).map(|i|json!({"id":format!("m{i}"),"role":"assistant","content":format!("Reply {i}"),"createdAt":"2026-10-01T00:00:00Z","actions":[{"id":"tool","tool":"run","status":"completed","arguments":{"secret":"ARGUMENT"},"result":"RESULT"}]})).collect::<Vec<_>>()); Ok(())
+        }).await.unwrap();
+        assert_eq!(next["messages"].as_array().unwrap().len(), 151);
+        let event = live.recv().await.unwrap();
+        assert_eq!(event.data["messages"].as_array().unwrap().len(), 50);
+        assert!(!event.data.to_string().contains("ARGUMENT"));
+        let Json(view) = read_agent(
+            State(state.clone()),
+            AxumPath("pock".into()),
+            Query(history::HistoryQuery::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(view["messages"][0]["id"], "m101");
+        let persisted = document(&state.db, "agents", "pock").await.unwrap();
+        assert_eq!(persisted["messages"].as_array().unwrap().len(), 151);
+        assert_eq!(
+            persisted["messages"][0]["actions"][0]["arguments"]["secret"],
+            "ARGUMENT"
+        );
+        let snapshot = state.agents.get("pock").await.unwrap();
+        let (context, _) = history_for_turn(&state, "pock", &snapshot, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            context,
+            recent_model_history(snapshot["messages"].as_array().unwrap())
+        );
+        assert_eq!(context.len(), 120);
+        assert!(context.iter().any(|m| m["id"] == "m31"));
+        assert_eq!(snapshot["messages"].as_array().unwrap().len(), 151);
+    }
 
     #[test]
     fn task_comments_and_background_replies_keep_separate_queue_contexts() {
@@ -6273,5 +6437,23 @@ pub(crate) async fn checkbox(
         Ok(())
     })
     .await?;
-    Ok(Json(next))
+    Ok(Json(history::agent_view(&next, None)?))
+}
+
+pub(crate) async fn download_attachment(
+    State(state): State<AppState>,
+    AxumPath((id, message, attachment)): AxumPath<(String, String, String)>,
+) -> AppResult<Json<Value>> {
+    let agent = state.agents.get(&id).await?;
+    let file = agent["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|m| m["id"] == message)
+        .and_then(|m| m["attachments"].as_array())
+        .into_iter()
+        .flatten()
+        .find(|a| a["id"] == attachment)
+        .ok_or_else(|| AppError::NotFound("Attachment not found".into()))?;
+    Ok(Json(history::pick(file, &["dataUrl"])))
 }

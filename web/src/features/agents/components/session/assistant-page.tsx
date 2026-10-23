@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { reconcileTail, mergeHistory, retainConcurrentHistory } from "@/lib/history"
+import { useOlderHistory } from "@/hooks/use-older-history"
 import { conversationQueryOptions } from "@/lib/query-client"
-import { enqueueWorkspaceOperation, waitForWorkspaceOperations, useWorkspaceState, useWorkspaceStore } from "@/lib/workspace-state"
+import { enqueueWorkspaceOperation, useWorkspaceState, useWorkspaceStore } from "@/lib/workspace-state"
 import { LoaderCircle, MessageSquarePlus, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react"
 import type { AssistantAttachment, AssistantState } from "@/features/agents/types/assistant"
 import { apiClient } from "@/features/agents/lib/api-client"
@@ -32,7 +34,10 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
     queryFn: async ({ signal }) => {
       const next = await apiClient.assistant.read(agentId, signal)
       const current = queryClient.getQueryData<AssistantState>(["assistant-state", agentId]) ?? null
-      return shouldAcceptAssistantState(current, next, agentId) ? next : current!
+      if (!shouldAcceptAssistantState(current, next, agentId)) return current!
+      const refreshed = await reconcileTail(current ?? undefined, next, (cursor) => apiClient.assistant.history(agentId, cursor, signal))
+      const latest = queryClient.getQueryData<AssistantState>(["assistant-state", agentId])
+      return shouldAcceptAssistantState(latest ?? null, next, agentId) ? retainConcurrentHistory(current ?? undefined, latest, refreshed) : latest!
     },
     refetchInterval: (query) => query.state.data?.status === "running" ? 1000 : 5000,
     retry: false,
@@ -44,17 +49,24 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
   const [localError, setError] = useState<string | null>(null)
   const error = localError ?? snapshot.error?.message ?? providers.error?.message ?? null
   const [outbox, setOutbox] = useWorkspaceState<AssistantPendingMessage[]>(`assistant:${agentId}:outbox`, [])
-  const [stopping, setStopping] = useState(false)
+  const sendsInFlight = useRef(new Set<string>())
   const [profileOpen, setProfileOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const followRef = useRef(true)
+  const history = useOlderHistory({ queryKey: ["assistant-state", agentId], page: state ?? undefined,
+    load: (cursor) => apiClient.assistant.history(agentId, cursor), scroller: () => scrollRef.current,
+    beforeLoad: () => { followRef.current = false },
+  })
+  useEffect(() => {
+    followRef.current = true
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+  }, [agentId])
   const composerRef = useRef<AssistantComposerHandle>(null)
   const running = state?.status === "running"
   const activity = running && !state?.activeGroupId ? state?.activity : null
   const sending = outbox.some((message) => message.localDelivery === "sending")
   const messages = useMemo(() => assistantMessagesWithOutbox(state?.messages ?? [], outbox), [state?.messages, outbox])
   const conversation = useMemo(() => assistantConversationLayout(messages), [messages])
-  const queuedCount = state?.messages.filter((message) => message.delivery === "queued").length ?? 0
   const assistantName = state?.profile.name ?? shell.agents.find((agent) => agent.id === agentId)?.profile.name ?? "Agent"
 
   const acceptState = useCallback((next: AssistantState) => {
@@ -63,7 +75,9 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
     const current = queryClient.getQueryData<AssistantState>(["assistant-state", agentId]) ?? null
     if (!shouldAcceptAssistantState(current, next, agentId)) return
     void queryClient.cancelQueries({ queryKey: ["assistant-state", agentId], exact: true })
-    queryClient.setQueryData(["assistant-state", agentId], next)
+    queryClient.setQueryData(["assistant-state", agentId], current ? { ...next, messages: mergeHistory(current.messages, next.messages), olderCursor: current.olderCursor, historyAnchor: current.historyAnchor } : next)
+    // A burst of updates can exceed one tail; polling bridges any missing range.
+    if (current?.messages.length && next.olderCursor && !next.messages.some((m) => current.messages.some((old) => old.id === m.id))) void queryClient.invalidateQueries({ queryKey: ["assistant-state", agentId] })
     shell.updateAgent(next)
     setError(null)
   }, [agentId, queryClient, shell.updateAgent, workspaceGeneration])
@@ -92,10 +106,12 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
   }, [])
 
   const dispatchMessage = (message: AssistantPendingMessage) => {
+    if (sendsInFlight.current.has(agentId)) return
+    sendsInFlight.current.add(agentId)
     const generation = useWorkspaceStore.getState().generation
     return enqueueWorkspaceOperation(`assistant:${agentId}`, async () => {
-      if (useWorkspaceStore.getState().generation !== generation) return
       try {
+        if (useWorkspaceStore.getState().generation !== generation) return
         await queryClient.cancelQueries({ queryKey: ["assistant-state", agentId], exact: true })
         const next = await apiClient.assistant.send(agentId, message.request)
         if (useWorkspaceStore.getState().generation !== generation) return
@@ -104,11 +120,12 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
       } catch (cause) {
         const sendError = cause instanceof Error ? cause.message : "Unable to send message."
         setOutbox((current) => current.map((pending) => pending.id === message.id ? { ...pending, localDelivery: "failed", sendError } : pending))
-      }
+      } finally { sendsInFlight.current.delete(agentId) }
     })
   }
 
   const retryMessage = (message: AssistantPendingMessage) => {
+    if (sending || sendsInFlight.current.has(agentId)) return
     setOutbox((current) => current.map((pending) => pending.id === message.id ? { ...pending, localDelivery: "sending", sendError: undefined } : pending))
     void dispatchMessage(message)
     composerRef.current?.focus()
@@ -116,7 +133,7 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
 
   const send = (message: string, sendingAttachments: AssistantAttachment[] = []) => {
     const content = message.trim() || (sendingAttachments.length ? "Please look at the attached files." : "")
-    if (!content || stopping || !state || !accounts.length) return false
+    if (!content || sending || sendsInFlight.current.has(agentId) || !state || !accounts.length) return false
     setError(null)
     followRef.current = true
     const id = crypto.randomUUID()
@@ -131,20 +148,6 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
   }
 
   const refresh = () => { void snapshot.refetch(); void providers.refetch() }
-
-  const stop = async () => {
-    setStopping(true)
-    const generation = useWorkspaceStore.getState().generation
-    try {
-      await waitForWorkspaceOperations(`assistant:${agentId}`)
-      if (useWorkspaceStore.getState().generation !== generation) return
-      const next = await apiClient.assistant.stop(agentId)
-      if (useWorkspaceStore.getState().generation !== generation) return
-      acceptState(next); refresh()
-    }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to stop assistant.") }
-    finally { setStopping(false) }
-  }
 
   return (
     <section aria-label={`${assistantName} assistant`} className="assistant-conversation relative flex min-h-0 min-w-0 flex-col overflow-hidden">
@@ -169,6 +172,8 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
         if (element) followRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 100
       }}>
         <div className="session-conversation-column mx-auto">
+          {history.hasOlder && <button type="button" className="mb-4 text-xs text-muted-foreground underline" disabled={history.loading} onClick={() => void history.loadOlder()}>{history.loading ? "Loading earlier messages…" : "Load earlier messages"}</button>}
+          {history.error && <p role="alert" className="mb-3 text-xs text-destructive">{history.error} <button type="button" onClick={() => void history.loadOlder()}>Retry earlier messages</button></p>}
           {!state && !error ? <div className="flex justify-center gap-2 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Loading conversation…</div> : null}
           {state && !conversation.length ? (
             <div className="py-8 md:py-16">
@@ -183,7 +188,7 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
             {conversation.map((item) => {
               const { message, showTimestamp, startGroup, showSentTime, showDeliveryStatus } = item
               return (
-              <div className={cn("min-w-0", startGroup ? "mt-4 first:mt-0" : "mt-1")} key={message.id}>
+              <div className={cn("min-w-0", startGroup ? "mt-4 first:mt-0" : "mt-1")} key={message.id} data-history-id={message.id}>
                 {showTimestamp ? <time className="mb-3 mt-6 block text-center text-[12px] text-muted-foreground" dateTime={message.createdAt}>{conversationDate(message.createdAt)}</time> : null}
                 {item.type === "chats" ? <SpawnedChatLinks actions={item.actions} shell={shell} /> : <article aria-label={message.role === "user" ? "Your message" : `${message.assistantName ?? assistantName} reply`} className="group/message min-w-0 rounded-xl focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" tabIndex={showSentTime ? 0 : undefined}>
                   {message.attachments?.length ? <div className={cn("mb-2 flex max-w-[88%]", message.role === "user" && "ml-auto justify-end")}><AssistantAttachmentList attachments={message.attachments} /></div> : null}
@@ -212,15 +217,14 @@ export function AssistantPage({ shell, agentId }: { shell: SessionShellState; ag
 
       <div className="session-composer shrink-0">
         <div className="session-conversation-column mx-auto">
-          {error || state?.error ? <p className="mb-3 rounded-xl border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive" role="alert">{error ?? state?.error}</p> : null}
+          {error || state?.error ? <p className="mb-3 rounded-xl border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive" role="alert">{error ?? state?.error} {snapshot.error && <button type="button" onClick={() => void snapshot.refetch()}>Retry conversation</button>}</p> : null}
           {state && !accounts.length ? <div className="mb-3 flex items-center justify-between gap-3 text-xs text-muted-foreground"><span>Connect a Codex account to get started.</span><button className="text-foreground underline underline-offset-4" type="button" onClick={() => shell.selectManagementView("providers")}>Open Providers</button></div> : null}
           {state?.activeGroupId ? <button className="mb-2 text-xs text-muted-foreground underline" type="button" onClick={() => window.dispatchEvent(new CustomEvent("boosted:open-group", { detail: state.activeGroupId }))}>Working in a group. Open group</button> : null}
           {state?.activeExternalSession ? <p className="mb-2 text-xs text-muted-foreground">Working in {state.activeExternalSession.provider === "slack" ? "Slack" : "Telegram"} · {state.activeExternalSession.chatName}</p> : null}
           <AssistantComposer
             key={agentId} ref={composerRef} agentId={agentId} assistantName={assistantName}
-            canSend={Boolean(state && accounts.length)} stopping={stopping}
-            showStop={Boolean((running && !state?.activeGroupId) || queuedCount > 0)}
-            onSend={send} onStop={() => void stop()} onError={setError}
+            canSend={Boolean(state && accounts.length && !sending)}
+            onSend={send} onError={setError}
           />
         </div>
       </div>

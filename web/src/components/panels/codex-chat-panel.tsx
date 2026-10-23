@@ -13,6 +13,9 @@ import {
   useExternalStoreRuntime,
 } from "@assistant-ui/react";
 import { ArrowDown, ArrowUp, Bot, Brain, Check, ChevronDown, ChevronRight, FileDiff, FilePenLine, FileText, LoaderCircle, MessageSquareText, Plus, Search, Square, Terminal, TriangleAlert, Wrench, X, type LucideIcon } from "lucide-react";
+import { CodexToolDisclosure, CodexDetailScope, codexToolDetailQuery } from "@/components/assistant-ui/codex-tool-detail";
+import { reconcileTail, retainConcurrentHistory } from "@/lib/history";
+import { useOlderHistory } from "@/hooks/use-older-history";
 import { CodexThreadLayout } from "./codex-thread-layout";
 import { CodexMessageContent, CodexMessageText } from "@/components/assistant-ui/codex-message-content";
 import { CodexQuestionForm } from "@/components/assistant-ui/codex-question-form";
@@ -61,7 +64,7 @@ type CodexDisplayMessage = CodexChatMessage & {
   changesSummary?: CodexChangesSummary;
 };
 
-type CodexActivityItem = Pick<CodexChatMessage, "id" | "content" | "kind" | "attachments"> & {
+type CodexActivityItem = Pick<CodexChatMessage, "id" | "content" | "kind" | "attachments" | "detailRevision"> & {
   type: "commentary" | "tool" | "reasoning" | "system";
   label: string;
 };
@@ -73,8 +76,10 @@ type CodexActivity = {
   durationSeconds?: number;
 };
 
+type DisplayFileChange = CodexFileChange & { sources?: { id: string; revision: string }[] };
+
 type CodexChangesSummary = {
-  files: CodexFileChange[];
+  files: DisplayFileChange[];
   additions: number;
   deletions: number;
 };
@@ -105,7 +110,7 @@ function UserMessage() {
   return (
     <MessagePrimitive.Root id={`codex-message-${id}`} className="chat-message-enter codex-message-column flex justify-end py-3">
       <div className="min-w-0 max-w-[88%]">
-        {attachments.length > 0 && <div aria-label="Message attachments" className="mb-2 flex flex-wrap justify-end gap-2">{attachments.map((attachment, index) => <WorkspaceAttachment key={index} attachment={attachment} compact />)}</div>}
+        {attachments.length > 0 && <div aria-label="Message attachments" className="mb-2 flex flex-wrap justify-end gap-2">{attachments.map((attachment, index) => <WorkspaceAttachment key={index} attachment={attachment} compact deferImages={!delivery} />)}</div>}
         {content && <div className="selectable-text rounded-[22px] bg-secondary px-4 py-2.5 text-left"><CodexMessageContent content={content} user /></div>}
         {delivery && <div className="codex-message-delivery" role="status" aria-live="polite">
           {delivery === "sending" && <><LoaderCircle aria-hidden="true" className="size-3 animate-spin" />Sending…</>}
@@ -172,14 +177,13 @@ function ActivityMessage() {
               return <div key={item.id} className="codex-activity-commentary"><CodexMessageContent content={item.content} attachments={item.attachments} /></div>;
             }
             const Icon = activityIcon(item);
-            return <details key={item.id} className="codex-activity-item">
+            return <CodexToolDisclosure key={item.id} id={item.id} revision={item.detailRevision} content={item.content} attachments={item.attachments} className="codex-activity-item" bodyClassName="codex-activity-item-body">
               <summary>
                 <Icon aria-hidden="true" />
                 <span>{item.label}</span>
                 <ChevronDown aria-hidden="true" className="codex-activity-item-chevron" />
               </summary>
-              <div className="codex-activity-item-body"><CodexMessageContent content={item.content} attachments={item.attachments} /></div>
-            </details>;
+            </CodexToolDisclosure>;
           })}
         </div>
       </div>
@@ -207,6 +211,31 @@ function RunChangesToast({ summary }: { summary: CodexChangesSummary }) {
   </button>;
 }
 
+function ChangeFileButton({ change }: { change: DisplayFileChange }) {
+  const api = useBoostedApiClient();
+  const thread = useContext(CodexDetailScope);
+  const client = useQueryClient();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string>();
+  const open = async () => {
+    if (!change.sources?.length) { openChangesPanel(change.path, change.diff); return; }
+    setLoading(true); setError(undefined);
+    try {
+      const details = await Promise.all(change.sources.map((source) => client.fetchQuery(codexToolDetailQuery(api, thread, source.id, source.revision))));
+      const diff = details.flatMap((detail) => detail.changes?.filter((file) => file.path === change.path).map((file) => file.diff) ?? []).filter(Boolean).join("\n");
+      openChangesPanel(change.path, [change.diff, diff].filter(Boolean).join("\n"));
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load file changes."); }
+    finally { setLoading(false); }
+  };
+  return <div>
+    <button type="button" className="codex-change-file" disabled={loading} onClick={() => void open()}>
+      <span title={change.path}>{change.path}</span>
+      {loading ? <LoaderCircle className="size-3 animate-spin" /> : <ChangeStats additions={change.additions} deletions={change.deletions} />}
+    </button>
+    {error && <p role="alert" className="text-xs text-destructive">{error} <button type="button" onClick={() => void open()}>Retry file changes</button></p>}
+  </div>;
+}
+
 function ChangesMessage() {
   const id = useAuiState((state) => state.message.id);
   const summary = useAuiState((state) => state.message.metadata.custom.changesSummary as CodexChangesSummary);
@@ -220,10 +249,7 @@ function ChangesMessage() {
         <div><strong>Edited {changeCountLabel(summary.files.length)}</strong><ChangeStats additions={summary.additions} deletions={summary.deletions} /></div>
         <Button type="button" variant="outline" size="sm" onClick={() => openChangesPanel()}>View changes</Button>
       </header>
-      <div className="codex-changes-files">{files.map((change) => <button type="button" className="codex-change-file" key={change.path} onClick={() => openChangesPanel(change.path, change.diff)}>
-        <span title={change.path}>{change.path}</span>
-        <ChangeStats additions={change.additions} deletions={change.deletions} />
-      </button>)}
+      <div className="codex-changes-files">{files.map((change) => <ChangeFileButton key={change.path} change={change} />)}
       {hiddenCount > 0 && <button type="button" className="codex-changes-expand" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
         <span>{expanded ? "Show fewer files" : `Show ${hiddenCount} more ${hiddenCount === 1 ? "file" : "files"}`}</span><ChevronDown aria-hidden="true" />
       </button>}</div>
@@ -235,6 +261,8 @@ function AssistantMessage() {
   const id = useAuiState((state) => state.message.id);
   const kind = useAuiState((state) => String(state.message.metadata.custom.kind ?? "message"));
   const label = useAuiState((state) => String(state.message.metadata.custom.label ?? "Tool call"));
+  const revision = useAuiState((state) => state.message.metadata.custom.detailRevision as string | undefined);
+  const content = useAuiState((state) => state.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n\n"));
 
   if (kind === "activity") return <ActivityMessage />;
   if (kind === "changes") return <ChangesMessage />;
@@ -245,14 +273,13 @@ function AssistantMessage() {
   if (kind === "tool" || kind === "reasoning") {
     return (
       <MessagePrimitive.Root id={`codex-message-${id}`} className="codex-message-column py-0.5">
-        <details className="group rounded-xl bg-secondary/50 text-xs">
+        <CodexToolDisclosure id={id} revision={revision} content={content} className="group rounded-xl bg-secondary/50 text-xs" bodyClassName="max-h-72 overflow-auto border-t border-border/50 px-3 py-2 text-xs">
           <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-muted-foreground marker:hidden hover:text-foreground [&::-webkit-details-marker]:hidden">
             <ChevronRight className="size-3 shrink-0 transition-transform group-open:rotate-90" />
             <Wrench className="size-3 shrink-0" />
             <span className="min-w-0 truncate font-mono text-[11px]">{kind === "reasoning" ? "Reasoning summary" : label}</span>
           </summary>
-          <div className="max-h-72 overflow-auto border-t border-border/50 px-3 py-2 text-xs"><CodexMessageText /></div>
-        </details>
+        </CodexToolDisclosure>
       </MessagePrimitive.Root>
     );
   }
@@ -356,7 +383,7 @@ function activityItem(message: CodexDisplayMessage): CodexActivityItem {
         ? "system"
         : "tool";
   const label = type === "reasoning" ? "Thought through the approach" : toolLabel(message.content);
-  return { id: message.id, content: message.content, kind: message.kind, attachments: message.attachments, type, label };
+  return { id: message.id, content: message.content, kind: message.kind, attachments: message.attachments, detailRevision: message.detailRevision, type, label };
 }
 
 function activityDuration(messages: CodexDisplayMessage[], finalMessages: CodexDisplayMessage[]) {
@@ -377,7 +404,7 @@ function activityStartedAt(messages: CodexDisplayMessage[]) {
 }
 
 function summarizeChanges(messages: CodexDisplayMessage[]): CodexChangesSummary | undefined {
-  const files = new Map<string, CodexFileChange>();
+  const files = new Map<string, DisplayFileChange>();
   for (const message of messages) {
     for (const change of message.changes ?? []) {
       const current = files.get(change.path);
@@ -387,6 +414,7 @@ function summarizeChanges(messages: CodexDisplayMessage[]): CodexChangesSummary 
         additions: (current?.additions ?? 0) + change.additions,
         deletions: (current?.deletions ?? 0) + change.deletions,
         diff: [current?.diff, change.diff].filter(Boolean).join("\n") || undefined,
+        sources: [...(current?.sources ?? []), ...(message.detailRevision ? [{ id: message.id, revision: message.detailRevision }] : [])],
       });
     }
   }
@@ -484,7 +512,7 @@ function toAssistantMessage(message: CodexDisplayMessage): ThreadMessageLike {
     role: message.role,
     content: [{ type: "text", text: message.content }],
     createdAt: message.createdAt ? new Date(message.createdAt) : undefined,
-    metadata: { custom: { kind: message.activity ? "activity" : message.changesSummary ? "changes" : message.kind, activity: message.activity, changesSummary: message.changesSummary, attachments: message.attachments, questions: message.questions, label: message.kind === "tool" ? toolLabel(message.content) : undefined, localDelivery: message.localDelivery, sendError: message.sendError } },
+    metadata: { custom: { detailRevision: message.detailRevision, kind: message.activity ? "activity" : message.changesSummary ? "changes" : message.kind, activity: message.activity, changesSummary: message.changesSummary, attachments: message.attachments, questions: message.questions, label: message.kind === "tool" ? toolLabel(message.content) : undefined, localDelivery: message.localDelivery, sendError: message.sendError } },
   };
   assistantMessageCache.set(message, converted);
   return converted;
@@ -514,6 +542,11 @@ function CodexDraftSync({ runtime, sessionKey }: { runtime: AssistantRuntime; se
 function CodexTranscript({ thread, onThreadChange }: { thread: CodexChatThread; onThreadChange?: (threadId: string) => void }) {
   const api = useBoostedApiClient();
   const queryClient = useQueryClient();
+  const transcriptRoot = useRef<HTMLDivElement>(null);
+  const history = useOlderHistory({ queryKey: ["codex-chat", thread.chat.id], page: thread,
+    load: (cursor) => api.codexHistory(thread.chat.id, cursor),
+    scroller: () => transcriptRoot.current?.querySelector<HTMLElement>(".codex-thread-viewport") ?? null,
+  });
   const selectCodexChat = useAppStore((state) => state.selectCodexChat);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messages = thread.messages;
@@ -774,6 +807,8 @@ function CodexTranscript({ thread, onThreadChange }: { thread: CodexChatThread; 
   };
 
   return (
+    <div ref={transcriptRoot} className="flex min-h-0 flex-1 flex-col">
+    <CodexDetailScope.Provider value={thread.chat.id}>
     <WorkspaceFileProvider scope={{ kind: "codex", id: thread.chat.id }}>
       <AssistantRuntimeProvider runtime={runtime}>
         <CodexDraftSync runtime={runtime} sessionKey={sessionKey} />
@@ -796,7 +831,7 @@ function CodexTranscript({ thread, onThreadChange }: { thread: CodexChatThread; 
               <ComposerPrimitive.Root className="codex-message-composer rounded-[24px] border border-border/40 bg-secondary px-3 py-2 focus-within:border-ring" onSubmit={(event) => {
                 if (attachments.length > 0 && runtime.thread.composer.getState().isEmpty) { event.preventDefault(); sendAttachmentMessage(); }
               }}>
-                {attachments.length > 0 && <div className="mb-1.5 flex flex-wrap gap-1.5">{attachments.map((attachment) => <span key={attachment.id} className="relative inline-block"><WorkspaceAttachment attachment={{ name: attachment.name, mimeType: attachment.mimeType, uploadId: attachment.id }} compact /><button type="button" className="absolute right-1 top-1 rounded-full bg-background p-0.5 text-muted-foreground hover:text-foreground" aria-label={`Remove ${attachment.name}`} onClick={() => removeAttachment(attachment)}><X className="size-3" /></button></span>)}</div>}
+                {attachments.length > 0 && <div className="mb-1.5 flex flex-wrap gap-1.5">{attachments.map((attachment) => <span key={attachment.id} className="relative inline-block"><WorkspaceAttachment attachment={{ name: attachment.name, mimeType: attachment.mimeType, uploadId: attachment.id }} compact deferImages={false} /><button type="button" className="absolute right-1 top-1 rounded-full bg-background p-0.5 text-muted-foreground hover:text-foreground" aria-label={`Remove ${attachment.name}`} onClick={() => removeAttachment(attachment)}><X className="size-3" /></button></span>)}</div>}
                 <ComposerPrimitive.Input className="block max-h-40 min-h-14 w-full resize-none bg-transparent px-1 py-1.5 text-sm leading-5 outline-none placeholder:text-muted-foreground" placeholder="Message Codex..." aria-label="Message Codex" onPaste={pasteImages} onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && attachments.length > 0 && runtime.thread.composer.getState().isEmpty) { event.preventDefault(); sendAttachmentMessage(); }
                 }} autoFocus />
@@ -822,6 +857,8 @@ function CodexTranscript({ thread, onThreadChange }: { thread: CodexChatThread; 
               </ComposerPrimitive.Root>
             </div>
           </>}>
+          {history.hasOlder && <button type="button" className="codex-message-column mb-3 text-xs text-muted-foreground underline" disabled={history.loading} onClick={() => void history.loadOlder()}>{history.loading ? "Loading earlier messages…" : "Load earlier messages"}</button>}
+          {history.error && <p role="alert" className="codex-message-column text-xs text-destructive">{history.error} <button type="button" onClick={() => void history.loadOlder()}>Retry earlier messages</button></p>}
           <ThreadPrimitive.Empty><div className="empty-state min-h-48 flex-1"><MessageSquareText className="size-8" /><p>Send a message to continue this Codex chat.</p></div></ThreadPrimitive.Empty>
           <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
         </CodexThreadLayout>
@@ -829,16 +866,24 @@ function CodexTranscript({ thread, onThreadChange }: { thread: CodexChatThread; 
         </CodexRetryContext.Provider>
       </AssistantRuntimeProvider>
     </WorkspaceFileProvider>
+    </CodexDetailScope.Provider>
+    </div>
   );
 }
 
 export function CodexChatPanel({ threadId, onThreadChange }: { threadId: string; onThreadChange?: (threadId: string) => void }) {
   const api = useBoostedApiClient();
-  const thread = useQuery({ ...conversationQueryOptions, queryKey: ["codex-chat", threadId], queryFn: ({ signal }) => api.codexChat(threadId, signal) });
+  const queryClient = useQueryClient();
+  const thread = useQuery({ ...conversationQueryOptions, queryKey: ["codex-chat", threadId], queryFn: async ({ signal }) => {
+    const next = await api.codexChat(threadId, signal);
+    const current = queryClient.getQueryData<CodexChatThread>(["codex-chat", threadId]);
+    const refreshed = await reconcileTail(current, next, (cursor) => api.codexHistory(threadId, cursor, signal));
+    return retainConcurrentHistory(current, queryClient.getQueryData<CodexChatThread>(["codex-chat", threadId]), refreshed);
+  } });
   return (
     <div className="panel-root">
       {thread.isLoading && <div className="grid min-h-0 flex-1 place-items-center"><LoaderCircle className="size-5 animate-spin text-muted-foreground" /></div>}
-      {thread.error && <div className="grid min-h-0 flex-1 place-items-center p-8 text-center text-xs text-destructive">{thread.error.message}</div>}
+      {thread.error && <div className="grid min-h-0 flex-1 place-items-center p-8 text-center text-xs text-destructive">{thread.error.message}<button type="button" onClick={() => void thread.refetch()}>Retry conversation</button></div>}
       {thread.data && <CodexTranscript key={threadId} thread={thread.data} onThreadChange={onThreadChange} />}
     </div>
   );

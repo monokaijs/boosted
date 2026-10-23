@@ -14,6 +14,7 @@ export const apiClient = {
     list: () => request<AssistantSummary[]>('/agents'),
     create: (body: CreateAssistantRequest) => request<AssistantState>('/agents', 'POST', body),
     read: (id: string, signal?: AbortSignal) => api.featureRequest<AssistantState>(`/agents/${encode(id)}`, { signal }),
+    history: (id: string, before: string, signal?: AbortSignal) => api.featureRequest<AssistantState>(`/agents/${encode(id)}?before=${encode(before)}`, { signal }),
     send: (id: string, body: AssistantMessageRequest) => request<AssistantState>(`/agents/${encode(id)}/messages`, 'POST', body),
     stop: (id: string) => request<AssistantState>(`/agents/${encode(id)}/stop`, 'POST'),
     updateAvatar: (id: string, avatar: string) => request<AssistantState>(`/agents/${encode(id)}/avatar`, 'PUT', { avatar }),

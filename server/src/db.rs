@@ -316,6 +316,46 @@ impl Database {
             .collect())
     }
 
+    pub(crate) async fn event_page(
+        &self,
+        task: &str,
+        before: i64,
+        after: Option<i64>,
+        limit: usize,
+    ) -> AppResult<Vec<TaskEvent>> {
+        let direction = if after.is_some() { "ASC" } else { "DESC" };
+        let sql = format!(
+            "SELECT e.id,e.task_id,e.kind,e.actor_id,COALESCE(u.username,json_extract(e.payload_json,'$.agentName')) actor_name,e.payload_json,e.created_at FROM task_events e LEFT JOIN users u ON u.id=e.actor_id WHERE e.task_id=? AND e.id<? AND e.id>? ORDER BY e.id {direction} LIMIT ?"
+        );
+        let rows = sqlx::query(&sql)
+            .bind(task)
+            .bind(before)
+            .bind(after.unwrap_or(0))
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| TaskEvent {
+                id: row.get("id"),
+                task_id: row.get("task_id"),
+                kind: row.get("kind"),
+                actor_id: row.get("actor_id"),
+                actor_name: row.get("actor_name"),
+                payload: serde_json::from_str(&row.get::<String, _>("payload_json"))
+                    .unwrap_or(Value::Null),
+                created_at: row.get("created_at"),
+            })
+            .collect())
+    }
+    pub(crate) async fn event_detail(&self, task: &str, event: i64) -> AppResult<TaskEvent> {
+        self.event_page(task, event.saturating_add(1), None, 1)
+            .await?
+            .into_iter()
+            .find(|e| e.id == event)
+            .ok_or_else(|| AppError::NotFound("Event not found".into()))
+    }
+
     pub async fn add_event(
         &self,
         task_id: &str,

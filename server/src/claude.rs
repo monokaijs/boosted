@@ -104,8 +104,15 @@ impl ClaudeClient {
             "model/list" => Ok(claude_models()),
             "thread/start" => self.thread_start(params).await,
             "thread/read" => {
-                let thread = self.read_thread(required(&params, "threadId")?).await?;
+                let mut thread = self.read_thread(required(&params, "threadId")?).await?;
+                if params["includeTurns"] != true {
+                    thread["turns"] = json!([]);
+                }
                 Ok(json!({"thread":thread,"model":thread["model"]}))
+            }
+            "thread/items/list" => {
+                let thread = self.read_thread(required(&params, "threadId")?).await?;
+                claude_item_page(&thread, &params)
             }
             "thread/resume" => {
                 let id = required(&params, "threadId")?;
@@ -685,4 +692,67 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
             "sk-ant-test"
         );
     }
+}
+
+// Claude stores one JSON document per thread. Read it on the server, then walk
+// backwards without cloning/rendering the full history or sending it to clients.
+fn claude_item_page(thread: &Value, params: &Value) -> AppResult<Value> {
+    let before = params["cursor"].as_str();
+    let limit = params["limit"].as_u64().unwrap_or(50).clamp(1, 50) as usize;
+    let mut found = before.is_none();
+    let mut entries = Vec::new();
+    for turn in thread["turns"].as_array().into_iter().flatten().rev() {
+        for item in turn["items"].as_array().into_iter().flatten().rev() {
+            if !found {
+                if item["id"].as_str() == before {
+                    found = true;
+                }
+                continue;
+            }
+            entries.push(json!({"item":item,"turnId":turn["id"],"startedAtMs":turn["startedAt"].as_i64().map(|time| if time > 10_000_000_000 { time } else { time * 1000 })}));
+            if entries.len() > limit {
+                break;
+            }
+        }
+        if entries.len() > limit {
+            break;
+        }
+    }
+    if !found {
+        return Err(AppError::BadRequest("Unknown history cursor".into()));
+    }
+    let more = entries.len() > limit;
+    entries.truncate(limit);
+    let next = if more {
+        entries.last().map(|e| e["item"]["id"].clone())
+    } else {
+        None
+    };
+    Ok(json!({"data":entries,"nextCursor":next}))
+}
+
+#[cfg(test)]
+#[test]
+fn ui_history_claude_cursors_remain_stable_when_new_items_arrive() {
+    let mut thread = json!({"turns":[{"id":"turn","startedAt":1700000000,"items":(0..125).map(|i|json!({"id":format!("i{i}"),"type":"agentMessage","text":format!("Reply {i}")})).collect::<Vec<_>>()}]});
+    let original = thread.clone();
+    let tail = claude_item_page(&thread, &json!({"limit":50})).unwrap();
+    assert_eq!(tail["data"].as_array().unwrap().len(), 50);
+    assert_eq!(tail["data"][0]["item"]["id"], "i124");
+    assert_eq!(tail["nextCursor"], "i75");
+    assert_eq!(tail["data"][0]["startedAtMs"], 1700000000000_i64);
+    thread["turns"][0]["startedAt"] = json!(1700000000000_i64);
+    let millis = claude_item_page(&thread, &json!({"limit":50})).unwrap();
+    assert_eq!(millis["data"][0]["startedAtMs"], 1700000000000_i64);
+    thread["turns"][0]["startedAt"] = original["turns"][0]["startedAt"].clone();
+    assert_eq!(thread, original);
+    thread["turns"][0]["items"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"arrival"}));
+    let older =
+        claude_item_page(&thread, &json!({"cursor":tail["nextCursor"],"limit":50})).unwrap();
+    assert_eq!(older["data"][0]["item"]["id"], "i74");
+    assert_eq!(older["data"][49]["item"]["id"], "i25");
+    assert!(claude_item_page(&thread, &json!({"cursor":"invalid"})).is_err());
 }

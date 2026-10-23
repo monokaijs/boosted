@@ -151,6 +151,8 @@ pub struct CodexChatMessage {
     pub attachments: Vec<CodexMessageAttachment>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<CodexFileChange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -159,6 +161,7 @@ pub struct CodexFileChange {
     pub path: String,
     pub additions: usize,
     pub deletions: usize,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub diff: String,
 }
 
@@ -179,6 +182,7 @@ pub struct CodexChatThread {
     pub runtime_defaults: Option<Value>,
     pub chat: CodexChat,
     pub messages: Vec<CodexChatMessage>,
+    pub older_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

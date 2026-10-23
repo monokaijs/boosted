@@ -46,6 +46,8 @@ pub(crate) struct GroupState {
     pub summary: GroupSummary,
     pub members: Vec<Value>,
     pub message_count: usize,
+    #[serde(default)]
+    pub older_cursor: Option<String>,
     pub messages: Vec<GroupMessage>,
     pub deliveries: Vec<GroupDelivery>,
     pub tasks: Vec<GroupTask>,

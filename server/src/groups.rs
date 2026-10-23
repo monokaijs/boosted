@@ -224,6 +224,7 @@ pub(crate) async fn migrate(db: &Database) -> AppResult<()> {
         .execute(&db.pool)
         .await?;
     }
+    sqlx::query("CREATE INDEX IF NOT EXISTS group_messages_sequence ON group_messages(group_id, CAST(json_extract(data,'$.sequence') AS INTEGER))").execute(&db.pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS group_members (group_id TEXT NOT NULL, agent_id TEXT NOT NULL, position INTEGER NOT NULL, PRIMARY KEY(group_id,agent_id))").execute(&db.pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS group_deliveries (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, agent_id TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, data TEXT NOT NULL)").execute(&db.pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS group_deliveries_pending ON group_deliveries(status,agent_id,created_at)").execute(&db.pool).await?;
@@ -303,6 +304,7 @@ pub(crate) async fn list(State(state): State<AppState>) -> AppResult<Json<Vec<Gr
         .map(|v| serde_json::from_str(v))
         .collect::<Result<_, _>>()?;
     for group in &mut groups {
+        group["initialGitState"] = Value::Null;
         let last_message: Option<String> = sqlx::query_scalar(
             "SELECT json_extract(data,'$.createdAt') FROM group_messages WHERE group_id=? AND json_extract(data,'$.senderType')='agent' AND trim(COALESCE(json_extract(data,'$.content'),''))!='' ORDER BY CAST(json_extract(data,'$.sequence') AS INTEGER) DESC LIMIT 1",
         )
@@ -397,10 +399,18 @@ pub(crate) async fn create(
     state.emit("group.updated", json!({"groupId":group_id}));
     Ok((
         StatusCode::CREATED,
-        Json(serde_json::from_value(snapshot(&state, &group_id).await?)?),
+        Json(serde_json::from_value(
+            ui_snapshot(&state, &group_id).await?,
+        )?),
     ))
 }
 pub(crate) async fn snapshot(state: &AppState, group: &str) -> AppResult<Value> {
+    snapshot_impl(state, group, false).await
+}
+async fn ui_snapshot(state: &AppState, group: &str) -> AppResult<Value> {
+    snapshot_impl(state, group, true).await
+}
+async fn snapshot_impl(state: &AppState, group: &str, ui: bool) -> AppResult<Value> {
     let mut value = get(&state.db, "groups", group).await?;
     let roster = members(&state.db, group).await?;
     value["memberRoles"] = default_roles(&roster, &value["memberRoles"]);
@@ -411,18 +421,30 @@ pub(crate) async fn snapshot(state: &AppState, group: &str) -> AppResult<Value> 
     }
     value["memberIds"] = json!(roster);
     value["members"] = json!(profiles);
-    let messages = all(&state.db, "group_messages", group).await?;
-    value["messageCount"] = json!(messages.len());
-    value["messages"] = json!(
-        messages
-            .into_iter()
-            .rev()
-            .take(120)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-    );
+    if ui {
+        value["messageCount"] = json!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM group_messages WHERE group_id=?")
+                .bind(group)
+                .fetch_one(&state.db.pool)
+                .await?
+        );
+        let page = message_page(state, group, None, None).await?;
+        value["olderCursor"] = page["olderCursor"].clone();
+        value["messages"] = page["messages"].clone();
+    } else {
+        let messages = all(&state.db, "group_messages", group).await?;
+        value["messageCount"] = json!(messages.len());
+        value["messages"] = json!(
+            messages
+                .into_iter()
+                .rev()
+                .take(120)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+        );
+    }
     for (key, table) in [
         ("tasks", "group_tasks"),
         ("reviews", "group_reviews"),
@@ -430,7 +452,31 @@ pub(crate) async fn snapshot(state: &AppState, group: &str) -> AppResult<Value> 
         ("receipts", "group_receipts"),
         ("requests", "group_requests"),
     ] {
-        value[key] = json!(all(&state.db, table, group).await?);
+        value[key] = if ui && key == "receipts" {
+            let rows: Vec<String> = sqlx::query_scalar("SELECT json_object('id',id,'agentId',json_extract(data,'$.agentId'),'executionId',json_extract(data,'$.executionId'),'taskId',json_extract(data,'$.taskId'),'tool',json_extract(data,'$.tool'),'status','completed','chatId',json_extract(data,'$.chatId')) FROM group_receipts WHERE group_id=? AND json_extract(data,'$.status')='completed' AND json_extract(data,'$.tool') IN ('create_chat','fork_chat') AND length(trim(COALESCE(json_extract(data,'$.chatId'),'')))>0 ORDER BY rowid").bind(group).fetch_all(&state.db.pool).await?;
+            json!(
+                rows.iter()
+                    .map(|s| serde_json::from_str::<Value>(s))
+                    .collect::<Result<Vec<_>, _>>()?
+            )
+        } else {
+            let mut rows = all(&state.db, table, group).await?;
+            if ui && key == "executions" {
+                rows = rows
+                    .iter()
+                    .map(|e| {
+                        crate::history::pick(
+                            e,
+                            &[
+                                "id", "agentId", "rootId", "taskId", "chatId", "status",
+                                "activity", "error",
+                            ],
+                        )
+                    })
+                    .collect();
+            }
+            json!(rows)
+        };
     }
     let deliveries: Vec<String>=sqlx::query_scalar("SELECT data FROM group_deliveries WHERE group_id=? AND status IN ('queued','processing') ORDER BY created_at").bind(group).fetch_all(&state.db.pool).await?;
     value["deliveries"] = json!(
@@ -439,6 +485,25 @@ pub(crate) async fn snapshot(state: &AppState, group: &str) -> AppResult<Value> 
             .map(|v| serde_json::from_str::<GroupDelivery>(v))
             .collect::<Result<Vec<_>, _>>()?
     );
+    if ui {
+        value["initialGitState"] = Value::Null;
+        for delivery in value["deliveries"].as_array_mut().into_iter().flatten() {
+            delivery["event"] = Value::Null;
+        }
+        value["requests"] = json!(
+            value["requests"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|r| crate::history::pick(r, &["id", "turnCount", "limited", "completed"]))
+                .collect::<Vec<_>>()
+        );
+        for key in ["tasks", "reviews"] {
+            for row in value[key].as_array_mut().into_iter().flatten() {
+                row["fingerprints"] = json!({});
+            }
+        }
+    }
     let _: Vec<GroupTask> = serde_json::from_value(value["tasks"].clone())?;
     let _: Vec<GroupReview> = serde_json::from_value(value["reviews"].clone())?;
     Ok(value)
@@ -449,7 +514,7 @@ pub(crate) async fn read(
 ) -> AppResult<Json<GroupState>> {
     let _gate = state.groups.gate.lock().await;
     Ok(Json(serde_json::from_value(
-        snapshot(&state, &group).await?,
+        ui_snapshot(&state, &group).await?,
     )?))
 }
 
@@ -597,7 +662,7 @@ pub(crate) async fn update(
     apply_group_project(&state, &mut current, &input).await?;
     persist_membership(&state, &group, &current, &roster, None, None).await?;
     touch(&state, &group, "group.updated").await?;
-    Ok(Json(snapshot(&state, &group).await?))
+    Ok(Json(ui_snapshot(&state, &group).await?))
 }
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -611,31 +676,65 @@ pub(crate) async fn messages(
     Query(q): Query<MessageQuery>,
 ) -> AppResult<Json<Vec<GroupMessage>>> {
     get(&state.db, "groups", &group).await?;
-    let mut rows = all(&state.db, "group_messages", &group).await?;
-    rows.retain(|v| {
-        q.after
-            .is_none_or(|n| v["sequence"].as_i64().unwrap_or(0) > n)
-            && q.before
-                .is_none_or(|n| v["sequence"].as_i64().unwrap_or(0) < n)
-    });
-    if q.before.is_some() {
-        rows = rows
-            .into_iter()
-            .rev()
-            .take(120)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-    } else {
-        rows.truncate(120);
-    }
-    Ok(Json(
-        rows.into_iter()
-            .map(serde_json::from_value)
-            .collect::<Result<_, _>>()?,
-    ))
+    let page = message_page(&state, &group, q.before, q.after).await?;
+    Ok(Json(serde_json::from_value(page["messages"].clone())?))
 }
+
+// The indexed sequence is an exclusive, append-stable cursor. LIMIT is applied
+// in SQLite, before JSON decoding or attachment projection.
+async fn message_page(
+    state: &AppState,
+    group: &str,
+    before: Option<i64>,
+    after: Option<i64>,
+) -> AppResult<Value> {
+    let direction = if after.is_some() { "ASC" } else { "DESC" };
+    let query = format!(
+        "SELECT data FROM group_messages WHERE group_id=? AND CAST(json_extract(data,'$.sequence') AS INTEGER) < ? AND CAST(json_extract(data,'$.sequence') AS INTEGER) > ? ORDER BY CAST(json_extract(data,'$.sequence') AS INTEGER) {direction} LIMIT ?"
+    );
+    let rows: Vec<String> = sqlx::query_scalar(&query)
+        .bind(group)
+        .bind(before.unwrap_or(i64::MAX))
+        .bind(after.unwrap_or(0))
+        .bind((crate::history::PAGE_SIZE + 1) as i64)
+        .fetch_all(&state.db.pool)
+        .await?;
+    let has_more = rows.len() > crate::history::PAGE_SIZE;
+    let mut messages: Vec<Value> = rows
+        .iter()
+        .take(crate::history::PAGE_SIZE)
+        .map(|r| serde_json::from_str(r))
+        .collect::<Result<_, _>>()?;
+    if after.is_none() {
+        messages.reverse();
+    }
+    for message in &mut messages {
+        crate::history::attachment_metadata(
+            message,
+            &format!("/groups/{}", crate::history::encode(group)),
+        );
+    }
+    Ok(
+        json!({"olderCursor": if has_more { messages.first().map(|m| m["sequence"].to_string()) } else { None }, "messages":messages}),
+    )
+}
+pub(crate) async fn download_attachment(
+    State(state): State<AppState>,
+    AxumPath((group, message, attachment)): AxumPath<(String, String, String)>,
+) -> AppResult<Json<Value>> {
+    let message = get(&state.db, "group_messages", &message).await?;
+    if message["groupId"] != group {
+        return Err(AppError::NotFound("Message not found".into()));
+    }
+    let file = message["attachments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|a| a["id"] == attachment)
+        .ok_or_else(|| AppError::NotFound("Attachment not found".into()))?;
+    Ok(Json(crate::history::pick(file, &["dataUrl"])))
+}
+
 pub(crate) async fn send(
     State(state): State<AppState>,
     AxumPath(group): AxumPath<String>,
@@ -659,7 +758,11 @@ pub(crate) async fn send(
         ));
     }
     let message_id = format!("{group}:{}:{client}", user.id);
-    if let Ok(existing) = get(&state.db, "group_messages", &message_id).await {
+    if let Ok(mut existing) = get(&state.db, "group_messages", &message_id).await {
+        crate::history::attachment_metadata(
+            &mut existing,
+            &format!("/groups/{}", crate::history::encode(&group)),
+        );
         return Ok(Json(existing));
     }
     let target = if recipients.is_empty() {
@@ -671,6 +774,11 @@ pub(crate) async fn send(
     let saved = append_message(&state, message, &target, "message", None).await?;
     let request = json!({"id":message_id,"groupId":group,"turnCount":0,"limited":false,"completed":false,"createdAt":now()});
     put(&state.db, "group_requests", &group, &request).await?;
+    let mut saved = saved;
+    crate::history::attachment_metadata(
+        &mut saved,
+        &format!("/groups/{}", crate::history::encode(&group)),
+    );
     Ok(Json(saved))
 }
 async fn append_message(
@@ -1342,7 +1450,7 @@ pub(crate) async fn stop(
     AxumPath(group): AxumPath<String>,
 ) -> AppResult<Json<Value>> {
     halt(&state, &group).await?;
-    Ok(Json(snapshot(&state, &group).await?))
+    Ok(Json(ui_snapshot(&state, &group).await?))
 }
 async fn halt(state: &AppState, group: &str) -> AppResult<()> {
     {
@@ -1552,7 +1660,7 @@ pub(crate) async fn resume(
         }
     }
     touch(&state, &group, "group.updated").await?;
-    Ok(Json(snapshot(&state, &group).await?))
+    Ok(Json(ui_snapshot(&state, &group).await?))
 }
 
 pub(crate) async fn pending(state: &AppState, agent: &str) -> AppResult<bool> {

@@ -62,6 +62,7 @@ export interface CodexChatMessage {
   questions?: { title: string; options?: string[] | null }[];
   attachments?: MessageAttachment[];
   changes?: CodexFileChange[];
+  detailRevision?: string;
 }
 
 export interface CodexFileChange {
@@ -100,6 +101,8 @@ export interface CodexChatThread {
   runtimeDefaults?: { model?: string; reasoningEffort?: string; accessMode?: CodexAccessOption["id"]; approvalPolicy?: string; serviceTier?: string; collaborationMode?: CodexCollaborationMode };
   chat: CodexChat;
   messages: CodexChatMessage[];
+  olderCursor?: string | null;
+  historyAnchor?: string;
 }
 
 export interface CodexTurnStart {

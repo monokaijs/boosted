@@ -1,16 +1,19 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowDown, ArrowUp, Check, ChevronDown, ListTodo, LoaderCircle, MessageSquare, Play, Plus, Square, TriangleAlert, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, ChevronDown, ListTodo, LoaderCircle, MessageSquare, Play, Plus, TriangleAlert, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { AssistantAttachmentList } from '@/features/agents/components/session/assistant-attachment-list';
 import { assistantMessageLayout } from '@/features/agents/lib/assistant-conversation';
 import { groupChildChats } from './child-chats';
+import { spawnedChatTitle } from '@/features/agents/components/session/conversation-tools';
 import { GroupDetails, taskLabels, type GroupDetailTab } from './group-details';
 import '@/features/agents/agents.css';
 import { useBoostedApiClient } from '@/lib/api-context';
 import { ApiError } from '@/lib/api';
+import { reconcileTail, retainConcurrentHistory } from '@/lib/history';
+import { useOlderHistory } from '@/hooks/use-older-history';
 import { conversationQueryOptions } from '@/lib/query-client';
 import { machinePreferenceKey, useAppStore } from '@/lib/store';
 import { useMobileLayout } from '@/hooks/use-mobile-layout';
@@ -28,7 +31,7 @@ import { forgetGroup, groupLifetime } from './lifecycle';
 import { GroupDialog } from './group-dialog';
 import { GroupAvatar } from './group-avatar';
 import { memberRoleNames } from './roles';
-import { acceptGroupSnapshot, mergeGroupMessages, remainingGroupOutbox } from './state';
+import { acceptGroupSnapshot, remainingGroupOutbox } from './state';
 import type { GroupMessage, GroupPendingMessage, GroupState, GroupTask } from './types';
 import './groups.css';
 
@@ -131,6 +134,10 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
   const persist = (key: string, value: unknown) => { if (!lifetime.deleted) persistValue(key, value); };
   const [deleting, setDeleting] = useState(false);
   const user = useAppStore((s) => s.user);
+  const historyPage = async (cursor: string) => {
+    const messages = await groups.messages(groupId, Number(cursor));
+    return { messages, olderCursor: messages.length === 50 ? String(messages[0].sequence) : null };
+  };
   const state = useQuery({
     ...conversationQueryOptions,
     queryKey: ['groups', groupId],
@@ -138,7 +145,10 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
     queryFn: async () => {
       const next = await groups.read(groupId);
       const current = queryClient.getQueryData<GroupState>(['groups', groupId]);
-      return acceptGroupSnapshot(current, next, groupId) ? next : current!;
+      if (!acceptGroupSnapshot(current, next, groupId)) return current!;
+      const refreshed = await reconcileTail(current, next, historyPage);
+      const latest = queryClient.getQueryData<GroupState>(['groups', groupId]);
+      return acceptGroupSnapshot(latest, next, groupId) ? retainConcurrentHistory(current, latest, refreshed) : latest!;
     },
     refetchInterval: 5000,
   });
@@ -149,6 +159,12 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
     }
   }, [state.error, lifetime, queryClient, groupId, client.profileId]);
   const group = state.data;
+  const chatList = useQuery({
+    queryKey: ['codex-chats', 'groups'],
+    queryFn: () => client.codexChats(''),
+    enabled: Boolean(group && groupChildChats(group).length),
+    refetchInterval: 5000,
+  });
   const draftKey = machinePreferenceKey('boosted.group-draft.' + groupId);
   const outboxKey = machinePreferenceKey('boosted.group-outbox.' + groupId);
   const [draft, setDraft] = useState(() => persisted<string>(draftKey, ''));
@@ -156,8 +172,6 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
   const [recipients, setRecipients] = useState(() => persisted<string[]>(recipientsKey, []));
   const [attachments, setAttachments] = useState<AssistantAttachment[]>([]);
   const [outbox, setOutbox] = useState<GroupPendingMessage[]>(() => persisted<GroupPendingMessage[]>(outboxKey, []).map((m) => ({ ...m, status: 'failed', error: 'Message was not confirmed. Retry to check delivery.' })));
-  const [older, setOlder] = useState<GroupMessage[]>([]);
-  const [loadingOlder, setLoadingOlder] = useState(false);
   const [drawer, setDrawer] = useState(false);
   const [detailTab, setDetailTab] = useState<GroupDetailTab>('participants');
   const opener = useRef<HTMLElement | null>(null);
@@ -174,10 +188,10 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
   const fileInput = useRef<HTMLInputElement>(null);
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
-  const historyRequest = useRef<number | undefined>(undefined);
-  const exhaustedHistory = useRef<number | undefined>(undefined);
   const mounted = useRef(true);
   const sendQueue = useRef(Promise.resolve());
+  const sendInFlight = useRef(false);
+  const [sending, setSending] = useState(false);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => persist(draftKey, draft), [draftKey, draft]);
   useEffect(() => persist(recipientsKey, recipients), [recipientsKey, recipients]);
@@ -189,7 +203,10 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
   useEffect(() => {
     if (group && user) setOutbox((old) => remainingGroupOutbox(group.messages, old, user.id, groupId));
   }, [group?.messages, groupId, user?.id]);
-  const messages = mergeGroupMessages(older, group?.messages ?? []);
+  const messages = group?.messages ?? [];
+  const history = useOlderHistory({ queryKey: ['groups', groupId], page: group ? { ...group, olderCursor: group.olderCursor === undefined && messages[0]?.sequence > 1 ? String(messages[0].sequence) : group.olderCursor } : undefined,
+    load: historyPage, scroller: () => scroll.current, beforeLoad: () => { follow.current = false; setFollowing(false); },
+  });
   useEffect(() => {
     if (follow.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
   }, [group?.version, outbox, attachments]);
@@ -201,32 +218,6 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
     observer.observe(node);
     observer.observe(content); return () => observer.disconnect();
   }, [group?.id]);
-  async function loadOlderMessages() {
-    const node = scroll.current;
-    const before = messages[0]?.sequence;
-    if (!node || !before || before <= 1 || historyRequest.current !== undefined || exhaustedHistory.current === before) return;
-    const height = node.scrollHeight;
-    const top = node.scrollTop;
-    historyRequest.current = before;
-    follow.current = false;
-    setFollowing(false);
-    setLoadingOlder(true);
-    try {
-      const loaded = await groups.messages(groupId, before);
-      if (!mounted.current) return;
-      if (!loaded.some((message) => message.sequence < before)) exhaustedHistory.current = before;
-      setOlder((old) => mergeGroupMessages(loaded, old));
-      requestAnimationFrame(() => {
-        const current = scroll.current;
-        if (current) current.scrollTop = top + current.scrollHeight - height;
-        historyRequest.current = undefined;
-        if (mounted.current) setLoadingOlder(false);
-      });
-    } catch (cause) {
-      historyRequest.current = undefined;
-      if (mounted.current) { setLoadingOlder(false); setError(errorText(cause)); }
-    }
-  }
   async function action(operation: () => Promise<unknown>) {
     setBusy(true); setError(undefined);
     try { await operation(); await queryClient.invalidateQueries({ queryKey: ['groups'] }); }
@@ -234,22 +225,27 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
     finally { if (mounted.current) setBusy(false); }
   }
   function dispatch(pending: GroupPendingMessage) {
+    if (sendInFlight.current) return;
+    sendInFlight.current = true; setSending(true);
     setOutbox((old) => old.map((m) => m.id === pending.id ? { ...m, status: 'sending', error: undefined } : m));
     sendQueue.current = sendQueue.current.then(async () => {
       try {
         await groups.send(groupId, pending.request);
         if (mounted.current) setOutbox((old) => old.filter((m) => m.id !== pending.id));
         else persist(outboxKey, persisted<GroupPendingMessage[]>(outboxKey, []).filter((m) => m.id !== pending.id));
-        await queryClient.invalidateQueries({ queryKey: ['groups'] });
+        void queryClient.invalidateQueries({ queryKey: ['groups'] });
       } catch (cause) {
         const failed = { ...pending, status: 'failed' as const, error: errorText(cause) };
         if (mounted.current) setOutbox((old) => old.map((m) => m.id === pending.id ? failed : m));
         else persist(outboxKey, persisted<GroupPendingMessage[]>(outboxKey, []).map((m) => m.id === pending.id ? failed : m));
+      } finally {
+        sendInFlight.current = false;
+        if (mounted.current) setSending(false);
       }
     });
   }
   function send() {
-    if ((!draft.trim() && !attachments.length) || readingFiles) return;
+    if ((!draft.trim() && !attachments.length) || readingFiles || sendInFlight.current) return;
     const id = crypto.randomUUID();
     const pending: GroupPendingMessage = { id, createdAt: new Date().toISOString(), status: 'sending', request: {
       clientMessageId: id, content: draft.trim() || 'Please look at the attached files.', recipientIds: recipients.filter((id) => group?.memberIds.includes(id)),
@@ -289,6 +285,10 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
     ...outbox.map((pending) => ({ id: pending.id, rootId: pending.id, senderId: user?.id ?? '', senderType: 'user' as const, senderName: user?.username ?? 'You', role: 'user' as const, content: pending.request.content, createdAt: pending.createdAt, recipientIds: pending.request.recipientIds, attachments: pending.request.attachments, kind: 'message' as const, pending })),
   ];
   const codingChats = groupChildChats(group);
+  const chatTitle = (chatId: string, agentId: string) => {
+    const name = group.members.find((member) => member.id === agentId)?.profile.name.trim();
+    return spawnedChatTitle(chatList.data ?? [], chatId, name ? name + '’s chat' : undefined);
+  };
   const hasAgentMessage = (rootId: string, agentId: string) => chatMessages.some((message) => message.rootId === rootId && message.senderType === 'agent' && message.senderId === agentId);
   function workSummary(rootId: string, agentId?: string) {
     const tasks = group!.tasks.filter((task) => task.rootId === rootId && (agentId ? task.ownerId === agentId : !task.ownerId || !hasAgentMessage(rootId, task.ownerId)));
@@ -300,15 +300,14 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
         {task.status === 'completed' ? <Check className="size-3.5 shrink-0" /> : ['running', 'awaiting_review'].includes(task.status) ? <LoaderCircle className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none" /> : <ListTodo className="size-3.5 shrink-0" />}
         <span><strong>{task.title}</strong><small>{agentName(task.ownerId)} · {taskLabels[task.status]}</small></span>
       </button>)}
-      {chats.map((execution) => <button type="button" className="group-task-update" key={execution.id} onClick={() => onOpenChat(execution.chatId!)}><MessageSquare className="size-3.5 shrink-0" /><span>Open {agentName(execution.agentId)}’s chat</span></button>)}
+      {chats.map((execution) => <button type="button" className="group-task-update" key={execution.id} onClick={() => onOpenChat(execution.chatId!)}><MessageSquare className="size-3.5 shrink-0" /><span>{chatTitle(execution.chatId!, execution.agentId)}</span></button>)}
       {executions.filter((execution) => execution.error && (!execution.taskId || group!.tasks.some((task) => task.id === execution.taskId && ['failed', 'blocked', 'interrupted'].includes(task.status)))).map((execution) => <p className="px-2 text-xs text-destructive" key={execution.id}>{agentName(execution.agentId)}: {execution.error}</p>)}
     </div>;
   }
-  const control = () => void action(() => group.stopped || limited ? groups.resume(groupId) : groups.stop(groupId));
+  const resume = () => void action(() => groups.resume(groupId));
   const taggedMembers = group.members.filter((member) => recipients.includes(member.id));
   const recipientAvatars = taggedMembers.length ? taggedMembers : group.members;
   const recipientTitle = taggedMembers.length ? 'Tagged agents: ' + taggedMembers.map((member) => member.profile.name).join(', ') : 'Tag agents · Leader: ' + leader.profile.name;
-  const pendingDeliveries = group.deliveries.filter((delivery) => ['queued', 'processing'].includes(delivery.status));
   const header = <header className="group-chat-header">
     <button type="button" className="group-chat-identity" aria-label="Participants and tasks" onClick={(event) => openDetails('participants', event.currentTarget)}>
       <GroupAvatar group={group} className="size-6 rounded-md" /><h1>{group.name}</h1><ChevronDown className="size-3 shrink-0 text-muted-foreground" />
@@ -321,11 +320,13 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
       const node = scroll.current; if (node) {
         follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 100;
         setFollowing(follow.current);
-        if (node.scrollTop <= 32) void loadOlderMessages();
+        if (node.scrollTop <= 32) void history.loadOlder();
       }
     }}>
-      {loadingOlder && <div className="pointer-events-none absolute left-1/2 top-2 z-10 flex h-7 -translate-x-1/2 items-center gap-2 rounded-full bg-background/90 px-3 text-[11px] text-muted-foreground shadow-sm backdrop-blur" role="status" aria-live="polite"><LoaderCircle className="size-3 animate-spin motion-reduce:animate-none" />Loading earlier messages…</div>}
+      {history.loading && <div className="pointer-events-none absolute left-1/2 top-2 z-10 flex h-7 -translate-x-1/2 items-center gap-2 rounded-full bg-background/90 px-3 text-[11px] text-muted-foreground shadow-sm backdrop-blur" role="status" aria-live="polite"><LoaderCircle className="size-3 animate-spin motion-reduce:animate-none" />Loading earlier messages…</div>}
       <div className="session-conversation-column mx-auto">
+        {history.hasOlder && <button type="button" className="mb-3 text-xs text-muted-foreground underline" disabled={history.loading} onClick={() => void history.loadOlder()}>Load earlier messages</button>}
+        {history.error && <p role="alert" className="text-xs text-destructive">{history.error} <button type="button" onClick={() => void history.loadOlder()}>Retry earlier messages</button></p>}
         {!chatMessages.length && <div className="group-chat-empty"><h2>What should we work on?</h2><p>Talk to {leader.profile.name}, your group leader. They’ll delegate work and report results. You can also ask to assign a project, change roles, or add and remove agents here.</p>
           <div className="group-chat-suggestions">{['Plan a project together', 'Split up an implementation', 'Declare the team’s roles'].map((prompt) => <button key={prompt} type="button" onClick={() => { setDraft(prompt); textarea.current?.focus(); }}>{prompt}</button>)}</div>
         </div>}
@@ -334,7 +335,7 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
           const member = group.members.find((peer) => peer.id === message.senderId);
           const lastAgentMessage = message.senderType === 'agent' && !chatMessages.slice(index + 1).some((candidate) => candidate.rootId === message.rootId && candidate.senderType === 'agent' && candidate.senderId === message.senderId);
           const lastRootMessage = !chatMessages.slice(index + 1).some((candidate) => candidate.rootId === message.rootId);
-          return <div className={cn('min-w-0', boundary ? 'mt-4 first:mt-0' : 'mt-1')} key={message.id}>
+          return <div className={cn('min-w-0', boundary ? 'mt-4 first:mt-0' : 'mt-1')} key={message.id} data-history-id={message.id}>
             {showTimestamp && <time className="mb-3 mt-6 block text-center text-[12px] text-muted-foreground" dateTime={message.createdAt}>{new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(message.createdAt))}</time>}
             <article className="group/message min-w-0" aria-label={message.role === 'user' ? 'Your message' : message.senderName + ' reply'} tabIndex={showSentTime ? 0 : undefined}>
               {message.role !== 'user' && boundary && <div className="group-message-sender"><AgentAvatar name={message.senderName} avatar={member?.profile.avatar} className="size-5" /><span>{message.senderName}</span>{message.kind === 'request' && <small>asked a peer</small>}</div>}
@@ -362,7 +363,7 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
     <div className="session-composer relative shrink-0">
       {!following && <Button type="button" className="absolute -top-9 right-0 z-20 shrink-0 rounded-full shadow-lg" variant="secondary" size="icon-sm" aria-label="Scroll to bottom" title="Scroll to bottom" onClick={() => { if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; follow.current = true; setFollowing(true); }}><ArrowDown /></Button>}
       <div className="session-conversation-column mx-auto">
-      {(group.stopped || limited) && <div className="group-chat-notice"><p>{limited ? 'Exchange limit reached. Continue when ready.' : group.stopReason === 'restart' ? 'Interrupted by a server restart. Review progress, then resume.' : 'Group stopped. Your messages and work are saved.'}</p><button type="button" disabled={busy || stopping} onClick={control}><Play className="size-3" />{limited ? 'Continue' : 'Resume'}</button></div>}
+      {(group.stopped || limited) && <div className="group-chat-notice"><p>{limited ? 'Exchange limit reached. Continue when ready.' : group.stopReason === 'restart' ? 'Interrupted by a server restart. Review progress, then resume.' : 'Group stopped. Your messages and work are saved.'}</p><button type="button" disabled={busy || stopping} onClick={resume}><Play className="size-3" />{limited ? 'Continue' : 'Resume'}</button></div>}
       {(error || state.error) && <p role="alert" className="mb-3 rounded-xl border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive">{error ?? state.error?.message}</p>}
       {attachments.length > 0 && <div className="mb-2"><AssistantAttachmentList attachments={attachments} onRemove={(id) => { const next = attachmentList.current.filter((file) => file.id !== id); attachmentList.current = next; setAttachments(next); }} /></div>}
       {readingFiles && <p role="status" className="mb-2 text-xs text-muted-foreground">Attaching files…</p>}
@@ -373,11 +374,10 @@ function GroupConversation({ groupId, headerTarget, onOpenChat }: { groupId: str
         <textarea ref={textarea} aria-label="Message group" className="block max-h-40 min-h-7 min-w-0 flex-1 resize-none bg-transparent py-1 text-[14px] leading-5 outline-none placeholder:text-muted-foreground" rows={1} maxLength={32000} placeholder={taggedMembers.length ? 'Message selected agents' : 'Message ' + leader.profile.name} value={draft} onChange={(event) => setDraft(event.target.value)} onPaste={(event) => {
           const images = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/')); if (images.length) { event.preventDefault(); addFiles(images); }
         }} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send(); } }} />
-        {!group.stopped && (running.length > 0 || pendingDeliveries.length > 0) && <button type="button" className="grid size-8 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent disabled:opacity-40" aria-label="Stop group" disabled={busy} onClick={control}><Square className="size-3 fill-current" /></button>}
-        <button type="submit" className="assistant-message-send grid size-8 shrink-0 place-items-center rounded-full text-white disabled:opacity-40" aria-label="Send message" disabled={(!draft.trim() && !attachments.length) || readingFiles}><ArrowUp className="size-4" /></button>
+        <button type="submit" className="assistant-message-send grid size-8 shrink-0 place-items-center rounded-full text-white disabled:opacity-40" aria-label="Send message" disabled={(!draft.trim() && !attachments.length) || readingFiles || sending}><ArrowUp className="size-4" /></button>
       </form>
     </div></div>
-    <GroupDetails group={group} open={drawer} onOpenChange={setDrawer} tab={detailTab} onTabChange={setDetailTab} busy={busy} error={error} opener={opener} onOpenChat={onOpenChat} onDelete={() => setDeleting(true)} onControl={control} onEdit={() => setEditing(true)} onCreateTask={() => setCreatingTask(true)} onEditTask={setEditingTask} onTaskAction={(task, next) => void action(() => groups.taskAction(groupId, task.id, next))} />
+    <GroupDetails group={group} open={drawer} onOpenChange={setDrawer} tab={detailTab} onTabChange={setDetailTab} busy={busy} error={error} opener={opener} onOpenChat={onOpenChat} onDelete={() => setDeleting(true)} onResume={resume} chats={chatList.data ?? []} onEdit={() => setEditing(true)} onCreateTask={() => setCreatingTask(true)} onEditTask={setEditingTask} onTaskAction={(task, next) => void action(() => groups.taskAction(groupId, task.id, next))} />
     <DeleteGroupDialog group={group} open={deleting} onOpenChange={setDeleting} />
     <GroupDialog open={editing} onOpenChange={setEditing} initial={group} />
     <AssignmentDialog key={editingTask?.id ?? 'new'} group={group} initial={editingTask} open={creatingTask || Boolean(editingTask)} onOpenChange={(open) => { if (!open) { setCreatingTask(false); setEditingTask(undefined); } }} onSave={async (body) => {

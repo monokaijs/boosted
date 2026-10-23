@@ -73,6 +73,14 @@ for line in sys.stdin:
                 path = Path(params.get("path") or home / "sessions" / (params["threadId"] + ".json"))
                 threads[params["threadId"]] = json.loads(path.read_text())
             result = response(threads[params["threadId"]])
+        elif method == "thread/items/list":
+            thread = threads[params["threadId"]]
+            entries = [{"item": item, "turnId": turn["id"], "startedAtMs": 1700000000000} for turn in reversed(thread["turns"]) for item in reversed(turn["items"])]
+            cursor = params.get("cursor")
+            if cursor:
+                entries = entries[next(i for i,e in enumerate(entries) if e["item"]["id"] == cursor) + 1:]
+            limit = params.get("limit", 50)
+            result = {"data": entries[:limit], "nextCursor": entries[limit-1]["item"]["id"] if len(entries) > limit else None}
         elif method == "thread/list":
             result = {"data": [thread for thread in threads.values() if not thread.get("archived")]}
         elif method == "thread/loaded/list":

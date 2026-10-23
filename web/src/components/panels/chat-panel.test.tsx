@@ -9,7 +9,7 @@ import { applyCodexEvent } from "@/lib/codex-chat-state";
 import { useWorkspaceStore } from "@/lib/workspace-state";
 import type { Task, TaskEvent } from "@/lib/types";
 
-const api = vi.hoisted(() => ({ profileId: "test", featureRequest: vi.fn(), toggleMarkdownCheckbox: vi.fn(), projects: vi.fn(), projectBranches: vi.fn(), projectBranch: vi.fn(), switchProjectBranch: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexApprovals: vi.fn(), codexAttachment: vi.fn(), uploadCodexAttachment: vi.fn(), workspaceFile: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), taskSourceActivity: vi.fn(), taskSourceAsset: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn(), answerTaskQuestions: vi.fn() }));
+const api = vi.hoisted(() => ({ profileId: "test", featureRequest: vi.fn(), toggleMarkdownCheckbox: vi.fn(), projects: vi.fn(), projectBranches: vi.fn(), projectBranch: vi.fn(), switchProjectBranch: vi.fn(), codexOptions: vi.fn(), threadCodexOptions: vi.fn(), codexChat: vi.fn(), codexToolDetail: vi.fn(), codexApprovals: vi.fn(), codexAttachment: vi.fn(), uploadCodexAttachment: vi.fn(), workspaceFile: vi.fn(), createCodexChat: vi.fn(), sendCodexMessage: vi.fn(), task: vi.fn(), taskEvents: vi.fn(), taskHistory: vi.fn(), taskEventDetail: vi.fn(), taskSourceActivity: vi.fn(), taskSourceAsset: vi.fn(), startTaskPlan: vi.fn(), approvePlan: vi.fn(), sendMessage: vi.fn(), answerTaskQuestions: vi.fn() }));
 const openExternalUrl = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/api", () => ({ api }));
 vi.mock("@/lib/api-context", () => ({ useBoostedApiClient: () => api }));
@@ -45,6 +45,7 @@ beforeEach(() => {
   api.sendCodexMessage.mockResolvedValue({ threadId: "chat-a", turnId: "turn-a" });
   api.task.mockResolvedValue(task);
   api.taskEvents.mockResolvedValue([]);
+  api.taskHistory.mockImplementation(async () => ({ messages: await api.taskEvents(), olderCursor:null }));
   api.taskSourceActivity.mockResolvedValue({ items: [], truncated: false });
   api.taskSourceAsset.mockResolvedValue({ blob: new Blob(["image"], { type: "image/png" }), name: "image.png" });
   api.startTaskPlan.mockResolvedValue(task);
@@ -365,7 +366,7 @@ describe("message entrance", () => {
     const assistant = screen.getByText("Assistant message").closest("article");
     expect(user).toHaveClass("chat-message-enter");
     expect(assistant).toHaveClass("chat-message-enter");
-    act(() => client.setQueryData(["events", task.id], [...messages.slice(0, 1), { ...messages[1], payload: { text: "Updated assistant message" } }, { ...messages[0], id: 3, payload: { text: "Next message" } }]));
+    act(() => client.setQueryData(["events", task.id], { messages:[...messages.slice(0, 1), { ...messages[1], payload: { text: "Updated assistant message" } }, { ...messages[0], id: 3, payload: { text: "Next message" } }] }));
     expect((await screen.findByText("Updated assistant message")).closest("article")).toBe(assistant);
     expect(screen.getByText("User message").closest("article")).toBe(user);
     expect(screen.getByText("Next message").closest("article")).toHaveClass("chat-message-enter");
@@ -654,7 +655,11 @@ describe("Codex attachments", () => {
     });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const result = render(<QueryClientProvider client={client}><CodexChatPanel threadId="chat-a" /></QueryClientProvider>);
+    const preview = await screen.findByRole("button", { name: "View saved.png" });
+    expect(api.workspaceFile).not.toHaveBeenCalled();
+    fireEvent.click(preview);
     expect(await screen.findByRole("img", { name: "saved.png" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(api.workspaceFile).toHaveBeenCalledWith({ kind: "codex", id: "chat-a" }, "/uploads/saved.png");
     act(() => applyCodexEvent(client, { threadId: "chat-a", turnId: "turn", method: "item/completed", message: { id: "live", role: "assistant", kind: "tool", content: "**Screenshot**", attachments: [{ name: "live.png", mimeType: "image/png", path: "/uploads/live.png" }] } }));
     fireEvent.click(await screen.findByRole("button", { name: /Worked for \d+s/ }));
@@ -671,11 +676,12 @@ describe("Codex attachments", () => {
       messages: [{ id: "saved", role: "user", kind: "message", content: "Review this image", attachments: [{ name: "saved.png", mimeType: "image/png", path: "/uploads/saved.png" }] }],
     });
     renderPanel(<CodexChatPanel threadId="chat-a" />);
-    const image = await screen.findByRole("img", { name: "saved.png" });
+    const image = await screen.findByRole("button", { name: "View saved.png" });
+    expect(api.workspaceFile).not.toHaveBeenCalled();
     const bubble = screen.getByText("Review this image").closest(".selectable-text");
     expect(bubble).toBeInTheDocument();
     expect(bubble).not.toContainElement(image);
-    expect(image).toHaveClass("h-16", "w-20", "object-cover");
+    expect(image.closest('[aria-label="Message attachments"]')).toBeInTheDocument();
   });
 
   it.each(["click", "keyboard", "submit"])("moves an uploaded image immediately from the draft into the outgoing message sent by %s", async (method) => {
@@ -752,4 +758,34 @@ it("persists task descriptions, plans and existing messages without sending or n
   view.unmount();
   renderPanel(<TaskPanel />);
   for (const name of ["Description", "Plan", "Message"]) expect(await screen.findByRole("checkbox", { name })).toBeChecked();
+});
+
+
+it("loads historical file diffs on demand through the same tool cache", async () => {
+  api.codexChat.mockResolvedValueOnce({ chat: { id: "chat-a", title: "Changes", status: "idle", cwd: "/repo" }, messages: [
+    { id: "file-tool", role: "assistant", kind: "tool", content: "**Files changed**", detailRevision: "revision", changes: [{ path: "file.ts", additions: 1, deletions: 1 }] },
+    { id: "answer", role: "assistant", kind: "message", content: "Done" },
+  ] });
+  api.codexToolDetail.mockResolvedValue({ content: "Full file details", changes: [{ path: "file.ts", diff: "-old\n+new" }] });
+  renderPanel(<CodexChatPanel threadId="chat-a" />);
+  const file = await screen.findByText("file.ts");
+  expect(api.codexToolDetail).not.toHaveBeenCalled();
+  fireEvent.click(file);
+  await waitFor(() => expect(useAppStore.getState().gitDiffTarget).toEqual({ path: "file.ts", staged: false, diff: "-old\n+new" }));
+  expect(api.codexToolDetail).toHaveBeenCalledTimes(1);
+  fireEvent.click(file); await act(async () => { await Promise.resolve(); });
+  expect(api.codexToolDetail).toHaveBeenCalledTimes(1);
+});
+
+it("lazy-loads legacy task command events only when expanded, with retry and caching", async () => {
+  api.taskEvents.mockResolvedValue([{ id: 99, taskId: task.id, kind: "command", payload: { label: "Command", detailRevision: "tool-revision", exitCode: 0 }, createdAt: "now" }]);
+  api.taskEventDetail.mockRejectedValueOnce(new Error("Offline")).mockResolvedValue({ id:99, taskId: task.id, kind:"command", payload:{ command:"full command", output:"Full legacy output" }, createdAt:"now" });
+  renderPanel(<TaskPanel />);
+  const command = await screen.findByRole("button", { name: /Command/ });
+  expect(api.taskEventDetail).not.toHaveBeenCalled();
+  fireEvent.click(command); await screen.findByText("Offline");
+  fireEvent.click(screen.getByText("Retry tool details")); await screen.findByText("Full legacy output");
+  expect(api.taskEventDetail).toHaveBeenCalledTimes(2);
+  fireEvent.click(command); fireEvent.click(command); await act(async()=>{await Promise.resolve();});
+  expect(api.taskEventDetail).toHaveBeenCalledTimes(2);
 });

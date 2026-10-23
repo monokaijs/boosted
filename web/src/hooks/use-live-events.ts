@@ -1,3 +1,4 @@
+import { mergeHistory } from "@/lib/history";
 import { forgetGroup } from "@/features/groups/lifecycle";
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -50,7 +51,7 @@ export function useLiveEvents() {
             const current = queryClient.getQueryData<AssistantState>(key);
             if (current && shouldAcceptAssistantState(current, next, next.id)) {
               void queryClient.cancelQueries({ queryKey: key, exact: true });
-              queryClient.setQueryData(key, next);
+              queryClient.setQueryData(key, { ...next, messages: mergeHistory(current.messages, next.messages), olderCursor: current.olderCursor, historyAnchor: current.historyAnchor });
             }
             queryClient.setQueryData<AssistantSummary[]>(["agents"], (agents) => agents?.map((current) =>
               current.id === next.id && shouldAcceptAssistantState(current, next, next.id) ? assistantSummary(next) : current));

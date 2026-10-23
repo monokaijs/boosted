@@ -15,6 +15,7 @@ mod git;
 mod gitlab_connections;
 mod group_models;
 mod groups;
+mod history;
 mod integrations;
 mod markdown_checkboxes;
 mod models;
@@ -173,9 +174,15 @@ struct AppState {
 
 impl AppState {
     fn emit(&self, topic: impl Into<String>, data: Value) {
+        let topic = topic.into();
+        let data = if topic == "assistant.updated" {
+            history::agent_view(&data, None).unwrap_or(Value::Null)
+        } else {
+            data
+        };
         let _ = self.live.send(LiveEvent {
             sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
-            topic: topic.into(),
+            topic,
             data,
         });
     }
@@ -275,33 +282,8 @@ pub async fn run_with_updater(
         Some(local_bind) => Some((local_bind, tokio::net::TcpListener::bind(local_bind).await?)),
         None => None,
     };
-    let codex = CodexManager::new().await;
-    let uploads_dir = config.data_dir.join("uploads");
-    tokio::fs::create_dir_all(&uploads_dir).await?;
-    let (live, _) = broadcast::channel(4096);
-    let agents = agents::AgentManager::load(&db).await?;
-    let agent_integrations = agent_integrations::AgentIntegrationManager::new(
-        config.data_dir.join("integration-secrets"),
-    )
-    .await?;
-    let state = AppState {
-        agents,
-        agent_integrations,
-        groups: groups::GroupManager::default(),
-        providers: providers::ProviderManager::new(
-            config.data_dir.join("providers/codex/accounts"),
-        ),
-        db,
-        codex,
-        live,
-        sequence: Arc::new(AtomicU64::new(1)),
-        pending_inputs: Arc::new(RwLock::new(HashMap::new())),
-        active_codex_turns: Arc::new(RwLock::new(HashMap::new())),
-        started_codex_threads: Arc::new(RwLock::new(HashMap::new())),
-        uploads_dir,
-        worktrees_dir: config.data_dir.join("worktrees"),
-        updater,
-    };
+    let state =
+        initialize_app_state(&config.data_dir, db, CodexManager::new().await, updater).await?;
     tokio::spawn(agents::scheduler(state.clone()));
     let scheduler_state = state.clone();
     tokio::spawn(async move {
@@ -335,6 +317,46 @@ pub async fn run_with_updater(
     )
     .await?;
     Ok(())
+}
+
+// Shared by production startup and restart regressions. No schedulers or HTTP
+// handlers may use the new state until this initialization has completed.
+async fn initialize_app_state(
+    data_dir: &Path,
+    db: Database,
+    codex: CodexManager,
+    updater: updater::ServerUpdater,
+) -> AppResult<AppState> {
+    // Freshness generations come from the process-local sequence below. Cached
+    // UI details are disposable: a previous process's generation must never
+    // suppress current provider data after the sequence restarts at 1.
+    sqlx::query("DELETE FROM feature_documents WHERE namespace='chat-ui-items'")
+        .execute(&db.pool)
+        .await?;
+    let uploads_dir = data_dir.join("uploads");
+    tokio::fs::create_dir_all(&uploads_dir).await?;
+    let (live, _) = broadcast::channel(4096);
+    let agents = agents::AgentManager::load(&db).await?;
+    let agent_integrations =
+        agent_integrations::AgentIntegrationManager::new(data_dir.join("integration-secrets"))
+            .await?;
+    let state = AppState {
+        agents,
+        agent_integrations,
+        groups: groups::GroupManager::default(),
+        providers: providers::ProviderManager::new(data_dir.join("providers/codex/accounts")),
+        db,
+        codex,
+        live,
+        sequence: Arc::new(AtomicU64::new(1)),
+        pending_inputs: Arc::new(RwLock::new(HashMap::new())),
+        active_codex_turns: Arc::new(RwLock::new(HashMap::new())),
+        started_codex_threads: Arc::new(RwLock::new(HashMap::new())),
+        uploads_dir,
+        worktrees_dir: data_dir.join("worktrees"),
+        updater,
+    };
+    Ok(state)
 }
 
 fn bind_covers(bind: SocketAddr, local_bind: SocketAddr) -> bool {
@@ -390,6 +412,10 @@ fn router(
                 .patch(groups::update)
                 .delete(groups::delete),
         )
+        .route(
+            "/groups/{id}/messages/{message}/attachments/{attachment}",
+            get(groups::download_attachment),
+        )
         .route("/groups/{id}/usage", get(agent_usage::read_group_usage))
         .route("/groups/{id}/checkboxes", patch(groups::checkbox))
         .route(
@@ -412,6 +438,10 @@ fn router(
         .route("/groups/{id}/stop", post(groups::stop))
         .route("/groups/{id}/resume", post(groups::resume))
         .route("/agents/{id}", get(agents::read_agent))
+        .route(
+            "/agents/{id}/messages/{message}/attachments/{attachment}",
+            get(agents::download_attachment),
+        )
         .route(
             "/agents/{id}/integrations",
             get(agent_integrations::list).post(agent_integrations::create),
@@ -487,7 +517,15 @@ fn router(
         )
         .route("/codex/chats/{id}", get(read_codex_chat))
         .route("/codex/chats/{id}/file", get(download_codex_file))
-        .route("/codex/chats/{id}/messages", post(send_codex_message))
+        .route(
+            "/codex/chats/{id}/messages",
+            get(coding_history).post(send_codex_message),
+        )
+        .route("/codex/chats/{id}/items/{item}", get(coding_detail))
+        .route(
+            "/codex/chats/{id}/items/{item}/attachments/{attachment}",
+            get(coding_attachment),
+        )
         .route("/codex/chats/{id}/stop", post(stop_codex_turn))
         .route(
             "/codex/chats/{id}/approvals",
@@ -549,6 +587,8 @@ fn router(
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/{id}", get(get_task))
         .route("/tasks/{id}/events", get(task_events))
+        .route("/tasks/{id}/history", get(task_history))
+        .route("/tasks/{id}/events/{event}", get(task_event_detail))
         .route("/tasks/{id}/source/activity", get(task_source_activity))
         .route("/tasks/{id}/source/asset", get(task_source_asset))
         .route(
@@ -1625,12 +1665,9 @@ async fn read_codex_chat(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> AppResult<Json<CodexChatThread>> {
-    let result = providers::client_for_thread(&state, &id)
-        .await?
-        .request(
-            "thread/read",
-            json!({ "threadId": id, "includeTurns": true }),
-        )
+    let client = providers::client_for_thread(&state, &id).await?;
+    let result = client
+        .request("thread/read", json!({"threadId":id,"includeTurns":false}))
         .await?;
     let thread = result
         .get("thread")
@@ -1644,11 +1681,148 @@ async fn read_codex_chat(
         }
     }
     refresh_codex_chat_activity(&state, std::slice::from_mut(&mut chat)).await?;
+    let (messages, older_cursor) = coding_page(&state, &id, None).await?;
     Ok(Json(CodexChatThread {
         runtime_defaults,
         chat,
-        messages: codex_messages(thread),
+        messages,
+        older_cursor,
     }))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodingPage {
+    messages: Vec<CodexChatMessage>,
+    older_cursor: Option<String>,
+}
+async fn coding_history(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<history::HistoryQuery>,
+) -> AppResult<Json<CodingPage>> {
+    let (messages, older_cursor) = coding_page(&state, &id, query.before).await?;
+    Ok(Json(CodingPage {
+        messages,
+        older_cursor,
+    }))
+}
+async fn coding_page(
+    state: &AppState,
+    id: &str,
+    cursor: Option<String>,
+) -> AppResult<(Vec<CodexChatMessage>, Option<String>)> {
+    let client = providers::client_for_thread(state, id).await?;
+    // No full-history fallback: older providers must upgrade to item pagination.
+    let freshness = state.sequence.load(Ordering::Relaxed);
+    let page = client.request("thread/items/list", json!({"threadId":id,"sortDirection":"desc","limit":history::PAGE_SIZE,"cursor":cursor})).await?;
+    let entries = page["data"].as_array().ok_or_else(|| {
+        AppError::Internal("Provider returned no history page; update your coding CLI".into())
+    })?;
+    let mut messages = Vec::new();
+    for entry in entries.iter().rev() {
+        let item = &entry["item"];
+        let created_at = entry["startedAtMs"]
+            .as_i64()
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|t| t.to_rfc3339());
+        if let Some(message) = coding_ui_message(state, id, item, created_at, "", freshness).await?
+        {
+            messages.push(message);
+        }
+    }
+    Ok((messages, page["nextCursor"].as_str().map(str::to_owned)))
+}
+async fn coding_ui_message(
+    state: &AppState,
+    thread: &str,
+    item: &Value,
+    created_at: Option<String>,
+    client_id: &str,
+    freshness: u64,
+) -> AppResult<Option<CodexChatMessage>> {
+    let Some(mut message) = codex_live_item_message(item, client_id) else {
+        return Ok(None);
+    };
+    message.created_at = created_at;
+    // Detail is cached server-side, never included in a summary response. The
+    // source provider transcript remains authoritative for execution/context.
+    let cache_id = serde_json::to_string(&(thread, &message.id))?;
+    let record = json!({"id":cache_id,"threadId":thread,"item":item,"freshness":freshness});
+    let written = sqlx::query("INSERT INTO feature_documents(namespace,id,content_json) VALUES('chat-ui-items',?,?) ON CONFLICT(namespace,id) DO UPDATE SET content_json=excluded.content_json WHERE COALESCE(json_extract(feature_documents.content_json,'$.freshness'),0) <= json_extract(excluded.content_json,'$.freshness')")
+        .bind(&cache_id).bind(record.to_string()).execute(&state.db.pool).await?.rows_affected();
+    // A provider page captured before a live update must not overwrite its detail.
+    let newer = if written == 0 {
+        Some(providers::document(&state.db, "chat-ui-items", &cache_id).await?)
+    } else {
+        None
+    };
+    let item = newer.as_ref().map(|r| &r["item"]).unwrap_or(item);
+    if newer.is_some() {
+        if let Some(latest) = codex_live_item_message(item, client_id) {
+            let created_at = message.created_at.take();
+            message = latest;
+            message.created_at = created_at;
+        }
+    }
+    let mut message = history::coding_summary(message, item);
+    for (index, attachment) in message.attachments.iter_mut().enumerate() {
+        if attachment.path.is_none() && attachment.url.is_none() {
+            attachment.url = Some(format!(
+                "boosted-attachment:/codex/chats/{}/items/{}/attachments/{index}",
+                history::encode(thread),
+                history::encode(&message.id)
+            ));
+        }
+    }
+    Ok(Some(message))
+}
+async fn coding_detail(
+    State(state): State<AppState>,
+    AxumPath((thread, item)): AxumPath<(String, String)>,
+) -> AppResult<Json<CodexChatMessage>> {
+    let record = providers::document(
+        &state.db,
+        "chat-ui-items",
+        &serde_json::to_string(&(&thread, &item))?,
+    )
+    .await?;
+    let mut message = codex_item_message(&record["item"], None, &item).ok_or_else(|| {
+        AppError::NotFound("Tool detail unavailable; refresh the conversation and retry".into())
+    })?;
+    // Binary attachments are always served separately.
+    for (index, attachment) in message.attachments.iter_mut().enumerate() {
+        if attachment
+            .url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("data:"))
+        {
+            attachment.url = Some(format!(
+                "boosted-attachment:/codex/chats/{}/items/{}/attachments/{index}",
+                history::encode(&thread),
+                history::encode(&item)
+            ));
+        }
+    }
+    Ok(Json(message))
+}
+async fn coding_attachment(
+    State(state): State<AppState>,
+    AxumPath((thread, item, index)): AxumPath<(String, String, usize)>,
+) -> AppResult<Json<Value>> {
+    let record = providers::document(
+        &state.db,
+        "chat-ui-items",
+        &serde_json::to_string(&(&thread, &item))?,
+    )
+    .await?;
+    let message = codex_item_message(&record["item"], None, &item)
+        .ok_or_else(|| AppError::NotFound("Attachment unavailable".into()))?;
+    let attachment = message
+        .attachments
+        .get(index)
+        .ok_or_else(|| AppError::NotFound("Attachment unavailable".into()))?;
+    Ok(Json(json!({"dataUrl":attachment.url})))
 }
 
 async fn download_codex_file(
@@ -2095,9 +2269,21 @@ async fn send_codex_message_locked(
                     } else {
                         ""
                     };
-                    let normalized = params
-                        .get("item")
-                        .and_then(|item| codex_live_item_message(item, client_message_id));
+                    let normalized = if let Some(item) = params.get("item") {
+                        coding_ui_message(
+                            &forward_state,
+                            &forward_thread_id,
+                            item,
+                            None,
+                            client_message_id,
+                            forward_state.sequence.load(Ordering::Relaxed) + 1,
+                        )
+                        .await
+                        .ok()
+                        .flatten()
+                    } else {
+                        None
+                    };
                     let client_id = normalized
                         .as_ref()
                         .filter(|message| message.role == "user")
@@ -2106,14 +2292,26 @@ async fn send_codex_message_locked(
                 }
                 "item/commandExecution/outputDelta" => {
                     let id = params["itemId"].as_str().unwrap_or_default();
-                    let normalized = live_items.get_mut(id).and_then(|item| {
+                    let normalized = if let Some(item) = live_items.get_mut(id) {
                         let output = item["aggregatedOutput"].as_str().unwrap_or_default();
                         item["aggregatedOutput"] = json!(format!(
                             "{output}{}",
                             params["delta"].as_str().unwrap_or_default()
                         ));
-                        codex_live_item_message(item, "")
-                    });
+                        coding_ui_message(
+                            &forward_state,
+                            &forward_thread_id,
+                            item,
+                            None,
+                            "",
+                            forward_state.sequence.load(Ordering::Relaxed) + 1,
+                        )
+                        .await
+                        .ok()
+                        .flatten()
+                    } else {
+                        None
+                    };
                     json!({"threadId":forward_thread_id,"turnId":forward_turn_id,"method":method,"message":normalized})
                 }
                 "item/agentMessage/delta"
@@ -2868,7 +3066,73 @@ async fn task_events(
     Query(query): Query<EventQuery>,
 ) -> AppResult<Json<Vec<TaskEvent>>> {
     state.db.task(&id).await?;
-    Ok(Json(state.db.events(&id, query.after).await?))
+    let after = (query.after > 0).then_some(query.after);
+    let mut events = state
+        .db
+        .event_page(&id, i64::MAX, after, history::PAGE_SIZE)
+        .await?;
+    if after.is_none() {
+        events.reverse();
+    }
+    Ok(Json(
+        events
+            .into_iter()
+            .map(history::task_event_summary)
+            .collect(),
+    ))
+}
+
+async fn task_history(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<history::HistoryQuery>,
+) -> AppResult<Json<Value>> {
+    let task = state.db.task(&id).await?;
+    let before = query
+        .before
+        .as_deref()
+        .map(str::parse::<i64>)
+        .transpose()
+        .map_err(|_| AppError::BadRequest("Invalid history cursor".into()))?
+        .unwrap_or(i64::MAX);
+    let mut events = state
+        .db
+        .event_page(&id, before, None, history::PAGE_SIZE + 1)
+        .await?;
+    let has_older = events.len() > history::PAGE_SIZE;
+    events.truncate(history::PAGE_SIZE);
+    events.reverse();
+    let older_cursor = if has_older {
+        events.first().map(|e| e.id.to_string())
+    } else {
+        None
+    };
+    let messages: Vec<_> = events
+        .into_iter()
+        .map(history::task_event_summary)
+        .collect();
+    // Questions are control state and must stay available beyond the view window.
+    let pending_question = if task.status == "needs_input" {
+        let id:Option<i64> = sqlx::query_scalar("SELECT id FROM task_events WHERE task_id=? AND json_array_length(json_extract(payload_json,'$.questions'))>0 ORDER BY id DESC LIMIT 1").bind(&id).fetch_optional(&state.db.pool).await?;
+        match id {
+            Some(event) => Some(history::task_event_summary(
+                state.db.event_detail(&task.id, event).await?,
+            )),
+            None => None,
+        }
+    } else {
+        None
+    };
+    Ok(Json(
+        json!({"messages":messages,"olderCursor":older_cursor,"pendingQuestion":pending_question}),
+    ))
+}
+async fn task_event_detail(
+    State(state): State<AppState>,
+    AxumPath((task, event)): AxumPath<(String, i64)>,
+) -> AppResult<Json<TaskEvent>> {
+    state.db.task(&task).await?;
+    Ok(Json(state.db.event_detail(&task, event).await?))
 }
 
 async fn task_source_activity(
@@ -4102,6 +4366,186 @@ mod project_git_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ui_history_production_restart_discards_previous_process_freshness() {
+        let root = tempfile::tempdir().unwrap();
+        let database_path = root.path().join("boosted.sqlite3");
+        let db = Database::connect(&database_path).await.unwrap();
+        let state = initialize_app_state(
+            root.path(),
+            db,
+            CodexManager::test_unavailable(),
+            updater::ServerUpdater::disabled("Test"),
+        )
+        .await
+        .unwrap();
+        let durable_chat =
+            json!({"id":"chat","title":"Preserve provider metadata","accountId":null});
+        providers::save_document(&state.db, "provider-chats", &durable_chat)
+            .await
+            .unwrap();
+        let old_items = [
+            json!({"id":"user","type":"userMessage","content":[{"type":"text","text":"old user text"}]}),
+            json!({"id":"assistant","type":"agentMessage","text":"old assistant text"}),
+            json!({"id":"tool","type":"dynamicToolCall","tool":"read_file","status":"inProgress","arguments":{"path":"old.txt"},"contentItems":[{"type":"text","text":"old tool output"},{"type":"image","name":"old.png","mimeType":"image/png","url":"data:image/png;base64,T0xE"}]}),
+        ];
+        state.sequence.store(10_000, Ordering::Relaxed);
+        let mut old_revision = None;
+        for item in &old_items {
+            let message = coding_ui_message(
+                &state,
+                "chat",
+                item,
+                None,
+                "",
+                state.sequence.load(Ordering::Relaxed),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            if item["id"] == "tool" {
+                old_revision = message.detail_revision;
+            }
+        }
+        let count:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM feature_documents WHERE namespace='chat-ui-items' AND json_extract(content_json,'$.freshness')=10000").fetch_one(&state.db.pool).await.unwrap();
+        assert_eq!(count, 3);
+        state.db.pool.close().await;
+        drop(state);
+
+        // Reopen the same on-disk database, with the old cache still present,
+        // and invoke the exact initializer used by run_with_updater.
+        let db = Database::connect(&database_path).await.unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM feature_documents WHERE namespace='chat-ui-items'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 3);
+        let restarted = initialize_app_state(
+            root.path(),
+            db,
+            CodexManager::test_unavailable(),
+            updater::ServerUpdater::disabled("Test"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(restarted.sequence.load(Ordering::Relaxed), 1);
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM feature_documents WHERE namespace='chat-ui-items'",
+        )
+        .fetch_one(&restarted.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(
+            providers::document(&restarted.db, "provider-chats", "chat")
+                .await
+                .unwrap(),
+            durable_chat
+        );
+        assert!(
+            coding_detail(
+                State(restarted.clone()),
+                AxumPath(("chat".into(), "tool".into()))
+            )
+            .await
+            .is_err()
+        );
+
+        let fresh_tool = json!({"id":"tool","type":"dynamicToolCall","tool":"read_file","status":"completed","arguments":{"path":"fresh.txt"},"contentItems":[{"type":"text","text":"fresh tool output"},{"type":"image","name":"fresh.png","mimeType":"image/png","url":"data:image/png;base64,TkVX"}]});
+        let fresh_items = [
+            json!({"id":"user","type":"userMessage","content":[{"type":"text","text":"fresh user text"}]}),
+            json!({"id":"assistant","type":"agentMessage","text":"fresh assistant text"}),
+            fresh_tool.clone(),
+        ];
+        let mut messages = Vec::new();
+        for item in &fresh_items {
+            let message = coding_ui_message(
+                &restarted,
+                "chat",
+                item,
+                None,
+                "",
+                restarted.sequence.load(Ordering::Relaxed),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let record = providers::document(
+                &restarted.db,
+                "chat-ui-items",
+                &serde_json::to_string(&("chat", &message.id)).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(record["freshness"], 1);
+            assert_eq!(record["item"], *item);
+            messages.push(message);
+        }
+        assert_eq!(messages[0].content, "fresh user text");
+        assert_eq!(messages[1].content, "fresh assistant text");
+        assert!(messages[2].content.contains("completed"));
+        assert_eq!(
+            messages[2].detail_revision,
+            Some(history::revision(&fresh_tool))
+        );
+        assert_ne!(messages[2].detail_revision, old_revision);
+        let summary = serde_json::to_string(&messages).unwrap();
+        assert!(!summary.contains("old "));
+        assert!(!summary.contains("fresh tool output"));
+        assert!(!summary.contains("data:image"));
+        let Json(detail) = coding_detail(
+            State(restarted.clone()),
+            AxumPath(("chat".into(), "tool".into())),
+        )
+        .await
+        .unwrap();
+        assert!(detail.content.contains("completed"));
+        assert!(detail.content.contains("fresh tool output"));
+        assert!(!detail.content.contains("old tool output"));
+        assert_eq!(detail.attachments.len(), 1);
+        assert_eq!(detail.attachments[0].name, "fresh.png");
+        assert!(
+            detail.attachments[0]
+                .url
+                .as_deref()
+                .unwrap()
+                .starts_with("boosted-attachment:")
+        );
+        let Json(attachment) = coding_attachment(
+            State(restarted.clone()),
+            AxumPath(("chat".into(), "tool".into(), 0)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(attachment["dataUrl"], "data:image/png;base64,TkVX");
+
+        // A stale page captured in the new process must still lose to live data.
+        let mut live_tool = fresh_tool.clone();
+        live_tool["contentItems"][0]["text"] = json!("newer live output");
+        coding_ui_message(&restarted, "chat", &live_tool, None, "", 2)
+            .await
+            .unwrap();
+        let protected = coding_ui_message(&restarted, "chat", &fresh_tool, None, "", 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            protected.detail_revision,
+            Some(history::revision(&live_tool))
+        );
+        let Json(detail) =
+            coding_detail(State(restarted), AxumPath(("chat".into(), "tool".into())))
+                .await
+                .unwrap();
+        assert!(detail.content.contains("newer live output"));
+        assert!(!detail.content.contains("fresh tool output"));
+        println!(
+            "RESTART_CACHE old_generation=10000 restarted_generation=1 user_text=fresh assistant_text=fresh tool_status=completed output=fresh attachment=fresh revision=changed stale_page_rejected=true"
+        );
+    }
     #[test]
     fn chat_activity_uses_the_current_turn_and_ignores_stale_approvals() {
         let mut chat = codex_chat(&json!({"id":"thread", "status":{"type":"notLoaded"}}));

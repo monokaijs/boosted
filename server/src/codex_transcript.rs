@@ -458,6 +458,7 @@ pub(crate) fn codex_item_message(
         created_at,
         attachments,
         changes,
+        detail_revision: None,
         questions: item
             .get("questions")
             .filter(|questions| questions.is_array())

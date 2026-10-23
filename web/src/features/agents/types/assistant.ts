@@ -1,7 +1,7 @@
 export type AssistantAction = {
   id: string
   tool: string
-  arguments: Record<string, unknown>
+  arguments?: Record<string, unknown>
   status: "running" | "completed" | "failed"
   result?: string
   chatId?: string
@@ -13,6 +13,7 @@ export type AssistantMessage = {
   role: "user" | "assistant"
   content: string
   createdAt: string
+  sequence?: number
   readAt?: string
   actions?: AssistantAction[]
   assistantName?: string
@@ -50,7 +51,8 @@ export type AssistantAttachment = {
   name: string
   mimeType: string
   size: number
-  dataUrl: string
+  dataUrl?: string
+  downloadPath?: string
 }
 
 export const assistantAttachmentLimits = { count: 10, fileBytes: 5 * 1024 * 1024, totalBytes: 10 * 1024 * 1024 }
@@ -67,6 +69,9 @@ export type AssistantState = {
   updatedAt: string
   profile: AssistantProfile
   messages: AssistantMessage[]
+  olderCursor?: string | null
+  historyAnchor?: string;
+  lastMessageAt?: string | null
   status: "idle" | "running"
   activeGroupId?: string | null
   activeExternalSession?: { id: string; provider: "slack" | "telegram"; chatName: string } | null

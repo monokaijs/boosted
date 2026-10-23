@@ -3,13 +3,14 @@ import { useBoostedApiClient } from '@/lib/api-context';
 import type { CheckboxEdit } from '@/components/assistant-ui/task-markdown';
 import { lazy, Suspense, useRef, useSyncExternalStore } from 'react';
 import { Tabs } from '@base-ui/react/tabs';
-import { CheckCheck, Folder, ListTodo, LoaderCircle, MessageSquare, Pencil, Play, Plus, Square, Trash2 } from 'lucide-react';
+import { CheckCheck, Folder, ListTodo, LoaderCircle, MessageSquare, Pencil, Play, Plus, Trash2 } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { AgentAvatar } from '@/features/agents/components/session/agent-avatar';
 import { GroupAvatar } from './group-avatar';
 import { MarkdownContent } from '@/features/agents/components/session/chat-markdown';
 import { groupChildChats } from './child-chats';
+import { spawnedChatTitle } from '@/features/agents/components/session/conversation-tools';
 import { taskOverlaps } from './state';
 import { memberRoleLabel } from './roles';
 import type { GroupState, GroupTask } from './types';
@@ -25,10 +26,10 @@ function subscribeCompact(callback: () => void) {
   return () => query.removeEventListener('change', callback);
 }
 
-export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy, error, opener, onControl, onEdit, onDelete, onCreateTask, onEditTask, onTaskAction, onOpenChat }: {
+export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy, error, opener, onResume, chats, onEdit, onDelete, onCreateTask, onEditTask, onTaskAction, onOpenChat }: {
   group: GroupState; open: boolean; onOpenChange(open: boolean): void;
   tab: GroupDetailTab; onTabChange(tab: GroupDetailTab): void; busy: boolean; error?: string;
-  opener: React.RefObject<HTMLElement | null>; onControl(): void; onEdit(): void; onDelete(): void; onCreateTask(): void;
+  opener: React.RefObject<HTMLElement | null>; onResume(): void; chats: readonly { id: string; title: string }[]; onEdit(): void; onDelete(): void; onCreateTask(): void;
   onEditTask(task: GroupTask): void; onTaskAction(task: GroupTask, action: 'cancel' | 'retry'): void;
   onOpenChat(chatId: string): void;
 }) {
@@ -47,6 +48,10 @@ export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy
   const name = (id: string | null) => group.members.find((m) => m.id === id)?.profile.name ?? 'Unassigned';
   const openChat = (chatId: string) => { onOpenChange(false); onOpenChat(chatId); };
   const codingChats = groupChildChats(group);
+  const chatTitle = (chatId: string, agentId: string) => {
+    const name = group.members.find((member) => member.id === agentId)?.profile.name.trim();
+    return spawnedChatTitle(chats, chatId, name ? name + '’s chat' : undefined);
+  };
   return <Dialog open={open} onOpenChange={onOpenChange} modal={compact}>
     <DialogContent className="group-details-panel assistant-profile-panel translate-x-0 translate-y-0 flex flex-col gap-0 overflow-hidden p-0" onCloseAutoFocus={(event) => {
       event.preventDefault();
@@ -81,10 +86,10 @@ export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy
               <div><Folder className="size-3.5 shrink-0 text-muted-foreground" /><span>{group.workingDirectory ?? 'No project'}</span></div>
               <button type="button" disabled={!group.stopped || running.length > 0 || busy} onClick={() => closeWith(onEdit)}><Pencil className="size-3.5" /><span>Edit group</span></button>
             </div>
-            {!group.stopped && <p className="mt-2 text-[11px] leading-5 text-muted-foreground">Stop the group to edit its settings. You can also ask the leader in chat.</p>}
-            <Button className="mt-4 w-full" variant="secondary" size="sm" disabled={busy || stopping} onClick={onControl}>
-              {group.stopped || limited ? <Play /> : <Square />}{limited ? 'Continue' : group.stopped ? 'Resume' : 'Stop group'}
-            </Button>
+            {!group.stopped && <p className="mt-2 text-[11px] leading-5 text-muted-foreground">Ask the leader in chat to change the group’s settings.</p>}
+            {(group.stopped || limited) && <Button className="mt-4 w-full" variant="secondary" size="sm" disabled={busy || stopping} onClick={onResume}>
+              <Play />{limited ? 'Continue' : 'Resume'}
+            </Button>}
             <Button className="mt-3 w-full text-destructive" variant="ghost" size="sm" disabled={busy} onClick={() => closeWith(onDelete)}><Trash2 />Delete group</Button>
           </Tabs.Panel>
           <Tabs.Panel value="tasks" className="outline-none">
@@ -105,7 +110,7 @@ export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy
               </div></details>
               {task.error && <p className="text-destructive">{task.error}</p>}
               <footer>
-                {codingChats.filter((execution) => execution.taskId === task.id).map((execution) => <Button key={execution.id} size="sm" variant="ghost" onClick={() => openChat(execution.chatId!)}><MessageSquare />Open {name(execution.agentId)}’s chat</Button>)}
+                {codingChats.filter((execution) => execution.taskId === task.id).map((execution) => <Button key={execution.id} size="sm" variant="ghost" onClick={() => openChat(execution.chatId!)}><MessageSquare />{chatTitle(execution.chatId!, execution.agentId)}</Button>)}
                 {!['completed', 'cancelled'].includes(task.status) && <Button size="sm" variant="ghost" disabled={busy} onClick={() => onTaskAction(task, 'cancel')}>Cancel task</Button>}
                 {(['failed', 'blocked', 'interrupted', 'cancelled'].includes(task.status) || task.status === 'awaiting_review' && task.error) && <Button size="sm" variant="outline" disabled={busy} onClick={() => onTaskAction(task, 'retry')}>Retry{task.status === 'awaiting_review' ? ' review' : ''}</Button>}
                 {group.stopped && !['running', 'awaiting_review', 'completed', 'cancelled'].includes(task.status) && <Button size="sm" variant="ghost" onClick={() => closeWith(() => onEditTask(task))}>Edit assignment</Button>}
@@ -115,7 +120,7 @@ export function GroupDetails({ group, open, onOpenChange, tab, onTabChange, busy
           </Tabs.Panel>
           <Tabs.Panel value="activity" className="outline-none">
             {!codingChats.length && !group.executions.some((execution) => execution.error) && <div className="group-details-empty"><p>No activity yet.</p><small>Spawned coding chats will appear here.</small></div>}
-            {codingChats.length > 0 && <div className="mb-4 flex flex-col items-start gap-1">{codingChats.map((execution) => <Button key={execution.id} size="sm" variant="ghost" onClick={() => openChat(execution.chatId!)}><MessageSquare />Open {name(execution.agentId)}’s chat</Button>)}</div>}
+            {codingChats.length > 0 && <div className="mb-4 flex flex-col items-start gap-1">{codingChats.map((execution) => <Button key={execution.id} size="sm" variant="ghost" onClick={() => openChat(execution.chatId!)}><MessageSquare />{chatTitle(execution.chatId!, execution.agentId)}</Button>)}</div>}
             {group.executions.filter((e) => e.error).map((e) => <p className="mb-2 text-xs leading-5 text-muted-foreground" key={e.id}>{name(e.agentId)}: {e.error}</p>)}
           </Tabs.Panel>
           <Tabs.Panel value="usage" className="outline-none">{open && tab === 'usage' && <Suspense fallback={<p className="text-xs text-muted-foreground">Loading usage…</p>}><GroupUsage embedded groupId={group.id} /></Suspense>}</Tabs.Panel>

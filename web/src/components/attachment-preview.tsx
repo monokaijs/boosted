@@ -16,6 +16,7 @@ type AttachmentPreviewProps = {
   sourceKey?: string;
   load?: () => Promise<AttachmentFile>;
   compact?: boolean;
+  deferImages?: boolean;
   inline?: boolean;
   label?: ReactNode;
   className?: string;
@@ -29,7 +30,7 @@ function safeSource(src?: string) {
   return src && /^(?:https?:\/\/|blob:|data:)/i.test(src) ? src : undefined;
 }
 
-export function AttachmentPreview({ name, mimeType, src, sourceKey, load, compact, inline, label, className, saveCheckbox }: AttachmentPreviewProps) {
+export function AttachmentPreview({ name, mimeType, src, sourceKey, load, compact, deferImages = false, inline, label, className, saveCheckbox }: AttachmentPreviewProps) {
   const layout = useAttachmentPreviewLayout();
   const id = useId();
   const [open, setOpen] = useState(false);
@@ -58,8 +59,8 @@ export function AttachmentPreview({ name, mimeType, src, sourceKey, load, compac
   const type = file?.blob.type || mimeType || "";
   const image = type.startsWith("image/") || (!type && /\.(?:png|jpe?g|webp|gif|svg|avif)$/i.test(name));
   const inlineImage = Boolean(mimeType?.startsWith("image/") || /\.(?:png|jpe?g|webp|gif|svg|avif)$/i.test(name));
-  const shouldLoad = inlineImage || open;
-  const displaySource = url || (!load ? source : undefined);
+  const shouldLoad = (!deferImages && inlineImage) || open;
+  const displaySource = url || (!load && (!deferImages || open) ? source : undefined);
 
   useEffect(() => {
     setFile(undefined);
@@ -159,7 +160,7 @@ export function AttachmentPreview({ name, mimeType, src, sourceKey, load, compac
 
   const fallback = inline
     ? <span className="inline-flex min-w-0 max-w-full items-baseline gap-1 leading-[inherit]">{/\.(?:[cm]?[jt]sx?|css|scss|rs|py|go|java|kt|swift|rb|php|vue|svelte)$/i.test(name) ? <FileCode2 className="relative top-[0.12em] size-[1em] shrink-0 self-start" /> : <FileText className="relative top-[0.12em] size-[1em] shrink-0 self-start" />}<span className="truncate">{label ?? name}</span></span>
-    : <span className="flex max-w-64 items-center gap-2 px-3 py-2 text-xs">{image && !error && !imageError ? <LoaderCircle className="size-4 shrink-0 animate-spin" /> : <FileText className="size-4 shrink-0" />}<span className="truncate">{label ?? name}</span></span>;
+    : <span className="flex max-w-64 items-center gap-2 px-3 py-2 text-xs">{image && loading && !error && !imageError ? <LoaderCircle className="size-4 shrink-0 animate-spin" /> : <FileText className="size-4 shrink-0" />}<span className="truncate">{label ?? name}</span></span>;
 
   return <>
     <button ref={triggerRef} type="button" aria-label={`View ${name}`} title={name} onClick={() => { setZoom(1); setSplit(layout?.claim(id) ?? false); setOpen(true); }} className={cn(inline ? "workspace-file-link inline-flex max-w-full items-baseline align-baseline text-left text-primary outline-none hover:underline focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-ring" : "inline-block max-w-full overflow-hidden rounded-lg border border-border bg-secondary text-left align-middle outline-none hover:border-primary/50 focus-visible:ring-2 focus-visible:ring-ring", className)}>

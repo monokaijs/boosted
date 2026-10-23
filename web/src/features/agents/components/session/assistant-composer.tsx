@@ -1,5 +1,5 @@
 import { useEffect, useImperativeHandle, useRef, useState, type Dispatch, type Ref, type SetStateAction } from "react"
-import { ArrowUp, LoaderCircle, Plus, Square } from "lucide-react"
+import { ArrowUp, LoaderCircle, Plus } from "lucide-react"
 import { machinePreferenceKey } from "@/lib/store"
 import type { AssistantAttachment } from "@/features/agents/types/assistant"
 import { assistantAttachmentsFromFiles, checkAssistantAttachmentLimits, pastedImages } from "@/features/agents/lib/assistant-attachments"
@@ -15,14 +15,11 @@ type AssistantComposerProps = {
   agentId: string
   assistantName: string
   canSend: boolean
-  showStop: boolean
-  stopping: boolean
   onSend: (content: string, attachments: AssistantAttachment[]) => boolean
-  onStop: () => void
   onError: (error: string | null) => void
 }
 
-export function AssistantComposer({ ref, agentId, assistantName, canSend, showStop, stopping, onSend, onStop, onError }: AssistantComposerProps) {
+export function AssistantComposer({ ref, agentId, assistantName, canSend, onSend, onError }: AssistantComposerProps) {
   const [storageKey] = useState(() => machinePreferenceKey(`boosted-agent-draft-${agentId}`))
   const [draft, setDraft] = useState(() => {
     try { return window.sessionStorage.getItem(storageKey) ?? "" }
@@ -65,7 +62,7 @@ export function AssistantComposer({ ref, agentId, assistantName, canSend, showSt
   }, [draft])
 
   const send = () => {
-    if (!canSend || stopping || readingAttachments || !onSend(draft, attachmentsRef.current)) return
+    if (!canSend || readingAttachments || !onSend(draft, attachmentsRef.current)) return
     setDraft("")
     draftRef.current = ""
     saveDraft(storageKey, "")
@@ -106,8 +103,7 @@ export function AssistantComposer({ ref, agentId, assistantName, canSend, showSt
       }} onKeyDown={(event) => {
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send() }
       }} />
-      {showStop ? <button aria-label="Stop assistant" title="Stop work and cancel waiting messages" className="grid size-7 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent disabled:opacity-40" disabled={stopping} type="button" onClick={onStop}>{stopping ? <LoaderCircle className="size-3 animate-spin" /> : <Square className="size-3 fill-current" />}</button> : null}
-      <button aria-label="Send message" className="assistant-message-send grid size-7 shrink-0 place-items-center rounded-full text-white disabled:opacity-40" disabled={(!draft.trim() && !attachments.length) || stopping || readingAttachments || !canSend} type="submit"><ArrowUp className="size-4" /></button>
+      <button aria-label="Send message" className="assistant-message-send grid size-7 shrink-0 place-items-center rounded-full text-white disabled:opacity-40" disabled={(!draft.trim() && !attachments.length) || readingAttachments || !canSend} type="submit"><ArrowUp className="size-4" /></button>
     </form>
   </>
 }

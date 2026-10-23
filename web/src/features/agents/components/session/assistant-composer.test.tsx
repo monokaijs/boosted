@@ -4,7 +4,7 @@ import { machinePreferenceKey } from "@/lib/store"
 import { AssistantComposer } from "./assistant-composer"
 
 const onSend = vi.fn(() => true)
-const props = { agentId: "pock", assistantName: "Pock", canSend: true, showStop: false, stopping: false, onSend, onStop: vi.fn(), onError: vi.fn() }
+const props = { agentId: "pock", assistantName: "Pock", canSend: true, onSend, onError: vi.fn() }
 const draftKey = machinePreferenceKey("boosted-agent-draft-pock")
 
 beforeEach(() => { vi.clearAllMocks(); window.sessionStorage.clear() })

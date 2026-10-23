@@ -74,15 +74,16 @@ function WorkspaceFileLink({ node: _node, href, children, onClick: _onClick, ...
   return <AttachmentPreview inline name={workspaceFileName(path)} sourceKey={`${api.profileId}:${scope.kind}:${scope.id}:${path}`} load={() => api.workspaceFile(scope, path)} saveCheckbox={scope.kind === "task" && !readOnly ? (edit) => api.toggleMarkdownCheckbox(`/tasks/${encodeURIComponent(scope.id)}`, "file", path, edit) : undefined} label={label} />;
 }
 
-export function WorkspaceAttachment({ attachment, compact }: { attachment: MessageAttachment; compact?: boolean }) {
+export function WorkspaceAttachment({ attachment, compact, deferImages = true }: { attachment: MessageAttachment; compact?: boolean; deferImages?: boolean }) {
   const api = useBoostedApiClient();
   const scope = useContext(WorkspaceFileContext);
   const readOnly = useContext(WorkspaceReadOnlyContext);
   const { name, mimeType, path, url, uploadId } = attachment;
-  return <AttachmentPreview name={name} mimeType={mimeType} src={url} compact={compact}
+  const detailPath = url?.startsWith("boosted-attachment:") ? url.slice("boosted-attachment:".length) : undefined;
+  return <AttachmentPreview deferImages={deferImages} name={name} mimeType={mimeType} src={detailPath ? undefined : url} compact={compact}
     saveCheckbox={!uploadId && scope?.kind === "task" && path && !readOnly ? (edit) => api.toggleMarkdownCheckbox(`/tasks/${encodeURIComponent(scope.id)}`, "file", path, edit) : undefined}
     sourceKey={`${api.profileId}:${uploadId ?? (path ? `${scope?.kind}:${scope?.id}:${path}` : url)}`}
-    load={uploadId ? () => api.codexAttachment(uploadId) : scope && path ? () => api.workspaceFile(scope, path) : undefined} />;
+    load={detailPath ? async () => { const detail = await api.featureRequest<{ dataUrl: string }>(detailPath); return { blob: await (await fetch(detail.dataUrl)).blob() }; } : uploadId ? () => api.codexAttachment(uploadId) : scope && path ? () => api.workspaceFile(scope, path) : undefined} />;
 }
 
 type MarkdownImageProps = ComponentPropsWithoutRef<"img"> & { node?: unknown };

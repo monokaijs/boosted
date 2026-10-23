@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { AssistantState } from "@/features/agents/types/assistant"
 import type { SessionShellState } from "./session-shell"
 
-const apiMock = vi.hoisted(() => ({ read: vi.fn(), send: vi.fn(), accounts: vi.fn() }))
+const apiMock = vi.hoisted(() => ({ read: vi.fn(), send: vi.fn(), stop: vi.fn(), accounts: vi.fn() }))
 const renderWork = vi.hoisted(() => ({ markdown: vi.fn(), profile: vi.fn() }))
-vi.mock("@/features/agents/lib/api-client", () => ({ apiClient: { assistant: { read: apiMock.read, send: apiMock.send }, providerAccounts: { list: apiMock.accounts } } }))
+vi.mock("@/features/agents/lib/api-client", () => ({ apiClient: { assistant: { read: apiMock.read, send: apiMock.send, stop: apiMock.stop }, providerAccounts: { list: apiMock.accounts } } }))
 vi.mock("./assistant-profile-panel", () => ({ AssistantProfilePanel: () => { renderWork.profile(); return null } }))
 vi.mock("./chat-markdown", () => ({ MarkdownContent: ({ content }: { content: string }) => { renderWork.markdown(content); return <p>{content}</p> } }))
 
@@ -183,8 +183,8 @@ it("hides tool-only history and live tool updates without changing the stored st
   const { container } = render(<AssistantPage shell={shell} agentId="pock" />)
   await screen.findByText("What should we work on?")
   expect(container.querySelector("article, time, details, pre, .assistant-tool-panel")).toBeNull()
-  expect(screen.queryByRole("button", { name: /tools?|Open chat/ })).not.toBeInTheDocument()
-  expect(queryClient.getQueryData(["assistant-state", "pock"])).toBe(state)
+  expect(screen.queryByRole("button", { name: /tools?|New chat/ })).not.toBeInTheDocument()
+  expect(queryClient.getQueryData<AssistantState>(["assistant-state", "pock"])?.messages).toBe(state.messages)
   act(() => window.dispatchEvent(new CustomEvent("boosted:assistant-updated", { detail: {
     ...state, updatedAt: "2026-10-02T00:00:04.000Z", messages: [...messages,
       { id: "avatar", role: "assistant", content: "", createdAt: initial.createdAt, actions: [{ id: "avatar-action", tool: "generate_avatar", arguments: {}, status: "running" }] },
@@ -215,7 +215,7 @@ it("preserves normal messages, attachments and delivery while hiding mixed tool 
   expect(screen.getByText("Read")).toBeInTheDocument()
   expect(container.querySelectorAll("article")).toHaveLength(4)
   expect(container.querySelector("details, pre, .assistant-tool-panel")).toBeNull()
-  expect(screen.queryByRole("button", { name: /tools?|Open chat/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole("button", { name: /tools?|New chat/ })).not.toBeInTheDocument()
   expect(messages[3].actions).toBe(actions)
   expect(queryClient.getQueryData<AssistantState>(["assistant-state", "pock"])?.messages).toBe(messages)
 })
@@ -225,7 +225,7 @@ it("shows direct child-chat navigation only after creation or fork completes", a
   const receipt: AssistantState["messages"][number] = { id: "receipt", role: "assistant", content: "", createdAt: initial.createdAt, actions: [action] }
   apiMock.read.mockResolvedValue({ ...initial, messages: [...initial.messages, receipt] })
   const { container } = await renderConversation()
-  expect(screen.queryByRole("button", { name: "Open chat" })).not.toBeInTheDocument()
+  expect(screen.queryByRole("button", { name: "New chat" })).not.toBeInTheDocument()
   act(() => window.dispatchEvent(new CustomEvent("boosted:assistant-updated", { detail: {
     ...initial, updatedAt: "2026-10-02T00:00:04.000Z", messages: [...initial.messages, { ...receipt, actions: [
       { ...action, status: "completed", chatId: "child" },
@@ -233,12 +233,59 @@ it("shows direct child-chat navigation only after creation or fork completes", a
       { ...action, id: "read", tool: "read_chat", status: "completed", chatId: "existing" },
     ] }],
   } })))
-  const links = screen.getAllByRole("button", { name: "Open chat" })
+  const links = screen.getAllByRole("button", { name: "New chat" })
   expect(links).toHaveLength(2)
   fireEvent.click(links[0])
-  expect(shell.openSidebarChat).toHaveBeenCalledWith({ id: "child", title: "Codex chat" })
+  expect(shell.openSidebarChat).toHaveBeenCalledWith({ id: "child", title: "New chat" })
   fireEvent.click(links[1])
-  expect(shell.openSidebarChat).toHaveBeenCalledWith({ id: "forked-child", title: "Codex chat" })
+  expect(shell.openSidebarChat).toHaveBeenCalledWith({ id: "forked-child", title: "New chat" })
   expect(container.querySelector("details, pre, .assistant-tool-panel")).toBeNull()
   expect(screen.queryByRole("button", { name: /\d+ tools?/ })).not.toBeInTheDocument()
+})
+
+it("updates the actual spawned chat title and navigation in the agent transcript", async () => {
+  apiMock.read.mockResolvedValue({ ...initial, messages: [...initial.messages, {
+    id: "spawn", role: "assistant", content: "", createdAt: initial.createdAt,
+    actions: [{ id: "create", tool: "create_chat", arguments: { title: "Requested title" }, status: "completed", chatId: "child" }],
+  }] })
+  const currentShell = { ...shell, chats: [{ id: "child", title: "Build search", status: "RUNNING" }] }
+  const { rerender, container } = render(<AssistantPage shell={currentShell} agentId="pock" />)
+  fireEvent.click(await screen.findByRole("button", { name: "Build search" }))
+  expect(shell.openSidebarChat).toHaveBeenLastCalledWith({ id: "child", title: "Build search" })
+  rerender(<QueryClientProvider client={queryClient}><AssistantPage shell={{ ...currentShell, chats: [{ ...currentShell.chats[0], title: "Search complete" }] }} agentId="pock" /></QueryClientProvider>)
+  expect(screen.queryByRole("button", { name: "Build search" })).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole("button", { name: "Search complete" }))
+  expect(shell.openSidebarChat).toHaveBeenLastCalledWith({ id: "child", title: "Search complete" })
+  expect(container.querySelector("details, pre, .assistant-tool-panel")).toBeNull()
+})
+
+it.each(["running", "queued", "group", "external"])("allows follow-ups with no Stop during %s work and protects only the in-flight send", async (kind) => {
+  const working: AssistantState = { ...initial, status: kind === "queued" ? "idle" : "running", activity: "thinking",
+    ...(kind === "group" ? { activeGroupId: "g" } : {}),
+    ...(kind === "external" ? { activeExternalSession: { provider: "slack", chatName: "Team", id: "external" } } : {}),
+    messages: [...initial.messages, { id: "waiting", role: "user", content: "Keep working", delivery: "queued", createdAt: initial.createdAt }],
+  }
+  apiMock.read.mockResolvedValue(working)
+  let finish!: (next: AssistantState) => void
+  apiMock.send.mockImplementationOnce(() => new Promise<AssistantState>((resolve) => { finish = resolve }))
+  await renderConversation()
+  const input = screen.getByRole("textbox", { name: "Message Pock" })
+  expect(screen.queryByRole("button", { name: /stop/i })).not.toBeInTheDocument()
+  fireEvent.change(input, { target: { value: "Also check accessibility" } })
+  expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled()
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }))
+  await screen.findByText("Sending…")
+  fireEvent.change(input, { target: { value: "Keep this next draft" } })
+  expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled()
+  fireEvent.keyDown(input, { key: "Enter" })
+  expect(input).toHaveValue("Keep this next draft")
+  expect(apiMock.send).toHaveBeenCalledTimes(1)
+  expect(apiMock.send).toHaveBeenCalledWith("pock", expect.objectContaining({ content: "Also check accessibility" }))
+  await act(async () => finish({ ...working, updatedAt: "2026-10-02T00:00:05.000Z" }))
+  expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled()
+  expect(screen.queryByRole("button", { name: /stop/i })).not.toBeInTheDocument()
+  fireEvent.keyDown(input, { key: "Enter" })
+  await act(async () => { await Promise.resolve() })
+  expect(apiMock.send).toHaveBeenCalledTimes(2)
+  expect(apiMock.stop).not.toHaveBeenCalled()
 })

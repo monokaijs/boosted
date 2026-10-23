@@ -17,6 +17,8 @@ import { useBoostedApiClient } from "@/lib/api-context";
 import { machinePreferenceKey, useAppStore } from "@/lib/store";
 import { openExternalUrl } from "@/lib/runtime";
 import { useWorkspaceState } from "@/lib/workspace-state";
+import { reconcileTail, retainConcurrentHistory } from "@/lib/history";
+import { useOlderHistory } from "@/hooks/use-older-history";
 import { conversationQueryOptions } from "@/lib/query-client";
 import { taskStatusMeta } from "@/lib/status";
 import type { AssistantSummary } from "@/features/agents/types/assistant";
@@ -109,17 +111,24 @@ function questionsFromEvent(event: TaskEvent | undefined): CodexQuestion[] {
 
 function ToolEvent({ event }: { event: TaskEvent }) {
   const [open, setOpen] = useState(false);
+  const client = useBoostedApiClient();
+  const revision = typeof event.payload.detailRevision === "string" ? event.payload.detailRevision : undefined;
+  const query = useQuery({ queryKey: ["task-event-detail", client.profileId, event.taskId, event.id, revision], queryFn: ({ signal }) => client.taskEventDetail(event.taskId, event.id, signal), enabled: open && Boolean(revision), staleTime: Infinity, gcTime:120_000, retry:false });
+  const payload = query.data?.payload ?? event.payload;
   const isCommand = event.kind === "command" || event.kind === "command_output";
   const Icon = isCommand ? TerminalSquare : FileDiff;
-  const title = isCommand ? String(event.payload.command ?? "Command output") : String(event.payload.path ?? "Files changed");
-  const detail = String(event.payload.output ?? event.payload.diff ?? event.payload.summary ?? "");
+  const title = isCommand ? String(event.payload.label ?? event.payload.command ?? "Command output") : String(event.payload.label ?? event.payload.path ?? "Files changed");
+  const detail = String(payload.output ?? payload.diff ?? payload.summary ?? "");
   return (
     <div className="my-2 overflow-hidden rounded-md border border-border bg-background/35">
       <button className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-accent/50" onClick={() => setOpen(!open)}>
         {open ? <ChevronDown className="size-3.5 text-muted-foreground" /> : <ChevronRight className="size-3.5 text-muted-foreground" />}
         <Icon className="size-3.5 text-muted-foreground" /><span className="min-w-0 flex-1 truncate font-mono">{title}</span>
-        {event.payload.exitCode !== undefined && <Badge variant={event.payload.exitCode === 0 ? "success" : "danger"}>exit {String(event.payload.exitCode)}</Badge>}
+        {event.payload.exitCode != null && <Badge variant={event.payload.exitCode === 0 ? "success" : "danger"}>exit {String(event.payload.exitCode)}</Badge>}
       </button>
+      {open && revision && query.isLoading && <p role="status" className="p-3 text-xs">Loading tool details…</p>}
+      {open && query.error && <p role="alert" className="p-3 text-xs">{query.error.message} <button type="button" onClick={() => void query.refetch()}>Retry tool details</button></p>}
+      {open && revision && query.data && payload.command ? <pre className="px-3 text-xs">{String(payload.command)}</pre> : null}
       {open && detail && <pre className="max-h-72 overflow-auto border-t border-border p-3 font-mono text-[11px] leading-5 text-muted-foreground whitespace-pre-wrap">{detail}</pre>}
     </div>
   );
@@ -349,11 +358,19 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
   const task = useQuery({
     ...conversationQueryOptions,
     queryKey: ["task", selectedTaskId],
-    queryFn: () => api.task(selectedTaskId!),
+    queryFn: () => client.task(selectedTaskId!),
     enabled: Boolean(selectedTaskId),
     refetchInterval: (query) => query.state.data?.status === "planning" || query.state.data?.status === "running" ? 1_000 : false,
   });
-  const events = useQuery({ ...conversationQueryOptions, queryKey: ["events", selectedTaskId], queryFn: () => api.taskEvents(selectedTaskId!), enabled: Boolean(selectedTaskId), refetchInterval: 3_000 });
+  const transcript = useRef<HTMLDivElement>(null);
+  type TaskHistory = Awaited<ReturnType<typeof client.taskHistory>>;
+  const events = useQuery({ ...conversationQueryOptions, queryKey: ["events", selectedTaskId], queryFn: async ({ signal }) => {
+    const next = await client.taskHistory(selectedTaskId!, undefined, signal);
+    const current = queryClient.getQueryData<TaskHistory>(["events",selectedTaskId]);
+    const refreshed = await reconcileTail(current,next,(cursor)=>client.taskHistory(selectedTaskId!,cursor,signal));
+    return retainConcurrentHistory(current,queryClient.getQueryData<TaskHistory>(["events",selectedTaskId]),refreshed);
+  }, enabled: Boolean(selectedTaskId), refetchInterval: 3_000 });
+  const history = useOlderHistory({ queryKey:["events",selectedTaskId],page:events.data,load:(cursor)=>client.taskHistory(selectedTaskId!,cursor),scroller:()=>transcript.current?.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]") ?? null });
   const agents = useQuery({ queryKey: ["agents"], queryFn: () => client.featureRequest<AssistantSummary[]>("/agents"), refetchInterval: 5_000 });
   const send = useMutation({
     mutationFn: () => api.sendMessage(selectedTaskId!, message.trim()),
@@ -372,13 +389,13 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
     onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] }); void queryClient.invalidateQueries({ queryKey: ["tasks"] }); },
   });
   const stop = useMutation({ mutationFn: () => api.stopTask(selectedTaskId!), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["task", selectedTaskId] }) });
-  const ordered = useMemo(() => [...(events.data ?? [])].sort((a, b) => a.id - b.id), [events.data]);
+  const ordered = useMemo(() => [...(events.data?.messages ?? [])].sort((a, b) => a.id - b.id), [events.data]);
 
   if (!selectedTaskId) return <div className="empty-state"><ListTodo className="size-8" /><p>Select a task to open its details and chat.</p></div>;
   const meta = task.data ? taskStatusMeta[task.data.status] : undefined;
   const StatusIcon = meta?.icon;
   const active = task.data?.status === "planning" || task.data?.status === "running";
-  const questionEvent = task.data?.status === "needs_input" ? [...ordered].reverse().find((event) => questionsFromEvent(event).length > 0) : undefined;
+  const questionEvent = task.data?.status === "needs_input" ? events.data?.pendingQuestion ?? [...ordered].reverse().find((event) => questionsFromEvent(event).length > 0) : undefined;
   const pendingQuestions = questionsFromEvent(questionEvent);
   const documentStep = task.data?.plan ? markdownPlanStep(task.data.plan) : undefined;
   const planMarkdown = task.data?.plan?.markdown?.trim() || documentStep?.step;
@@ -439,18 +456,21 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
           {markComplete.error && <p role="alert" className="mt-2 text-xs text-destructive">{markComplete.error.message}</p>}
         </header>
       )}
+      <div ref={transcript} className="flex min-h-0 flex-1 flex-col">
       <ScrollArea className="chat-scroll min-h-0 flex-1 px-4">
         <div className="mx-auto max-w-3xl py-3">
           {task.data && <section className="mb-4 px-1 pb-2">{gitlabSource
             ? <GitlabMarkdown key={`${selectedTaskId}:gitlab-description`} taskId={selectedTaskId} issueUrl={gitlabSource.externalUrl!} className="aui-markdown text-xs" content={task.data.description} />
             : <TaskMarkdown key={`${selectedTaskId}:description`} className="aui-markdown text-xs" content={task.data.description} saveCheckbox={active ? undefined : (edit) => saveCheckbox("description", undefined, edit)} components={workspaceFileMarkdownComponents} urlTransform={workspaceMarkdownUrlTransform} />}
-            {task.data.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{task.data.attachments.map((attachment) => <AttachmentPreview key={attachment.id} name={attachment.name} mimeType={attachment.mimeType} sourceKey={`${task.data!.id}:${attachment.id}`} load={() => api.taskAttachment(task.data!.id, attachment.id)} />)}</div>}</section>}
+            {task.data.attachments.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{task.data.attachments.map((attachment) => <AttachmentPreview deferImages key={attachment.id} name={attachment.name} mimeType={attachment.mimeType} sourceKey={`${task.data!.id}:${attachment.id}`} load={() => api.taskAttachment(task.data!.id, attachment.id)} />)}</div>}</section>}
           {gitlabSource && <GitlabDiscussion taskId={selectedTaskId} issueUrl={gitlabSource.externalUrl!} />}
           <div className="mb-1 flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground"><span>Comments</span><span className="h-px flex-1 bg-border" /></div>
+          {history.hasOlder && <button type="button" className="text-xs text-muted-foreground underline" disabled={history.loading} onClick={()=>void history.loadOlder()}>{history.loading ? "Loading earlier messages…" : "Load earlier messages"}</button>}
+          {(history.error || events.error) && <p role="alert" className="text-xs text-destructive">{history.error ?? events.error?.message} <button type="button" onClick={()=>history.error ? void history.loadOlder() : void events.refetch()}>Retry messages</button></p>}
           {ordered.length === 0 && events.isLoading && <div className="py-16 text-center text-xs text-muted-foreground">Loading comments…</div>}
-          {ordered.filter((event) => !event.payload.replyTo || !ordered.some((parent) => parent.payload.commentId === event.payload.replyTo)).map((event) => <div key={event.id}>
+          {ordered.filter((event) => !event.payload.replyTo || !ordered.some((parent) => parent.payload.commentId === event.payload.replyTo)).map((event) => <div key={event.id} data-history-id={event.id}>
             <TimelineEvent event={event} saveCheckbox={!active && ["user_message", "agent_message"].includes(event.kind) ? (edit) => saveCheckbox("event", String(event.id), edit) : undefined} onReply={replyToAgent} />
-            {typeof event.payload.commentId === "string" && <div className="task-comment-replies">{ordered.filter((reply) => reply.payload.replyTo === event.payload.commentId).map((reply) => <TimelineEvent key={reply.id} event={reply} onReply={replyToAgent} />)}</div>}
+            {typeof event.payload.commentId === "string" && <div className="task-comment-replies">{ordered.filter((reply) => reply.payload.replyTo === event.payload.commentId).map((reply) => <div key={reply.id} data-history-id={reply.id}><TimelineEvent event={reply} onReply={replyToAgent} /></div>)}</div>}
           </div>)}
           {questionEvent && pendingQuestions.length > 0 && <div className="my-3"><CodexQuestionForm requestId={`${selectedTaskId}:${questionEvent.id}`} questions={pendingQuestions} onSubmit={async (answers) => { await answerQuestions.mutateAsync(answers); }} /></div>}
           {task.data?.plan && <section className="my-4 px-1 py-3" aria-label="Task plan">
@@ -469,6 +489,7 @@ export function TaskPanel({ onClose }: { onClose?: () => void } = {}) {
           {active && <div className="flex items-center gap-2 py-3 text-xs text-muted-foreground"><LoaderCircle className="size-3.5 animate-spin text-primary" />Work is in progress. Open the linked chat to follow along.</div>}
         </div>
       </ScrollArea>
+      </div>
       {pendingQuestions.length === 0 && <form className="chat-composer-shell bg-background/25 p-3" onSubmit={submit}>
         <AgentMentionComposer inputRef={commentInput} value={message} onChange={setMessage} onSend={sendMessage} agents={agents.data ?? []} pending={send.isPending} />
         {agents.error && <p role="alert" className="mx-auto mt-1.5 max-w-3xl text-xs text-destructive">Unable to load agents. <button type="button" onClick={() => void agents.refetch()}>Retry</button></p>}
